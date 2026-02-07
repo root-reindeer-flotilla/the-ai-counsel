@@ -266,7 +266,7 @@ curl https://your-endpoint.com/v1/models -H "Authorization: Bearer $API_KEY"
 
 **Rate Limit Warnings**:
 - Formula: `(council_members × 2) + 2` requests per council run
-- OpenRouter free tier: 20 RPM, 50 requests/day
+- OpenRouter free models: 50 requests/day (without credits); paid OpenRouter has higher limits
 - Groq: 30 RPM, 14,400 requests/day
 
 **Storage**: `data/settings.json`

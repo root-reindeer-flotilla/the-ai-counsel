@@ -758,20 +758,19 @@ export default function Settings({ onClose, ollamaStatus, onRefreshOllama, initi
       openRouterFreeCount++;
     }
 
-    // Logic for OpenRouter Warnings
-    // OpenRouter: 20 RPM, 50 RPD (without credits)
+    // Logic for OpenRouter free-tier warnings (50/day without credits; paid OpenRouter has higher limits)
     if (openRouterFreeCount > 0) {
-      if (totalRequestsPerRun > 10 && openRouterFreeCount >= 3) { // 10 requests is approx half of 20 RPM
-        return {
-          type: 'error',
-          title: 'High Rate Limit Risk (OpenRouter)',
-          message: `Your council configuration generates ~${totalRequestsPerRun} requests per run, with ${openRouterFreeCount} free OpenRouter models. This may exceed the 20 requests/minute limit. Consider using Groq or Ollama for some members.`
-        };
-      } else if (openRouterFreeCount === totalRequestsPerRun) { // All requests from free OpenRouter
+      if (openRouterFreeCount === totalRequestsPerRun) {
         return {
           type: 'warning',
-          title: 'Daily Limit Caution (OpenRouter)',
-          message: 'Free OpenRouter models are limited to 50 requests/day (without credits). Use Groq (14k/day) or Ollama for unlimited usage.'
+          title: 'Daily Limit (Free OpenRouter)',
+          message: 'Free OpenRouter models are limited to 50 requests/day (without credits). Use paid OpenRouter, Groq (14k/day), or Ollama for higher usage.'
+        };
+      } else if (openRouterFreeCount >= 3) {
+        return {
+          type: 'warning',
+          title: 'Free OpenRouter Usage',
+          message: `Your council uses ${openRouterFreeCount} free OpenRouter models (~${totalRequestsPerRun} requests per run). Free models: 50 requests/day without credits. Paid/groq/ollama have higher limits.`
         };
       }
     }

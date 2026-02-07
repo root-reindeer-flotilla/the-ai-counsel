@@ -137,8 +137,16 @@ export default function CouncilGrid({
         gridClass += ' layout-6-members';
     } else if (memberCount === 7) {
         gridClass += ' layout-7-members';
+    } else if (memberCount === 8) {
+        gridClass += ' layout-8-members';
+    } else if (memberCount === 9) {
+        gridClass += ' layout-9-members';
+    } else if (memberCount === 10) {
+        gridClass += ' layout-10-members';
+    } else if (memberCount === 11) {
+        gridClass += ' layout-11-members';
     } else {
-        gridClass += ' layout-8-members'; // 8 or more
+        gridClass += ' layout-12-members'; // 12 (max)
     }
 
     return (

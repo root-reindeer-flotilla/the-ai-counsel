@@ -1,8 +1,10 @@
 """FastAPI backend for LLM Council."""
 
+from pathlib import Path
+
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 from typing import List, Dict, Any, Optional
 import os
@@ -543,10 +545,10 @@ async def update_app_settings(request: UpdateSettingsRequest):
                 status_code=400,
                 detail="At least two council models must be selected"
             )
-        if len(request.council_models) > 8:
+        if len(request.council_models) > 12:
             raise HTTPException(
                 status_code=400,
-                detail="Maximum of 8 council models allowed"
+                detail="Maximum of 12 council models allowed"
             )
         updates["council_models"] = request.council_models
 
@@ -978,6 +980,24 @@ async def test_openrouter_api(request: TestOpenRouterRequest):
         return {"success": False, "message": "Request timed out"}
     except Exception as e:
         return {"success": False, "message": str(e)}
+
+
+# SPA fallback: serve frontend build so refresh/direct URLs don't 404
+_SPA_DIST = Path(__file__).resolve().parent.parent / "frontend" / "dist"
+
+
+@app.get("/{full_path:path}")
+async def serve_spa(full_path: str):
+    """Serve built frontend (index.html or static file). Only used when no API route matched."""
+    if full_path.startswith("api/"):
+        raise HTTPException(status_code=404, detail="Not found")
+    if not _SPA_DIST.exists():
+        raise HTTPException(status_code=404, detail="Not found")
+    # Try to serve a static file (e.g. /assets/foo.js, /vite.svg)
+    file_path = _SPA_DIST / full_path
+    if full_path and file_path.is_file():
+        return FileResponse(file_path)
+    return FileResponse(_SPA_DIST / "index.html")
 
 
 if __name__ == "__main__":

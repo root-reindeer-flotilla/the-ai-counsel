@@ -248,7 +248,7 @@ export default function CouncilConfig({
                             <div className="info-tooltip-container">
                                 <span className="info-icon">i</span>
                                 <div className="info-tooltip">
-                                    Free OpenRouter models are limited to 20 requests/minute and 50/day (without credits). Large councils generate many requests at once.
+                                    Free OpenRouter models have a 50 requests/day limit (without credits). Paid OpenRouter and other providers have higher limits.
                                 </div>
                             </div>
                         </label>
@@ -331,12 +331,12 @@ export default function CouncilConfig({
                         type="button"
                         className="add-member-button"
                         onClick={handleAddCouncilMember}
-                        disabled={filteredModels.length === 0 || councilModels.length >= 8}
+                        disabled={filteredModels.length === 0 || councilModels.length >= 12}
                     >
                         + Add Council Member
                     </button>
                     <p className="section-description" style={{ marginTop: '8px', marginBottom: '0' }}>
-                        Max 8 members. With 6+ members, requests are processed in batches.
+                        Max 12 members. With 6+ members, requests are processed in batches of 3.
                     </p>
                     {councilModels.length >= 6 && (
                         <div className="council-size-warning">

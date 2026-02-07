@@ -16,6 +16,40 @@ BROKEN_MODELS = {
     "moonshotai/kimi-k2:free",    # Returns 404 - superseded by kimi-k2-0905
 }
 
+OPENROUTER_MODELS_URL = "https://openrouter.ai/api/v1/models"
+
+
+def _strip_openrouter_prefix(model_id: str) -> str:
+    """Ensure we never send 'openrouter:...' to the OpenRouter API."""
+    if not model_id:
+        return model_id
+    return model_id.removeprefix("openrouter:")
+
+
+async def _resolve_to_canonical_slug(model_id: str) -> Optional[str]:
+    """Resolve OpenRouter model id to canonical_slug (required for chat/completions)."""
+    model_id = _strip_openrouter_prefix(model_id)
+    api_key = get_openrouter_api_key()
+    if not api_key:
+        return None
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            response = await client.get(
+                OPENROUTER_MODELS_URL,
+                headers={"Authorization": f"Bearer {api_key}"},
+            )
+            if response.status_code != 200:
+                return None
+            data = response.json()
+            for item in data.get("data", []):
+                rid = item.get("id") or ""
+                rslug = item.get("canonical_slug") or rid
+                if rid == model_id or rslug == model_id:
+                    return rslug
+    except Exception:
+        pass
+    return None
+
 
 async def query_model(
     model: str,
@@ -35,6 +69,7 @@ async def query_model(
     Returns:
         Response dict with 'content', optional 'reasoning_details', and 'error' if failed
     """
+    model = _strip_openrouter_prefix(model or "")
     api_key = get_openrouter_api_key()
     headers = {
         "Authorization": f"Bearer {api_key}",
@@ -44,7 +79,9 @@ async def query_model(
     payload = {
         "model": model,
         "messages": messages,
-        "temperature": temperature
+        "temperature": temperature,
+        # Disable OpenRouter's native web search; we do our own search and inject context in the prompt.
+        "plugins": [{"id": "web", "enabled": False}],
     }
 
     last_error = None
@@ -66,13 +103,39 @@ async def query_model(
                     await asyncio.sleep(retry_delay)
                     continue
 
+                # Handle 404: OpenRouter may require canonical_slug instead of id; resolve and retry once
+                if response.status_code == 404:
+                    canonical = await _resolve_to_canonical_slug(model)
+                    if canonical and canonical != model:
+                        payload["model"] = canonical
+                        response = await client.post(
+                            OPENROUTER_API_URL,
+                            headers=headers,
+                            json=payload
+                        )
+                        if response.status_code == 200:
+                            data = response.json()
+                            message = data["choices"][0]["message"]
+                            return {
+                                "content": message.get("content"),
+                                "reasoning": message.get("reasoning"),
+                                "reasoning_details": message.get("reasoning_details"),
+                                "error": None,
+                            }
+                    print(f"Model not found (404) on OpenRouter: {model}")
+                    return {
+                        "content": None,
+                        "error": "model_not_found",
+                        "error_message": f"Model '{model}' not found on OpenRouter.",
+                    }
+
                 # Handle other client errors without retry
                 if response.status_code == 400:
                     error_detail = "bad_request"
                     try:
                         error_data = response.json()
                         error_detail = error_data.get("error", {}).get("message", "bad_request")
-                    except:
+                    except Exception:
                         pass
                     print(f"Bad request for {model}: {error_detail}")
                     return {
@@ -142,6 +205,9 @@ async def query_models_parallel(
     """
     import asyncio
 
+    # Normalize: never send "openrouter:..." to the API
+    models = [_strip_openrouter_prefix(m or "") for m in models]
+
     # For 6+ models, use batching to avoid rate limits
     BATCH_SIZE = 3
     if len(models) >= 6:
@@ -186,7 +252,7 @@ async def fetch_models() -> List[Dict[str, Any]]:
     """
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
-            response = await client.get("https://openrouter.ai/api/v1/models")
+            response = await client.get(OPENROUTER_MODELS_URL)
             if response.status_code != 200:
                 print(f"Failed to fetch OpenRouter models: {response.status_code}")
                 return []
@@ -194,10 +260,11 @@ async def fetch_models() -> List[Dict[str, Any]]:
             data = response.json()
             models = []
             for item in data.get("data", []):
-                model_id = item.get("id", "")
-                
-                # Skip known broken models
-                if model_id in BROKEN_MODELS:
+                raw_id = item.get("id", "")
+                model_id = item.get("canonical_slug") or raw_id
+                if not model_id:
+                    continue
+                if raw_id in BROKEN_MODELS:
                     continue
                 
                 # Determine if free based on pricing

@@ -168,11 +168,11 @@ Fine-tune creativity vs consistency:
 ### Additional Features
 
 - **Live Progress Tracking**: See each model respond in real-time
-- **Council Sizing**: adjust council size from 2 to 8
+- **Council Sizing**: adjust council size from 2 to 12
 - **Abort Anytime**: Cancel in-progress requests
 - **Conversation History**: All conversations saved locally
 - **Customizable Prompts**: Edit Stage 1, 2, and 3 system prompts
-- **Rate Limit Warnings**: Alerts when your config may hit API limits (when >5 council members)
+- **Rate Limit Warnings**: Alerts when using many free OpenRouter models (50/day limit) or high Groq usage
 - **"I'm Feeling Lucky"**: Randomize your council composition
 - **Import & Export**:  backup and share your favorite council configurations, system prompts, and settings
 
@@ -294,14 +294,14 @@ Connect to any OpenAI-compatible API:
 ### Council Configuration
 
 1. **Enable Model Sources**: Toggle which providers appear in model selection
-2. **Select Council Members**: Choose 2-8 models for your council
+2. **Select Council Members**: Choose 2-12 models for your council
 3. **Select Chairman**: Pick a model to synthesize the final answer
 4. **Adjust Temperature**: Use sliders for creativity control
 
 **Tips:**
 - Mix different model families for diverse perspectives
 - Use faster models (Groq, Ollama) for large councils
-- Free OpenRouter models have rate limits (20/min, 50/day)
+- Free OpenRouter models: 50 requests/day (without credits); paid has higher limits
 
 ### Search Providers
 
@@ -412,7 +412,7 @@ data/
 - Try Tavily/Brave instead, or set `full_content_results` to 0
 
 **Rate limit errors (OpenRouter)**
-- Free models: 20 requests/min, 50/day
+- Free models: 50 requests/day (without credits); paid OpenRouter has higher limits
 - Consider using Groq (14,400/day) or Ollama (unlimited)
 - Reduce council size for free tier usage
 
