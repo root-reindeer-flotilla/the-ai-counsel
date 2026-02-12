@@ -154,8 +154,6 @@ async def query_model(
     }
     if _is_openrouter_gemini3_reasoning_target(model):
         payload["reasoning"] = {"effort": "high"}
-        # Gemini 3: Google recommends temperature 1.0; other values can cause looping/degraded reasoning.
-        payload["temperature"] = 1.0
     if transforms is not None:
         payload["transforms"] = transforms
 

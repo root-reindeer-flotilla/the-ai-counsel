@@ -21,10 +21,6 @@ class GoogleProvider(LLMProvider):
             
         model = model_id.removeprefix("google:")
 
-        # Gemini 3: Google recommends temperature 1.0; other values can cause looping/degraded reasoning.
-        if any(x in model for x in ("gemini-3-pro", "gemini-3-flash")):
-            temperature = 1.0
-
         # Convert messages to Gemini format
         contents = []
         system_instruction = None

@@ -8,11 +8,34 @@ const getApiBase = () => {
   if (import.meta.env.VITE_API_URL) {
     return import.meta.env.VITE_API_URL;
   }
-  const hostname = window.location.hostname;
+  const hostname =
+    typeof window !== 'undefined' && window.location?.hostname
+      ? window.location.hostname
+      : 'localhost';
   return `http://${hostname}:8001`;
 };
 
 const API_BASE = getApiBase();
+
+export const parseSseDataChunk = (buffer, chunk, onEvent) => {
+  const text = `${buffer}${chunk}`;
+  const lines = text.split('\n');
+  const nextBuffer = lines.pop() || '';
+
+  for (const line of lines) {
+    if (!line.startsWith('data: ')) continue;
+
+    const data = line.slice(6);
+    try {
+      const event = JSON.parse(data);
+      onEvent(event.type, event);
+    } catch (e) {
+      console.error('Failed to parse SSE event:', e);
+    }
+  }
+
+  return nextBuffer;
+};
 
 export const api = {
   /**
@@ -352,26 +375,20 @@ export const api = {
 
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
+    let sseBuffer = '';
 
     try {
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
 
-        const chunk = decoder.decode(value);
-        const lines = chunk.split('\n');
+        const chunk = decoder.decode(value, { stream: true });
+        sseBuffer = parseSseDataChunk(sseBuffer, chunk, onEvent);
+      }
 
-        for (const line of lines) {
-          if (line.startsWith('data: ')) {
-            const data = line.slice(6);
-            try {
-              const event = JSON.parse(data);
-              onEvent(event.type, event);
-            } catch (e) {
-              console.error('Failed to parse SSE event:', e);
-            }
-          }
-        }
+      const tail = decoder.decode();
+      if (tail || sseBuffer) {
+        parseSseDataChunk('', `${sseBuffer}${tail}\n`, onEvent);
       }
     } finally {
       reader.releaseLock();

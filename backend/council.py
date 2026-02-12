@@ -45,6 +45,8 @@ PROVIDERS = {
 
 # Models that should always run at temperature 1.0.
 FORCED_TEMP_ONE_MODELS = {
+    "google/gemini-3-pro-preview",
+    "google/gemini-3-flash-preview",
     "google/gemini-2.5-flash",
     "x-ai/grok-4.1-fast",
     "z-ai/glm-5",
@@ -65,6 +67,11 @@ def _normalize_model_for_rules(model_id: str) -> str:
     if ":" in model_id:
         maybe_provider, rest = model_id.split(":", 1)
         if maybe_provider in PROVIDERS:
+            if "/" in rest:
+                return rest
+            # Direct provider IDs like "google:gemini-3-flash-preview" need provider slug restored.
+            if maybe_provider in {"openai", "anthropic", "google", "mistral", "deepseek", "groq"}:
+                return f"{maybe_provider}/{rest}"
             return rest
     return model_id
 
@@ -774,6 +781,10 @@ async def generate_conversation_title(user_query: str) -> str:
 
     # Remove quotes if present
     title = title.strip('"\'')
+
+    # If stripping quotes emptied the title, fall back to default
+    if not title:
+        return "Untitled Conversation"
 
     # Truncate if too long
     if len(title) > 50:
