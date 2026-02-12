@@ -59,7 +59,20 @@ class AnthropicProvider(LLMProvider):
                     
                 data = response.json()
                 content = data["content"][0]["text"]
-                return {"content": content, "error": False}
+                usage = data.get("usage") or {}
+                total_tokens = None
+                if isinstance(usage, dict):
+                    input_tokens = usage.get("input_tokens")
+                    output_tokens = usage.get("output_tokens")
+                    if isinstance(input_tokens, int) or isinstance(output_tokens, int):
+                        total_tokens = int(input_tokens or 0) + int(output_tokens or 0)
+                return {
+                    "content": content,
+                    "usage": usage,
+                    "response_id": data.get("id"),
+                    "total_tokens": total_tokens,
+                    "error": False
+                }
                 
         except Exception as e:
             return {"error": True, "error_message": str(e)}

@@ -26,6 +26,74 @@ def _strip_openrouter_prefix(model_id: str) -> str:
     return model_id.removeprefix("openrouter:")
 
 
+def _is_openrouter_gemini3_reasoning_target(model_id: str) -> bool:
+    """True when model should force high reasoning effort on OpenRouter."""
+    base_model = (model_id or "").split(":", 1)[0]
+    return base_model in {
+        "google/gemini-3-pro-preview",
+        "google/gemini-3-flash-preview",
+    }
+
+
+def _extract_error_info(response: httpx.Response) -> Dict[str, Any]:
+    """Best-effort extraction of OpenRouter error details."""
+    default_message = f"HTTP {response.status_code}"
+    info = {
+        "message": default_message,
+        "code": None,
+        "param": None,
+    }
+    try:
+        data = response.json()
+        error = data.get("error")
+        if isinstance(error, dict):
+            info["message"] = error.get("message") or default_message
+            info["code"] = error.get("code")
+            info["param"] = error.get("param")
+    except Exception:
+        pass
+    return info
+
+
+def is_context_overflow_error(error_code: Any, error_message: Any) -> bool:
+    """True when error indicates prompt/message/token limits were exceeded."""
+    code = str(error_code or "").lower()
+    message = str(error_message or "").lower()
+
+    code_markers = {
+        "context_length_exceeded",
+        "max_tokens_exceeded",
+        "token_limit_exceeded",
+        "string_too_long",
+    }
+    if code in code_markers:
+        return True
+
+    message_markers = (
+        "context length",
+        "maximum context length",
+        "prompt exceeds model context length",
+        "prompt exceeds",
+        "enable middle-out compression",
+        "token limit exceeded",
+        "maximum number of messages",
+        "too many messages",
+    )
+    return any(marker in message for marker in message_markers)
+
+
+def is_context_overflow_response(response_data: Optional[Dict[str, Any]]) -> bool:
+    """Check normalized OpenRouter response dict for overflow flag."""
+    if not isinstance(response_data, dict):
+        return False
+    if response_data.get("is_context_overflow") is True:
+        return True
+    return is_context_overflow_error(
+        response_data.get("error_code"),
+        response_data.get("error_message"),
+    )
+
+
 async def _resolve_to_canonical_slug(model_id: str) -> Optional[str]:
     """Resolve OpenRouter model id to canonical_slug (required for chat/completions)."""
     model_id = _strip_openrouter_prefix(model_id)
@@ -55,7 +123,8 @@ async def query_model(
     model: str,
     messages: List[Dict[str, str]],
     timeout: float = 120.0,
-    temperature: float = 0.7
+    temperature: float = 0.7,
+    transforms: Optional[List[str]] = None,
 ) -> Optional[Dict[str, Any]]:
     """
     Query a single model via OpenRouter API with retry logic for rate limits.
@@ -83,8 +152,16 @@ async def query_model(
         # Disable OpenRouter's native web search; we do our own search and inject context in the prompt.
         "plugins": [{"id": "web", "enabled": False}],
     }
+    if _is_openrouter_gemini3_reasoning_target(model):
+        payload["reasoning"] = {"effort": "high"}
+        # Gemini 3: Google recommends temperature 1.0; other values can cause looping/degraded reasoning.
+        payload["temperature"] = 1.0
+    if transforms is not None:
+        payload["transforms"] = transforms
 
     last_error = None
+    last_error_code = None
+    last_error_message = None
 
     for attempt in range(MAX_RETRIES):
         try:
@@ -100,6 +177,8 @@ async def query_model(
                     retry_delay = INITIAL_RETRY_DELAY * (2 ** attempt)
                     print(f"Rate limited on {model}, retrying in {retry_delay}s (attempt {attempt + 1}/{MAX_RETRIES})")
                     last_error = "rate_limited"
+                    last_error_code = "rate_limit_exceeded"
+                    last_error_message = "Rate limited - too many requests"
                     await asyncio.sleep(retry_delay)
                     continue
 
@@ -116,62 +195,85 @@ async def query_model(
                         if response.status_code == 200:
                             data = response.json()
                             message = data["choices"][0]["message"]
+                            usage = data.get("usage") or {}
                             return {
                                 "content": message.get("content"),
                                 "reasoning": message.get("reasoning"),
                                 "reasoning_details": message.get("reasoning_details"),
+                                "usage": usage,
+                                "response_id": data.get("id"),
+                                "total_tokens": usage.get("total_tokens"),
                                 "error": None,
+                                "error_code": None,
+                                "is_context_overflow": False,
                             }
                     print(f"Model not found (404) on OpenRouter: {model}")
                     return {
                         "content": None,
                         "error": "model_not_found",
                         "error_message": f"Model '{model}' not found on OpenRouter.",
+                        "error_code": "model_not_found",
+                        "is_context_overflow": False,
                     }
 
                 # Handle other client errors without retry
                 if response.status_code == 400:
-                    error_detail = "bad_request"
-                    try:
-                        error_data = response.json()
-                        error_detail = error_data.get("error", {}).get("message", "bad_request")
-                    except Exception:
-                        pass
-                    print(f"Bad request for {model}: {error_detail}")
+                    error_info = _extract_error_info(response)
+                    error_message = error_info["message"] or "bad_request"
+                    error_code = error_info["code"]
+                    overflow = is_context_overflow_error(error_code, error_message)
+                    print(f"Bad request for {model}: {error_message}")
                     return {
                         'content': None,
                         'error': 'bad_request',
-                        'error_message': f"Model returned error: {error_detail}"
+                        'error_message': f"Model returned error: {error_message}",
+                        'error_code': error_code,
+                        'is_context_overflow': overflow,
                     }
 
                 response.raise_for_status()
 
                 data = response.json()
                 message = data['choices'][0]['message']
+                usage = data.get('usage') or {}
 
                 return {
                     'content': message.get('content'),
                     'reasoning': message.get('reasoning'), # Capture reasoning field (common in DeepSeek R1/reasoning models)
                     'reasoning_details': message.get('reasoning_details'),
-                    'error': None
+                    'usage': usage,
+                    'response_id': data.get('id'),
+                    'total_tokens': usage.get('total_tokens'),
+                    'error': None,
+                    'error_code': None,
+                    'is_context_overflow': False,
                 }
 
         except httpx.HTTPStatusError as e:
             print(f"HTTP error querying model {model}: {e}")
             last_error = f"http_{e.response.status_code}"
+            info = _extract_error_info(e.response)
+            last_error_code = info.get("code")
+            last_error_message = info.get("message")
         except httpx.RemoteProtocolError as e:
             # This handles "peer closed connection without sending complete message body"
             retry_delay = INITIAL_RETRY_DELAY * (2 ** attempt)
             print(f"Remote protocol error (disconnect) on {model}: {e}. Retrying in {retry_delay}s...")
             last_error = "protocol_error"
+            last_error_code = "protocol_error"
+            last_error_message = str(e)
             await asyncio.sleep(retry_delay)
             continue
         except httpx.TimeoutException:
             print(f"Timeout querying model {model}")
             last_error = "timeout"
+            last_error_code = "timeout"
+            last_error_message = "Request timed out"
         except Exception as e:
             print(f"Error querying model {model}: {e}")
             last_error = str(e)
+            last_error_code = "unknown_error"
+            last_error_message = str(e)
             break  # Don't retry on unknown errors
 
     # All retries exhausted or non-retryable error
@@ -182,8 +284,39 @@ async def query_model(
     return {
         'content': None,
         'error': last_error,
-        'error_message': error_messages.get(last_error, f"Error: {last_error}")
+        'error_message': last_error_message or error_messages.get(last_error, f"Error: {last_error}"),
+        'error_code': last_error_code,
+        'is_context_overflow': is_context_overflow_error(last_error_code, last_error_message),
     }
+
+
+async def fetch_generation(generation_id: str) -> Dict[str, Any]:
+    """
+    Fetch OpenRouter generation stats for a completion id.
+
+    This endpoint provides authoritative cost/token accounting.
+    """
+    api_key = get_openrouter_api_key()
+    if not api_key:
+        return {"error": True, "error_message": "OpenRouter API key not configured"}
+    if not generation_id:
+        return {"error": True, "error_message": "generation_id is required"}
+
+    try:
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            response = await client.get(
+                "https://openrouter.ai/api/v1/generation",
+                params={"id": generation_id},
+                headers={"Authorization": f"Bearer {api_key}"},
+            )
+            if response.status_code != 200:
+                return {
+                    "error": True,
+                    "error_message": f"OpenRouter generation API error: {response.status_code} - {response.text}",
+                }
+            return {"error": False, "data": response.json()}
+    except Exception as e:
+        return {"error": True, "error_message": str(e)}
 
 
 async def query_models_parallel(

@@ -53,6 +53,7 @@ export default function CouncilConfig({
     const isSourceConfigured = (source) => {
         switch (source) {
             case 'openrouter': return !!settings?.openrouter_api_key_set;
+            case 'requesty': return !!settings?.requesty_api_key_set;
             case 'ollama': return ollamaStatus?.connected;
             case 'groq': return !!settings?.groq_api_key_set;
             case 'custom': return !!(settings?.custom_endpoint_url);
@@ -71,7 +72,7 @@ export default function CouncilConfig({
             // Only Ollama models
             return models.filter(m => m.id.startsWith('ollama:'));
         } else {
-            // Remote: OpenRouter + Direct providers (exclude Ollama)
+            // Remote: OpenRouter, Requesty, Direct providers (exclude Ollama)
             return models.filter(m => !m.id.startsWith('ollama:'));
         }
     };
@@ -106,6 +107,22 @@ export default function CouncilConfig({
                                 <span className="slider"></span>
                             </div>
                             <span className="toggle-text">OpenRouter (Cloud)</span>
+                        </label>
+
+                        <label 
+                            className={`toggle-wrapper ${!isSourceConfigured('requesty') ? 'source-disabled' : ''}`}
+                            title={!isSourceConfigured('requesty') ? 'SOURCE NOT CONFIGURED - Add API key in LLM API Keys' : ''}
+                        >
+                            <div className="toggle-switch">
+                                <input
+                                    type="checkbox"
+                                    checked={enabledProviders.requesty}
+                                    onChange={(e) => setEnabledProviders(prev => ({ ...prev, requesty: e.target.checked }))}
+                                    disabled={!isSourceConfigured('requesty')}
+                                />
+                                <span className="slider"></span>
+                            </div>
+                            <span className="toggle-text">Requesty (Cloud)</span>
                         </label>
 
                         <label 
@@ -237,12 +254,12 @@ export default function CouncilConfig({
                 <h3>Council Composition</h3>
                 <div className="model-options-row">
                     <div className="model-filter-controls">
-                        <label className="free-filter-label" style={{ opacity: enabledProviders.openrouter ? 1 : 0.3, cursor: enabledProviders.openrouter ? 'pointer' : 'not-allowed' }}>
+                        <label className="free-filter-label" style={{ opacity: (enabledProviders.openrouter || enabledProviders.requesty) ? 1 : 0.3, cursor: (enabledProviders.openrouter || enabledProviders.requesty) ? 'pointer' : 'not-allowed' }}>
                             <input
                                 type="checkbox"
                                 checked={showFreeOnly}
                                 onChange={e => setShowFreeOnly(e.target.checked)}
-                                disabled={!enabledProviders.openrouter}
+                                disabled={!enabledProviders.openrouter && !enabledProviders.requesty}
                             />
                             Show free OpenRouter models only
                             <div className="info-tooltip-container">
@@ -282,8 +299,8 @@ export default function CouncilConfig({
                                             type="button"
                                             className={`type-btn ${memberFilter === 'remote' ? 'active' : ''}`}
                                             onClick={() => handleMemberFilterChange(index, 'remote')}
-                                            disabled={!enabledProviders.openrouter && !enabledProviders.direct && !enabledProviders.groq && !enabledProviders.custom}
-                                            title={!enabledProviders.openrouter && !enabledProviders.direct && !enabledProviders.groq && !enabledProviders.custom ? 'Enable a remote provider first' : ''}
+                                            disabled={!enabledProviders.openrouter && !enabledProviders.requesty && !enabledProviders.direct && !enabledProviders.groq && !enabledProviders.custom}
+                                            title={!enabledProviders.openrouter && !enabledProviders.requesty && !enabledProviders.direct && !enabledProviders.groq && !enabledProviders.custom ? 'Enable a remote provider first' : ''}
                                         >
                                             Remote
                                         </button>
@@ -292,7 +309,7 @@ export default function CouncilConfig({
                                             className={`type-btn ${memberFilter === 'local' ? 'active' : ''}`}
                                             onClick={() => handleMemberFilterChange(index, 'local')}
                                             disabled={!enabledProviders.ollama || ollamaAvailableModels.length === 0}
-                                            title={!enabledProviders.ollama || ollamaAvailableModels.length === 0 ? 'Enable and connect Ollama first' : ''}
+                                            title={!enabledProviders.ollama ? 'Enable Ollama in Available Model Sources first' : ollamaAvailableModels.length === 0 ? 'Connect Ollama in LLM API Keys, then click Refresh Local Models' : ''}
                                         >
                                             Local
                                         </button>
@@ -406,8 +423,8 @@ export default function CouncilConfig({
                                     setChairmanFilter('remote');
                                     setChairmanModel('');
                                 }}
-                                disabled={!enabledProviders.openrouter && !enabledProviders.direct && !enabledProviders.groq && !enabledProviders.custom}
-                                title={!enabledProviders.openrouter && !enabledProviders.direct && !enabledProviders.groq && !enabledProviders.custom ? 'Enable a remote provider first' : ''}
+                                disabled={!enabledProviders.openrouter && !enabledProviders.requesty && !enabledProviders.direct && !enabledProviders.groq && !enabledProviders.custom}
+                                title={!enabledProviders.openrouter && !enabledProviders.requesty && !enabledProviders.direct && !enabledProviders.groq && !enabledProviders.custom ? 'Enable a remote provider first' : ''}
                             >
                                 Remote
                             </button>
@@ -419,7 +436,7 @@ export default function CouncilConfig({
                                     setChairmanModel('');
                                 }}
                                 disabled={!enabledProviders.ollama || ollamaAvailableModels.length === 0}
-                                title={!enabledProviders.ollama || ollamaAvailableModels.length === 0 ? 'Enable and connect Ollama first' : ''}
+                                title={!enabledProviders.ollama ? 'Enable Ollama in Available Model Sources first' : ollamaAvailableModels.length === 0 ? 'Connect Ollama in LLM API Keys, then click Refresh Local Models' : ''}
                             >
                                 Local
                             </button>

@@ -22,6 +22,7 @@ const PROVIDER_CONFIG = {
     ollama: { color: '#ffffff', label: 'Local', logo: ollamaLogo },
     deepseek: { color: '#4e61e6', label: 'DeepSeek', logo: deepseekLogo },
     openrouter: { color: '#7f5af0', label: 'OpenRouter', logo: openrouterLogo },
+    requesty: { color: '#0ea5e9', label: 'Requesty', logo: customLogo },
     custom: { color: '#06b6d4', label: 'Custom', logo: customLogo },
     default: { color: '#888888', label: 'Model', logo: null, icon: '🤖' }
 };
@@ -32,14 +33,14 @@ const getProviderInfo = (modelId) => {
 
     // Check for provider prefixes FIRST (order matters!)
     if (id.startsWith('custom:')) return PROVIDER_CONFIG.custom;
+    if (id.startsWith('requesty:')) return PROVIDER_CONFIG.requesty;
     if (id.startsWith('ollama:')) return PROVIDER_CONFIG.ollama;
     if (id.startsWith('groq:')) return PROVIDER_CONFIG.groq;
 
     // OpenRouter handling
     if (id.startsWith('openrouter:') || id.includes('openrouter')) return PROVIDER_CONFIG.openrouter;
 
-    // Check for OpenRouter path format (provider/model)
-    // This ensures ALL OpenRouter models get the OpenRouter icon if they follow the standard format
+    // Check for OpenRouter path format (provider/model) - but not requesty (already handled)
     if (id.includes('/')) return PROVIDER_CONFIG.openrouter;
 
     // Check for specific model identifiers (only if no prefix matched)

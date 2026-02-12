@@ -8,6 +8,9 @@ load_dotenv()
 # OpenRouter API endpoint
 OPENROUTER_API_URL = "https://openrouter.ai/api/v1/chat/completions"
 
+# Requesty API endpoint
+REQUESTY_API_URL = "https://router.requesty.ai/v1/chat/completions"
+
 # Data directory for conversation storage
 DATA_DIR = "data/conversations"
 
@@ -19,6 +22,15 @@ def get_openrouter_api_key() -> str:
     if settings.openrouter_api_key:
         return settings.openrouter_api_key
     return os.getenv("OPENROUTER_API_KEY", "")
+
+
+def get_requesty_api_key() -> str:
+    """Get Requesty API key from settings or environment."""
+    from .settings import get_settings
+    settings = get_settings()
+    if settings.requesty_api_key:
+        return settings.requesty_api_key
+    return os.getenv("REQUESTY_API_KEY", "")
 
 
 def get_ollama_base_url() -> str:

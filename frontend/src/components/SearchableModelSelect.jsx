@@ -17,12 +17,14 @@ export default function SearchableModelSelect({
   const groupedOptions = models.reduce((acc, model) => {
     // Determine group label
     let groupLabel;
-    // Use source field if available, otherwise fallback to provider check
     const isOpenRouter = model.source === 'openrouter' || model.provider === 'OpenRouter';
+    const isRequesty = model.source === 'requesty' || model.provider === 'Requesty' || model.id?.startsWith('requesty:');
     const isOllama = model.id?.startsWith('ollama:') || model.provider === 'Ollama';
 
     if (isOpenRouter) {
       groupLabel = 'OpenRouter (Cloud)';
+    } else if (isRequesty) {
+      groupLabel = 'Requesty (Cloud)';
     } else if (isOllama) {
       groupLabel = 'Local (Ollama)';
     } else {
@@ -45,6 +47,7 @@ export default function SearchableModelSelect({
     'OpenAI (Direct)', 'Anthropic (Direct)', 'Google (Direct)', 'Mistral (Direct)', 'DeepSeek (Direct)',
     'Groq (Direct)',
     'OpenRouter (Cloud)',
+    'Requesty (Cloud)',
     'Local (Ollama)'
   ];
 

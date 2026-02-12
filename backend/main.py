@@ -11,6 +11,7 @@ import os
 import uuid
 import json
 import asyncio
+import time
 
 from . import storage
 from .council import generate_conversation_title, generate_search_query, stage1_collect_responses, stage2_collect_rankings, stage3_synthesize_final, calculate_aggregate_rankings, PROVIDERS
@@ -123,6 +124,95 @@ async def send_message_stream(conversation_id: str, body: SendMessageRequest, re
             stage3_result = None
             label_to_model = {}
             aggregate_rankings = {}
+            ranking_diagnostics = {}
+            generation_time_ms = None
+            generation_time_seconds = None
+            stage1_started_at = None
+            stage1_completed_at = None
+            stage2_started_at = None
+            stage2_completed_at = None
+            stage1_total_cost = None
+            stage2_total_cost = None
+            stage1_total_input_tokens_logged = None
+            stage2_total_input_tokens_logged = None
+            stage1_total_output_tokens_logged = None
+            stage2_total_output_tokens_logged = None
+            stage1_total_tokens_logged = None
+            stage2_total_tokens_logged = None
+
+            def _tokens_for_log(value: Any) -> str:
+                return str(value) if isinstance(value, int) else "null"
+
+            def _usage_tokens_for_log(usage: Any, keys: List[str]) -> Optional[int]:
+                if not isinstance(usage, dict):
+                    return None
+                for key in keys:
+                    value = usage.get(key)
+                    if isinstance(value, int):
+                        return value
+                return None
+
+            def _cost_for_log(usage: Any) -> str:
+                if not isinstance(usage, dict):
+                    return "null"
+                cost = usage.get("cost")
+                if cost is None:
+                    return "null"
+                try:
+                    return str(float(cost))
+                except (TypeError, ValueError):
+                    return "null"
+
+            def _blended_cost_per_million_for_log(tokens_value: Any, usage: Any) -> str:
+                if not isinstance(tokens_value, int) or tokens_value <= 0:
+                    return "null"
+                if not isinstance(usage, dict):
+                    return "null"
+                cost = usage.get("cost")
+                if cost is None:
+                    return "null"
+                try:
+                    return str((float(cost) / float(tokens_value)) * 1_000_000.0)
+                except (TypeError, ValueError, ZeroDivisionError):
+                    return "null"
+
+            def _sum_cost_for_log(results: List[Dict[str, Any]], usage_key: str) -> Optional[float]:
+                total = 0.0
+                has_cost = False
+                for result in results:
+                    usage = result.get(usage_key)
+                    if not isinstance(usage, dict):
+                        continue
+                    cost = usage.get("cost")
+                    if cost is None:
+                        continue
+                    try:
+                        total += float(cost)
+                        has_cost = True
+                    except (TypeError, ValueError):
+                        continue
+                return total if has_cost else None
+
+            def _sum_tokens_for_log(results: List[Dict[str, Any]], tokens_key: str) -> Optional[int]:
+                total = 0
+                has_tokens = False
+                for result in results:
+                    tokens = result.get(tokens_key)
+                    if isinstance(tokens, int) and tokens > 0:
+                        total += tokens
+                        has_tokens = True
+                return total if has_tokens else None
+
+            def _sum_usage_tokens_for_log(results: List[Dict[str, Any]], usage_key: str, token_keys: List[str]) -> Optional[int]:
+                total = 0
+                has_tokens = False
+                for result in results:
+                    usage = result.get(usage_key)
+                    token_count = _usage_tokens_for_log(usage, token_keys)
+                    if isinstance(token_count, int) and token_count >= 0:
+                        total += token_count
+                        has_tokens = True
+                return total if has_tokens else None
             
             # Add user message
             storage.add_user_message(conversation_id, body.content)
@@ -183,6 +273,7 @@ async def send_message_stream(conversation_id: str, body: SendMessageRequest, re
                 await asyncio.sleep(0.05)
 
             # Stage 1: Collect responses
+            stage1_started_at = time.perf_counter()
             yield f"data: {json.dumps({'type': 'stage1_start'})}\n\n"
             await asyncio.sleep(0.05)
             
@@ -196,9 +287,39 @@ async def send_message_stream(conversation_id: str, body: SendMessageRequest, re
                     continue
                 
                 stage1_results.append(item)
+                stage1_usage = item.get("stage1_usage")
+                stage1_input_tokens_value = _usage_tokens_for_log(stage1_usage, ["input_tokens", "prompt_tokens"])
+                stage1_output_tokens_value = _usage_tokens_for_log(stage1_usage, ["output_tokens", "completion_tokens"])
+                stage1_tokens_value = item.get("stage1_total_tokens")
+                stage1_input_tokens_label = _tokens_for_log(stage1_input_tokens_value)
+                stage1_output_tokens_label = _tokens_for_log(stage1_output_tokens_value)
+                stage1_tokens_label = _tokens_for_log(stage1_tokens_value)
+                stage1_cost_label = _cost_for_log(stage1_usage)
+                stage1_blended_label = _blended_cost_per_million_for_log(stage1_tokens_value, stage1_usage)
+                print(
+                    f"Stage 1 Progress: {len(stage1_results)}/{total_models} - "
+                    f"{item['model']} | {stage1_input_tokens_label} | {stage1_output_tokens_label} | "
+                    f"{stage1_tokens_label} | {stage1_cost_label} | {stage1_blended_label}"
+                )
                 yield f"data: {json.dumps({'type': 'stage1_progress', 'data': item, 'count': len(stage1_results), 'total': total_models})}\n\n"
                 await asyncio.sleep(0.01)
 
+            stage1_completed_at = time.perf_counter()
+            stage1_total_cost = _sum_cost_for_log(stage1_results, "stage1_usage")
+            stage1_total_input_tokens_logged = _sum_usage_tokens_for_log(stage1_results, "stage1_usage", ["input_tokens", "prompt_tokens"])
+            stage1_total_output_tokens_logged = _sum_usage_tokens_for_log(stage1_results, "stage1_usage", ["output_tokens", "completion_tokens"])
+            stage1_total_tokens_logged = _sum_tokens_for_log(stage1_results, "stage1_total_tokens")
+            stage1_total_blended = None
+            if stage1_total_cost is not None and stage1_total_tokens_logged is not None and stage1_total_tokens_logged > 0:
+                stage1_total_blended = (stage1_total_cost / float(stage1_total_tokens_logged)) * 1_000_000.0
+            print(
+                "Stage 1 Totals: "
+                f"{str(stage1_total_input_tokens_logged) if stage1_total_input_tokens_logged is not None else 'null'} | "
+                f"{str(stage1_total_output_tokens_logged) if stage1_total_output_tokens_logged is not None else 'null'} | "
+                f"{str(stage1_total_tokens_logged) if stage1_total_tokens_logged is not None else 'null'} | "
+                f"{str(stage1_total_cost) if stage1_total_cost is not None else 'null'} | "
+                f"{str(stage1_total_blended) if stage1_total_blended is not None else 'null'}"
+            )
             yield f"data: {json.dumps({'type': 'stage1_complete', 'data': stage1_results})}\n\n"
             await asyncio.sleep(0.05)
 
@@ -211,6 +332,7 @@ async def send_message_stream(conversation_id: str, body: SendMessageRequest, re
 
             # Stage 2: Only if mode is 'chat_ranking' or 'full'
             if body.execution_mode in ["chat_ranking", "full"]:
+                stage2_started_at = time.perf_counter()
                 yield f"data: {json.dumps({'type': 'stage2_start'})}\n\n"
                 await asyncio.sleep(0.05)
                 
@@ -227,12 +349,157 @@ async def send_message_stream(conversation_id: str, body: SendMessageRequest, re
                     stage2_results.append(item)
                     
                     # Send progress update
-                    print(f"Stage 2 Progress: {len(stage2_results)}/{len(label_to_model)} - {item['model']}")
+                    stage2_usage = item.get("stage2_usage")
+                    stage2_input_tokens_value = _usage_tokens_for_log(stage2_usage, ["input_tokens", "prompt_tokens"])
+                    stage2_output_tokens_value = _usage_tokens_for_log(stage2_usage, ["output_tokens", "completion_tokens"])
+                    stage2_tokens_value = item.get("stage2_total_tokens")
+                    stage2_input_tokens_label = _tokens_for_log(stage2_input_tokens_value)
+                    stage2_output_tokens_label = _tokens_for_log(stage2_output_tokens_value)
+                    stage2_tokens_label = _tokens_for_log(stage2_tokens_value)
+                    stage2_cost_label = _cost_for_log(stage2_usage)
+                    stage2_blended_label = _blended_cost_per_million_for_log(stage2_tokens_value, stage2_usage)
+                    print(
+                        f"Stage 2 Progress: {len(stage2_results)}/{len(label_to_model)} - "
+                        f"{item['model']} | {stage2_input_tokens_label} | {stage2_output_tokens_label} | "
+                        f"{stage2_tokens_label} | {stage2_cost_label} | {stage2_blended_label}"
+                    )
                     yield f"data: {json.dumps({'type': 'stage2_progress', 'data': item, 'count': len(stage2_results), 'total': len(label_to_model)})}\n\n"
                     await asyncio.sleep(0.01)
 
-                aggregate_rankings = calculate_aggregate_rankings(stage2_results, label_to_model)
-                yield f"data: {json.dumps({'type': 'stage2_complete', 'data': stage2_results, 'metadata': {'label_to_model': label_to_model, 'aggregate_rankings': aggregate_rankings, 'search_query': search_query, 'search_context': search_context}})}\n\n"
+                aggregate_rankings, ranking_diagnostics = calculate_aggregate_rankings(
+                    stage2_results,
+                    label_to_model,
+                    return_diagnostics=True
+                )
+                stage2_completed_at = time.perf_counter()
+                stage2_total_cost = _sum_cost_for_log(stage2_results, "stage2_usage")
+                stage2_total_input_tokens_logged = _sum_usage_tokens_for_log(stage2_results, "stage2_usage", ["input_tokens", "prompt_tokens"])
+                stage2_total_output_tokens_logged = _sum_usage_tokens_for_log(stage2_results, "stage2_usage", ["output_tokens", "completion_tokens"])
+                stage2_total_tokens_logged = _sum_tokens_for_log(stage2_results, "stage2_total_tokens")
+                combined_stage12_cost = None
+                combined_stage12_input_tokens = None
+                combined_stage12_output_tokens = None
+                combined_stage12_tokens = None
+                if stage1_total_cost is not None or stage2_total_cost is not None:
+                    combined_stage12_cost = float(stage1_total_cost or 0) + float(stage2_total_cost or 0)
+                if stage1_total_input_tokens_logged is not None or stage2_total_input_tokens_logged is not None:
+                    combined_stage12_input_tokens = int(stage1_total_input_tokens_logged or 0) + int(stage2_total_input_tokens_logged or 0)
+                if stage1_total_output_tokens_logged is not None or stage2_total_output_tokens_logged is not None:
+                    combined_stage12_output_tokens = int(stage1_total_output_tokens_logged or 0) + int(stage2_total_output_tokens_logged or 0)
+                if stage1_total_tokens_logged is not None or stage2_total_tokens_logged is not None:
+                    combined_stage12_tokens = int(stage1_total_tokens_logged or 0) + int(stage2_total_tokens_logged or 0)
+                stage2_total_blended = None
+                if stage2_total_cost is not None and stage2_total_tokens_logged is not None and stage2_total_tokens_logged > 0:
+                    stage2_total_blended = (stage2_total_cost / float(stage2_total_tokens_logged)) * 1_000_000.0
+                combined_stage12_blended = None
+                if combined_stage12_cost is not None and combined_stage12_tokens is not None and combined_stage12_tokens > 0:
+                    combined_stage12_blended = (combined_stage12_cost / float(combined_stage12_tokens)) * 1_000_000.0
+                print(
+                    "Stage 2 Totals: "
+                    f"{str(stage2_total_input_tokens_logged) if stage2_total_input_tokens_logged is not None else 'null'} | "
+                    f"{str(stage2_total_output_tokens_logged) if stage2_total_output_tokens_logged is not None else 'null'} | "
+                    f"{str(stage2_total_tokens_logged) if stage2_total_tokens_logged is not None else 'null'} | "
+                    f"{str(stage2_total_cost) if stage2_total_cost is not None else 'null'} | "
+                    f"{str(stage2_total_blended) if stage2_total_blended is not None else 'null'}"
+                )
+                print(
+                    "Stage 1+2 Totals: "
+                    f"{str(combined_stage12_input_tokens) if combined_stage12_input_tokens is not None else 'null'} | "
+                    f"{str(combined_stage12_output_tokens) if combined_stage12_output_tokens is not None else 'null'} | "
+                    f"{str(combined_stage12_tokens) if combined_stage12_tokens is not None else 'null'} | "
+                    f"{str(combined_stage12_cost) if combined_stage12_cost is not None else 'null'} | "
+                    f"{str(combined_stage12_blended) if combined_stage12_blended is not None else 'null'}"
+                )
+
+                # Generation time excludes Stage 3 and includes Stage 1 + Stage 2 only.
+                if (
+                    stage1_started_at is not None and
+                    stage1_completed_at is not None and
+                    stage2_started_at is not None and
+                    stage2_completed_at is not None
+                ):
+                    stage1_ms = max(0, int((stage1_completed_at - stage1_started_at) * 1000))
+                    stage2_ms = max(0, int((stage2_completed_at - stage2_started_at) * 1000))
+                    generation_time_ms = stage1_ms + stage2_ms
+                    generation_time_seconds = max(0, int(round(generation_time_ms / 1000)))
+
+                # Per-model generation time for leaderboard rows:
+                # model stage1 call duration + model stage2 call duration.
+                stage1_times = {
+                    item["model"]: item.get("stage1_duration_ms")
+                    for item in stage1_results
+                    if item.get("model")
+                }
+                stage2_times = {
+                    item["model"]: item.get("stage2_duration_ms")
+                    for item in stage2_results
+                    if item.get("model")
+                }
+                stage1_tokens = {
+                    item["model"]: item.get("stage1_total_tokens")
+                    for item in stage1_results
+                    if item.get("model")
+                }
+                stage2_tokens = {
+                    item["model"]: item.get("stage2_total_tokens")
+                    for item in stage2_results
+                    if item.get("model")
+                }
+                stage1_usage = {
+                    item["model"]: item.get("stage1_usage")
+                    for item in stage1_results
+                    if item.get("model")
+                }
+                stage2_usage = {
+                    item["model"]: item.get("stage2_usage")
+                    for item in stage2_results
+                    if item.get("model")
+                }
+                stage1_response_ids = {
+                    item["model"]: item.get("stage1_response_id")
+                    for item in stage1_results
+                    if item.get("model")
+                }
+                stage2_response_ids = {
+                    item["model"]: item.get("stage2_response_id")
+                    for item in stage2_results
+                    if item.get("model")
+                }
+                enriched_aggregate_rankings = []
+                for item in aggregate_rankings:
+                    model_name = item.get("model")
+                    model_stage1_ms = stage1_times.get(model_name) or 0
+                    model_stage2_ms = stage2_times.get(model_name) or 0
+                    model_total_ms = max(0, int(model_stage1_ms + model_stage2_ms))
+                    model_stage1_tokens = stage1_tokens.get(model_name)
+                    model_stage2_tokens = stage2_tokens.get(model_name)
+                    model_total_tokens = None
+                    if isinstance(model_stage1_tokens, int) or isinstance(model_stage2_tokens, int):
+                        model_total_tokens = int(model_stage1_tokens or 0) + int(model_stage2_tokens or 0)
+                    model_stage1_usage = stage1_usage.get(model_name) if isinstance(stage1_usage.get(model_name), dict) else {}
+                    model_stage2_usage = stage2_usage.get(model_name) if isinstance(stage2_usage.get(model_name), dict) else {}
+                    stage1_cost = model_stage1_usage.get("cost")
+                    stage2_cost = model_stage2_usage.get("cost")
+                    generation_total_cost = None
+                    try:
+                        if stage1_cost is not None or stage2_cost is not None:
+                            generation_total_cost = float(stage1_cost or 0) + float(stage2_cost or 0)
+                    except (TypeError, ValueError):
+                        generation_total_cost = None
+                    enriched_aggregate_rankings.append({
+                        **item,
+                        "generation_time_ms": model_total_ms,
+                        "generation_time_seconds": max(0, int(round(model_total_ms / 1000))),
+                        "generation_total_tokens": model_total_tokens,
+                        "generation_total_cost": generation_total_cost,
+                        "stage1_usage": model_stage1_usage,
+                        "stage2_usage": model_stage2_usage,
+                        "stage1_response_id": stage1_response_ids.get(model_name),
+                        "stage2_response_id": stage2_response_ids.get(model_name),
+                    })
+                aggregate_rankings = enriched_aggregate_rankings
+
+                yield f"data: {json.dumps({'type': 'stage2_complete', 'data': stage2_results, 'metadata': {'label_to_model': label_to_model, 'aggregate_rankings': aggregate_rankings, 'ranking_diagnostics': ranking_diagnostics, 'generation_time_ms': generation_time_ms, 'generation_time_seconds': generation_time_seconds, 'search_query': search_query, 'search_context': search_context}})}\n\n"
                 await asyncio.sleep(0.05)
 
             # Stage 3: Only if mode is 'full'
@@ -266,6 +533,9 @@ async def send_message_stream(conversation_id: str, body: SendMessageRequest, re
             if body.execution_mode in ["chat_ranking", "full"]:
                 metadata["label_to_model"] = label_to_model
                 metadata["aggregate_rankings"] = aggregate_rankings
+                metadata["ranking_diagnostics"] = ranking_diagnostics
+                metadata["generation_time_ms"] = generation_time_ms
+                metadata["generation_time_seconds"] = generation_time_seconds
             
             if search_context:
                 metadata["search_context"] = search_context
@@ -329,6 +599,7 @@ class UpdateSettingsRequest(BaseModel):
     tavily_api_key: Optional[str] = None
     brave_api_key: Optional[str] = None
     openrouter_api_key: Optional[str] = None
+    requesty_api_key: Optional[str] = None
     openai_api_key: Optional[str] = None
     anthropic_api_key: Optional[str] = None
     google_api_key: Optional[str] = None
@@ -389,6 +660,7 @@ async def get_app_settings():
         "tavily_api_key_set": bool(settings.tavily_api_key),
         "brave_api_key_set": bool(settings.brave_api_key),
         "openrouter_api_key_set": bool(settings.openrouter_api_key),
+        "requesty_api_key_set": bool(settings.requesty_api_key),
         "openai_api_key_set": bool(settings.openai_api_key),
         "anthropic_api_key_set": bool(settings.anthropic_api_key),
         "google_api_key_set": bool(settings.google_api_key),
@@ -515,7 +787,9 @@ async def update_app_settings(request: UpdateSettingsRequest):
 
     if request.openrouter_api_key is not None:
         updates["openrouter_api_key"] = request.openrouter_api_key
-        
+    if request.requesty_api_key is not None:
+        updates["requesty_api_key"] = request.requesty_api_key
+
     # Direct Provider Keys
     if request.openai_api_key is not None:
         updates["openai_api_key"] = request.openai_api_key
@@ -601,6 +875,7 @@ async def update_app_settings(request: UpdateSettingsRequest):
         "tavily_api_key_set": bool(settings.tavily_api_key),
         "brave_api_key_set": bool(settings.brave_api_key),
         "openrouter_api_key_set": bool(settings.openrouter_api_key),
+        "requesty_api_key_set": bool(settings.requesty_api_key),
         "openai_api_key_set": bool(settings.openai_api_key),
         "anthropic_api_key_set": bool(settings.anthropic_api_key),
         "google_api_key_set": bool(settings.google_api_key),
@@ -635,8 +910,8 @@ async def get_direct_models():
     
     # Iterate over all providers
     for provider_id, provider in PROVIDERS.items():
-        # Skip OpenRouter and Ollama as they are handled separately
-        if provider_id in ["openrouter", "ollama", "hybrid"]:
+        # Skip OpenRouter, Requesty, and Ollama as they are handled separately
+        if provider_id in ["openrouter", "requesty", "ollama", "hybrid"]:
             continue
             
         try:
@@ -753,6 +1028,11 @@ async def test_serper_api(request: TestSerperRequest):
 
 class TestOpenRouterRequest(BaseModel):
     """Request to test OpenRouter API key."""
+    api_key: Optional[str] = None
+
+
+class TestRequestyRequest(BaseModel):
+    """Request to test Requesty API key."""
     api_key: Optional[str] = None
 
 
@@ -948,6 +1228,21 @@ async def get_openrouter_models():
         return {"models": [], "error": str(e)}
 
 
+@app.get("/api/models/requesty")
+async def get_requesty_models():
+    """Fetch available models from Requesty API."""
+    from . import requesty as requesty_module
+
+    models = await requesty_module.fetch_models()
+    # Prefix ids for frontend routing
+    for m in models:
+        raw_id = m["id"]
+        m["id"] = f"requesty:{raw_id}"
+        m["name"] = (m.get("name") or raw_id) + " [Requesty]"
+    models.sort(key=lambda x: (x.get("name") or "").lower())
+    return {"models": models}
+
+
 @app.post("/api/settings/test-openrouter")
 async def test_openrouter_api(request: TestOpenRouterRequest):
     """Test OpenRouter API key with a simple request."""
@@ -980,6 +1275,31 @@ async def test_openrouter_api(request: TestOpenRouterRequest):
         return {"success": False, "message": "Request timed out"}
     except Exception as e:
         return {"success": False, "message": str(e)}
+
+
+@app.get("/api/openrouter/generation")
+async def get_openrouter_generation(id: str):
+    """Fetch OpenRouter generation usage/cost metadata by generation ID."""
+    from . import openrouter as openrouter_client
+
+    result = await openrouter_client.fetch_generation(id)
+    if result.get("error"):
+        return {"success": False, "error": result.get("error_message", "Unknown error")}
+    return {"success": True, "data": result.get("data")}
+
+
+@app.post("/api/settings/test-requesty")
+async def test_requesty_api(request: TestRequestyRequest):
+    """Test Requesty API key with a simple request."""
+    from .config import get_requesty_api_key
+
+    api_key = request.api_key if request.api_key else get_requesty_api_key()
+    if not api_key:
+        return {"success": False, "message": "No API key provided or configured"}
+
+    provider = PROVIDERS["requesty"]
+    result = await provider.validate_key(api_key)
+    return result
 
 
 # SPA fallback: serve frontend build so refresh/direct URLs don't 404

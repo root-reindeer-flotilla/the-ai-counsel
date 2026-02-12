@@ -54,7 +54,14 @@ class CustomOpenAIProvider(LLMProvider):
 
                 data = response.json()
                 content = data["choices"][0]["message"]["content"]
-                return {"content": content, "error": False}
+                usage = data.get("usage") or {}
+                return {
+                    "content": content,
+                    "usage": usage,
+                    "response_id": data.get("id"),
+                    "total_tokens": usage.get("total_tokens"),
+                    "error": False
+                }
 
         except Exception as e:
             return {"error": True, "error_message": str(e)}

@@ -9,7 +9,7 @@ LLM Council Plus is a 3-stage deliberation system where multiple LLMs collaborat
 2. **Stage 2**: Anonymous peer review/ranking to prevent bias
 3. **Stage 3**: Chairman synthesis of collective wisdom
 
-**Key Innovation**: Hybrid architecture supporting OpenRouter (cloud), Ollama (local), Groq (fast inference), direct provider connections, and custom OpenAI-compatible endpoints.
+**Key Innovation**: Hybrid architecture supporting OpenRouter (cloud), Requesty (cloud), Ollama (local), Groq (fast inference), direct provider connections, and custom OpenAI-compatible endpoints.
 
 ## Running the Application
 
@@ -61,7 +61,7 @@ This fixes binary incompatibilities (e.g., `@rollup/rollup-darwin-*` variants).
 
 **Provider System** (`backend/providers/`)
 - **Base**: `base.py` - Abstract interface for all LLM providers
-- **Implementations**: `openrouter.py`, `ollama.py`, `groq.py`, `openai.py`, `anthropic.py`, `google.py`, `mistral.py`, `deepseek.py`, `custom_openai.py`
+- **Implementations**: `openrouter.py`, `requesty.py`, `ollama.py`, `groq.py`, `openai.py`, `anthropic.py`, `google.py`, `mistral.py`, `deepseek.py`, `custom_openai.py`
 - **Auto-routing**: Model IDs with prefix (e.g., `openai:gpt-4.1`, `ollama:llama3`, `custom:model-name`) route to correct provider
 - **Routing logic**: `council.py:get_provider_for_model()` handles prefix parsing
 
@@ -111,6 +111,7 @@ cd backend && python main.py  # WRONG - breaks imports
 ### Model ID Prefix Format
 ```
 openrouter:anthropic/claude-sonnet-4  → Cloud via OpenRouter
+requesty:anthropic/claude-sonnet-4    → Cloud via Requesty.ai
 ollama:llama3.1:latest                → Local via Ollama
 groq:llama3-70b-8192                  → Fast inference via Groq
 openai:gpt-4.1                        → Direct OpenAI connection
@@ -177,6 +178,12 @@ useEffect(() => {
 }, [responses.length]);
 ```
 
+### Local (Ollama) vs Cloud Execution
+- **Cloud/API models** (OpenRouter, Requesty, Groq, OpenAI, etc.): One asyncio task per model; all run **in parallel** in Stage 1 and Stage 2.
+- **Ollama (local) models**: Run **sequentially** (one at a time) in Stage 1 and Stage 2. Many systems can only run a single Ollama inference at a time; concurrent requests would contend or fail. Council splits models by `ollama:` prefix and runs Ollama models in a single task that queries them one after another; cloud models still run in parallel alongside that task.
+- **Stage 3** (chairman): Single model call; no special handling.
+- Logic: `council.py` uses `_is_ollama_model()` to partition models; `_run_ollama_sequential()` runs Ollama queries in order.
+
 ## Common Gotchas
 
 1. **Port Conflicts**: Backend uses 8001 (not 8000). Update `backend/main.py` and `frontend/src/api.js` together.
@@ -197,6 +204,8 @@ useEffect(() => {
 
 9. **Custom Endpoint Icons**: Models from custom endpoints may match name patterns (e.g., "claude"). Check `custom:` prefix first.
 
+10. **Ollama single-instance**: Ollama models are executed sequentially per stage so a single local Ollama instance is not overloaded. Cloud models remain parallel.
+
 ## Data Flow
 
 ```
@@ -204,9 +213,9 @@ User Query (+ optional web search)
     ↓
 [Web Search: DuckDuckGo/Tavily/Brave + Jina Reader]
     ↓
-Stage 1: Parallel queries → Stream individual responses
+Stage 1: Parallel (cloud) + sequential (Ollama) queries → Stream individual responses
     ↓
-Stage 2: Anonymize → Parallel peer rankings → Parse rankings
+Stage 2: Anonymize → Parallel (cloud) + sequential (Ollama) peer rankings → Parse rankings
     ↓
 Calculate aggregate rankings
     ↓
@@ -248,7 +257,7 @@ curl https://your-endpoint.com/v1/models -H "Authorization: Bearer $API_KEY"
 ## Settings
 
 **UI Sections** (sidebar navigation):
-1. **LLM API Keys**: OpenRouter, Groq, Ollama, Direct providers, Custom endpoint
+1. **LLM API Keys**: OpenRouter, Requesty, Groq, Ollama, Direct providers, Custom endpoint
 2. **Council Config**: Model selection with Remote/Local toggles, temperature controls, "I'm Feeling Lucky" randomizer
 3. **System Prompts**: Stage 1/2/3 prompts with reset-to-default
 4. **Search Providers**: DuckDuckGo, Tavily, Brave + Jina full content settings

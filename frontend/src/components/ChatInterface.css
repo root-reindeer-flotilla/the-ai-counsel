@@ -497,6 +497,31 @@
   font-weight: 500;
 }
 
+.stage1-toggle-container {
+  display: flex;
+  justify-content: flex-start;
+  margin: 10px 0 14px 0;
+}
+
+.stage1-toggle-button {
+  background: rgba(59, 130, 246, 0.12);
+  border: 1px solid rgba(59, 130, 246, 0.35);
+  color: #bfdbfe;
+  font-family: var(--font-ui);
+  font-size: 13px;
+  font-weight: 600;
+  padding: 8px 12px;
+  border-radius: 10px;
+  cursor: pointer;
+  transition: background 0.2s ease, border-color 0.2s ease, color 0.2s ease;
+}
+
+.stage1-toggle-button:hover {
+  background: rgba(59, 130, 246, 0.2);
+  border-color: rgba(59, 130, 246, 0.55);
+  color: #dbeafe;
+}
+
 .spinner {
   width: 20px;
   height: 20px;

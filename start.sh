@@ -16,7 +16,18 @@ sleep 2
 # Start frontend
 echo "Starting frontend on http://localhost:5173..."
 cd frontend
-npm run dev -- --host &
+if command -v bun >/dev/null 2>&1; then
+  BUN_CMD="$(command -v bun)"
+elif [ -x "/home/patrick/.bun/bin/bun" ]; then
+  BUN_CMD="/home/patrick/.bun/bin/bun"
+else
+  echo "Error: Bun not found. Install Bun or add it to PATH."
+  echo "Checked PATH and /home/patrick/.bun/bin/bun"
+  kill "$BACKEND_PID" 2>/dev/null
+  exit 1
+fi
+
+"$BUN_CMD" run dev --host &
 FRONTEND_PID=$!
 
 echo ""

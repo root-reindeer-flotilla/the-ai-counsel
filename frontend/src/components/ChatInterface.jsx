@@ -25,8 +25,10 @@ export default function ChatInterface({
 }) {
     const [input, setInput] = useState('');
     const [webSearch, setWebSearch] = useState(false);
+    const [stage1ExpandedByMessage, setStage1ExpandedByMessage] = useState({});
     const messagesEndRef = useRef(null);
     const messagesContainerRef = useRef(null);
+    const stageProgressByMessageRef = useRef({});
 
     const scrollToBottom = () => {
         messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -45,6 +47,65 @@ export default function ChatInterface({
         if (isNearBottom) {
             scrollToBottom();
         }
+    }, [conversation]);
+
+    // Reset per-message Stage 1 toggle state when switching conversations.
+    useEffect(() => {
+        setStage1ExpandedByMessage({});
+        stageProgressByMessageRef.current = {};
+    }, [conversation?.id]);
+
+    // Default Stage 1 visibility by message and auto-collapse when Stage 2/3 starts.
+    useEffect(() => {
+        if (!conversation?.messages) return;
+
+        setStage1ExpandedByMessage((prev) => {
+            const next = { ...prev };
+            const activeKeys = new Set();
+            let changed = false;
+
+            conversation.messages.forEach((msg, index) => {
+                if (msg.role !== 'assistant') return;
+
+                const msgKey = `${conversation.id}-msg-${index}`;
+                activeKeys.add(msgKey);
+
+                const hasStage1 = Boolean(msg.loading?.stage1 || (Array.isArray(msg.stage1) && msg.stage1.length > 0));
+                if (!hasStage1) return;
+
+                const hasStage2Or3 = Boolean(msg.loading?.stage2 || msg.loading?.stage3 || msg.stage2 || msg.stage3);
+                const prevHasStage2Or3 = Boolean(stageProgressByMessageRef.current[msgKey]);
+
+                // Initialize defaults: expanded in chat_only flow, collapsed when later stages exist.
+                if (next[msgKey] === undefined) {
+                    next[msgKey] = !hasStage2Or3;
+                    changed = true;
+                }
+
+                // Auto-collapse exactly when a message transitions into Stage 2/3.
+                if (hasStage2Or3 && !prevHasStage2Or3 && next[msgKey] !== false) {
+                    next[msgKey] = false;
+                    changed = true;
+                }
+
+                stageProgressByMessageRef.current[msgKey] = hasStage2Or3;
+            });
+
+            // Prune stale keys from previous renders.
+            Object.keys(next).forEach((key) => {
+                if (!activeKeys.has(key)) {
+                    delete next[key];
+                    changed = true;
+                }
+            });
+            Object.keys(stageProgressByMessageRef.current).forEach((key) => {
+                if (!activeKeys.has(key)) {
+                    delete stageProgressByMessageRef.current[key];
+                }
+            });
+
+            return changed ? next : prev;
+        });
     }, [conversation]);
 
     const handleSubmit = (e) => {
@@ -112,6 +173,16 @@ export default function ChatInterface({
                                     </div>
                                 ) : (
                                     <>
+                                        {(() => {
+                                            const msgKey = `${conversation.id}-msg-${index}`;
+                                            const hasStage1 = Boolean(msg.loading?.stage1 || (Array.isArray(msg.stage1) && msg.stage1.length > 0));
+                                            const hasStage2Or3 = Boolean(msg.loading?.stage2 || msg.loading?.stage3 || msg.stage2 || msg.stage3);
+                                            const isStage1Expanded = stage1ExpandedByMessage[msgKey] ?? !hasStage2Or3;
+                                            const showStage1 = Boolean(msg.loading?.stage1 || (hasStage1 && isStage1Expanded));
+                                            const showStage1Toggle = Boolean(hasStage1 && hasStage2Or3 && !msg.loading?.stage1);
+
+                                            return (
+                                                <>
                                         {/* Search Loading */}
                                         {msg.loading?.search && (
                                             <div className="stage-loading">
@@ -137,7 +208,7 @@ export default function ChatInterface({
                                         )}
 
                                         {/* Stage 1: Council Grid Visualization */}
-                                        {(msg.loading?.stage1 || (msg.stage1 && !msg.stage2)) && (
+                                        {showStage1 && (
                                             <div className="stage-container">
                                                 <div className="stage-header">
                                                     <h3>Stage 1: Council Deliberation</h3>
@@ -161,7 +232,7 @@ export default function ChatInterface({
                                         )}
 
                                         {/* Stage 1 Results (Accordion/List - kept for detail view) */}
-                                        {(msg.loading?.stage1 || (msg.stage1 && !msg.stage2)) ? (
+                                        {showStage1 ? (
                                             msg.loading?.stage1 && !msg.stage1 ? (
                                                 <Stage1Skeleton />
                                             ) : msg.stage1 && (
@@ -172,6 +243,23 @@ export default function ChatInterface({
                                                 />
                                             )
                                         ) : null}
+
+                                        {showStage1Toggle && (
+                                            <div className="stage1-toggle-container">
+                                                <button
+                                                    type="button"
+                                                    className="stage1-toggle-button"
+                                                    onClick={() => {
+                                                        setStage1ExpandedByMessage((prev) => ({
+                                                            ...prev,
+                                                            [msgKey]: !(prev[msgKey] ?? !hasStage2Or3),
+                                                        }));
+                                                    }}
+                                                >
+                                                    {isStage1Expanded ? 'Hide Stage 1 Responses' : 'Show Stage 1 Responses'}
+                                                </button>
+                                            </div>
+                                        )}
 
                                         {/* Stage 2 */}
                                         {msg.loading?.stage2 && (
@@ -209,6 +297,9 @@ export default function ChatInterface({
                                                 </span>
                                             </div>
                                         )}
+                                                </>
+                                            );
+                                        })()}
                                     </>
                                 )}
                             </div>

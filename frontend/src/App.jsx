@@ -43,6 +43,7 @@ function App() {
       setSearchProvider(settings.search_provider || 'duckduckgo');
 
       const hasApiKey = settings.openrouter_api_key_set ||
+        settings.requesty_api_key_set ||
         settings.groq_api_key_set ||
         settings.openai_api_key_set ||
         settings.anthropic_api_key_set ||

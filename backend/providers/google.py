@@ -20,7 +20,11 @@ class GoogleProvider(LLMProvider):
             return {"error": True, "error_message": "Google API key not configured"}
             
         model = model_id.removeprefix("google:")
-        
+
+        # Gemini 3: Google recommends temperature 1.0; other values can cause looping/degraded reasoning.
+        if any(x in model for x in ("gemini-3-pro", "gemini-3-flash")):
+            temperature = 1.0
+
         # Convert messages to Gemini format
         contents = []
         system_instruction = None
@@ -60,7 +64,18 @@ class GoogleProvider(LLMProvider):
                 data = response.json()
                 try:
                     content = data["candidates"][0]["content"]["parts"][0]["text"]
-                    return {"content": content, "error": False}
+                    usage = data.get("usageMetadata") or {}
+                    total_tokens = usage.get("totalTokenCount")
+                    return {
+                        "content": content,
+                        "usage": {
+                            "prompt_tokens": usage.get("promptTokenCount"),
+                            "completion_tokens": usage.get("candidatesTokenCount"),
+                            "total_tokens": total_tokens,
+                        },
+                        "total_tokens": total_tokens,
+                        "error": False
+                    }
                 except (KeyError, IndexError):
                     return {"error": True, "error_message": "Unexpected response format from Google API"}
                 

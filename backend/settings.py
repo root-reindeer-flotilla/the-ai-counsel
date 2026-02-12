@@ -17,6 +17,7 @@ DEFAULT_CHAIRMAN_MODEL = ""
 # Default enabled providers
 DEFAULT_ENABLED_PROVIDERS = {
     "openrouter": True,
+    "requesty": False,
     "ollama": False,
     "groq": False,
     "direct": False,  # Master toggle for all direct connections
@@ -78,6 +79,7 @@ class Settings(BaseModel):
     brave_api_key: Optional[str] = None
     serper_api_key: Optional[str] = None
     openrouter_api_key: Optional[str] = None
+    requesty_api_key: Optional[str] = None
     openai_api_key: Optional[str] = None
     anthropic_api_key: Optional[str] = None
     google_api_key: Optional[str] = None

@@ -243,6 +243,29 @@ export const api = {
   },
 
   /**
+   * Get available models from Requesty.
+   */
+  async getRequestyModels() {
+    const response = await fetch(`${API_BASE}/api/models/requesty`);
+    if (!response.ok) {
+      throw new Error('Failed to get Requesty models');
+    }
+    return response.json();
+  },
+
+  /**
+   * Test Requesty API key.
+   */
+  async testRequestyKey(apiKey) {
+    const response = await fetch(`${API_BASE}/api/settings/test-requesty`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ api_key: apiKey || null }),
+    });
+    return response.json();
+  },
+
+  /**
    * Get available models from Ollama.
    */
   async getOllamaModels(baseUrl) {

@@ -27,6 +27,12 @@ export default function Settings({ onClose, ollamaStatus, onRefreshOllama, initi
   const [isTestingOpenRouter, setIsTestingOpenRouter] = useState(false);
   const [openrouterTestResult, setOpenrouterTestResult] = useState(null);
 
+  // Requesty State
+  const [requestyApiKey, setRequestyApiKey] = useState('');
+  const [requestyAvailableModels, setRequestyAvailableModels] = useState([]);
+  const [isTestingRequesty, setIsTestingRequesty] = useState(false);
+  const [requestyTestResult, setRequestyTestResult] = useState(null);
+
   // Groq State
   const [groqApiKey, setGroqApiKey] = useState('');
   const [isTestingGroq, setIsTestingGroq] = useState(false);
@@ -75,6 +81,7 @@ export default function Settings({ onClose, ollamaStatus, onRefreshOllama, initi
   // Enabled Providers (which sources are available)
   const [enabledProviders, setEnabledProviders] = useState({
     openrouter: true,
+    requesty: false,
     ollama: false,
     groq: false,
     direct: false,  // Master toggle for all direct connections
@@ -130,6 +137,13 @@ export default function Settings({ onClose, ollamaStatus, onRefreshOllama, initi
   useEffect(() => {
     setActiveSection(initialSection);
   }, [initialSection]);
+
+  // When opening Council Config with Ollama connected but no local models loaded, retry loading (e.g. remote URL)
+  useEffect(() => {
+    if (activeSection === 'council' && ollamaStatus?.connected && ollamaAvailableModels.length === 0 && ollamaBaseUrl) {
+      loadOllamaModels(ollamaBaseUrl);
+    }
+  }, [activeSection, ollamaStatus?.connected, ollamaBaseUrl]);
 
   // Check for changes
   useEffect(() => {
@@ -189,7 +203,7 @@ export default function Settings({ onClose, ollamaStatus, onRefreshOllama, initi
   ]);
 
   // Helper to determine if filters need to switch based on availability
-  const isRemoteAvailable = enabledProviders.openrouter || enabledProviders.direct || enabledProviders.groq || enabledProviders.custom;
+  const isRemoteAvailable = enabledProviders.openrouter || enabledProviders.requesty || enabledProviders.direct || enabledProviders.groq || enabledProviders.custom;
   const isLocalAvailable = enabledProviders.ollama;
 
   const getNewFilter = (currentFilter) => {
@@ -339,10 +353,12 @@ export default function Settings({ onClose, ollamaStatus, onRefreshOllama, initi
           data.google_api_key_set || data.mistral_api_key_set || data.deepseek_api_key_set);
 
         setEnabledProviders({
-          openrouter: !!data.openrouter_api_key_set || (!hasDirectConfigured && !ollamaStatus?.connected && !data.groq_api_key_set),
+          openrouter: !!data.openrouter_api_key_set || (!hasDirectConfigured && !ollamaStatus?.connected && !data.groq_api_key_set && !data.requesty_api_key_set),
+          requesty: !!data.requesty_api_key_set,
           ollama: ollamaStatus?.connected || false,
           groq: !!data.groq_api_key_set,
-          direct: hasDirectConfigured
+          direct: hasDirectConfigured,
+          custom: !!data.custom_endpoint_api_key_set
         });
       }
 
@@ -439,10 +455,22 @@ export default function Settings({ onClose, ollamaStatus, onRefreshOllama, initi
         setDirectAvailableModels(directModels);
       } catch (error) {
         console.error('Failed to fetch direct models:', error);
-        // Fallback to empty list or basic models if fetch fails
         setDirectAvailableModels([]);
       }
 
+      // Fetch Requesty models
+      try {
+        const requestyData = await api.getRequestyModels();
+        if (requestyData.models && requestyData.models.length > 0) {
+          const sorted = requestyData.models.sort((a, b) => (a.name || '').localeCompare(b.name || ''));
+          setRequestyAvailableModels(sorted);
+        } else {
+          setRequestyAvailableModels([]);
+        }
+      } catch (error) {
+        console.warn('Failed to fetch Requesty models:', error);
+        setRequestyAvailableModels([]);
+      }
     } catch (err) {
       console.warn('Failed to load models:', err);
     } finally {
@@ -457,9 +485,12 @@ export default function Settings({ onClose, ollamaStatus, onRefreshOllama, initi
         // Sort models alphabetically
         const sorted = data.models.sort((a, b) => (a.name || '').localeCompare(b.name || ''));
         setOllamaAvailableModels(sorted);
+      } else {
+        setOllamaAvailableModels([]);
       }
     } catch (err) {
       console.warn('Failed to load Ollama models:', err);
+      setOllamaAvailableModels([]);
     }
   };
 
@@ -619,19 +650,14 @@ export default function Settings({ onClose, ollamaStatus, onRefreshOllama, initi
     setIsTestingOpenRouter(true);
     setOpenrouterTestResult(null);
     try {
-      // If input is empty but key is configured, pass null to test the saved key
       const keyToTest = openrouterApiKey || null;
       const result = await api.testOpenRouterKey(keyToTest);
       setOpenrouterTestResult(result);
 
-      // Auto-save API key if validation succeeds and a new key was provided
       if (result.success && openrouterApiKey) {
         await api.updateSettings({ openrouter_api_key: openrouterApiKey });
-        setOpenrouterApiKey(''); // Clear input after save
-
-        // Reload settings
+        setOpenrouterApiKey('');
         await loadSettings();
-
         setSuccess(true);
         setTimeout(() => setSuccess(false), 3000);
       }
@@ -639,6 +665,32 @@ export default function Settings({ onClose, ollamaStatus, onRefreshOllama, initi
       setOpenrouterTestResult({ success: false, message: 'Test failed' });
     } finally {
       setIsTestingOpenRouter(false);
+    }
+  };
+
+  const handleTestRequesty = async () => {
+    if (!requestyApiKey && !settings.requesty_api_key_set) {
+      setRequestyTestResult({ success: false, message: 'Please enter an API key first' });
+      return;
+    }
+    setIsTestingRequesty(true);
+    setRequestyTestResult(null);
+    try {
+      const keyToTest = requestyApiKey || null;
+      const result = await api.testRequestyKey(keyToTest);
+      setRequestyTestResult(result);
+
+      if (result.success && requestyApiKey) {
+        await api.updateSettings({ requesty_api_key: requestyApiKey });
+        setRequestyApiKey('');
+        await loadSettings();
+        setSuccess(true);
+        setTimeout(() => setSuccess(false), 3000);
+      }
+    } catch (err) {
+      setRequestyTestResult({ success: false, message: 'Test failed' });
+    } finally {
+      setIsTestingRequesty(false);
     }
   };
 
@@ -692,6 +744,9 @@ export default function Settings({ onClose, ollamaStatus, onRefreshOllama, initi
 
         // Reload settings
         await loadSettings();
+
+        // Load Ollama models with the URL we just tested so "Local" is enabled in Council Config
+        await loadOllamaModels(ollamaBaseUrl);
 
         setSuccess(true);
         setTimeout(() => setSuccess(false), 3000);
@@ -864,7 +919,7 @@ export default function Settings({ onClose, ollamaStatus, onRefreshOllama, initi
 
     // Determine best default filter based on what's available
     let defaultFilter = 'remote';
-    const isRemoteAvailable = enabledProviders.openrouter || enabledProviders.direct || enabledProviders.groq || enabledProviders.custom;
+    const isRemoteAvailable = enabledProviders.openrouter || enabledProviders.requesty || enabledProviders.direct || enabledProviders.groq || enabledProviders.custom;
     const isLocalAvailable = enabledProviders.ollama && ollamaAvailableModels.length > 0;
 
     if (!isRemoteAvailable && isLocalAvailable) {
@@ -1256,6 +1311,9 @@ export default function Settings({ onClose, ollamaStatus, onRefreshOllama, initi
       if (openrouterApiKey && !openrouterApiKey.startsWith('•')) {
         updates.openrouter_api_key = openrouterApiKey;
       }
+      if (requestyApiKey && !requestyApiKey.startsWith('•')) {
+        updates.requesty_api_key = requestyApiKey;
+      }
       if (groqApiKey && !groqApiKey.startsWith('•')) {
         updates.groq_api_key = groqApiKey;
       }
@@ -1303,6 +1361,11 @@ export default function Settings({ onClose, ollamaStatus, onRefreshOllama, initi
       models.push(...availableModels);
     }
 
+    // Add Requesty models if enabled
+    if (enabledProviders.requesty) {
+      models.push(...requestyAvailableModels);
+    }
+
     // Add Ollama models if enabled
     if (enabledProviders.ollama) {
       models.push(...ollamaAvailableModels.map(m => ({
@@ -1347,6 +1410,7 @@ export default function Settings({ onClose, ollamaStatus, onRefreshOllama, initi
   }, [
     enabledProviders,
     availableModels,
+    requestyAvailableModels,
     ollamaAvailableModels,
     directAvailableModels,
     customEndpointModels,
@@ -1364,15 +1428,12 @@ export default function Settings({ onClose, ollamaStatus, onRefreshOllama, initi
     // 1. If it's an OpenRouter model, checks if it's free.
     // 2. If it's NOT OpenRouter (Direct, Ollama, Custom), keep it visible.
     return all.filter(m => {
-      // Check if it's an OpenRouter model
-      const isOpenRouter = m.source === 'openrouter' || m.provider === 'OpenRouter' || m.id.startsWith('openrouter:') || m.id.includes('/');
+      const isOpenRouter = m.source === 'openrouter' || m.provider === 'OpenRouter' || m.id.startsWith('openrouter:') || (m.id.includes('/') && !m.id.startsWith('requesty:'));
+      const isRequesty = m.source === 'requesty' || m.provider === 'Requesty' || m.id.startsWith('requesty:');
 
-      // If it is OpenRouter, apply the free filter
-      if (isOpenRouter) {
+      if (isOpenRouter || isRequesty) {
         return m.is_free;
       }
-
-      // Otherwise (Direct, Ollama, Custom), always show
       return true;
     });
   }, [allAvailableModels, showFreeOnly]);
@@ -1382,12 +1443,10 @@ export default function Settings({ onClose, ollamaStatus, onRefreshOllama, initi
   // Filter models by remote/local for specific use case
   const filterByRemoteLocal = (models, filter) => {
     if (filter === 'local') {
-      // Only Ollama models
       return models.filter(m => m.id.startsWith('ollama:'));
-    } else {
-      // Remote: OpenRouter + Direct providers (exclude Ollama)
-      return models.filter(m => !m.id.startsWith('ollama:'));
     }
+    // Remote: OpenRouter, Requesty, Direct providers (exclude Ollama)
+    return models.filter(m => !m.id.startsWith('ollama:'));
   };
 
   if (!settings) {
@@ -1460,6 +1519,12 @@ export default function Settings({ onClose, ollamaStatus, onRefreshOllama, initi
                 handleTestOpenRouter={handleTestOpenRouter}
                 isTestingOpenRouter={isTestingOpenRouter}
                 openrouterTestResult={openrouterTestResult}
+                // Requesty
+                requestyApiKey={requestyApiKey}
+                setRequestyApiKey={(val) => { setRequestyApiKey(val); setRequestyTestResult(null); }}
+                handleTestRequesty={handleTestRequesty}
+                isTestingRequesty={isTestingRequesty}
+                requestyTestResult={requestyTestResult}
                 // Groq
                 groqApiKey={groqApiKey}
                 setGroqApiKey={(val) => { setGroqApiKey(val); setGroqTestResult(null); }}
@@ -1498,6 +1563,7 @@ export default function Settings({ onClose, ollamaStatus, onRefreshOllama, initi
             {activeSection === 'council' && (
               <CouncilConfig
                 settings={settings}
+                ollamaStatus={ollamaStatus}
                 // State
                 enabledProviders={enabledProviders}
                 setEnabledProviders={setEnabledProviders}

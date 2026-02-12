@@ -3,6 +3,7 @@
 from typing import List, Dict, Any, Tuple
 import asyncio
 import logging
+import time
 from . import openrouter
 from . import ollama_client
 from .config import get_council_models, get_chairman_model
@@ -11,6 +12,11 @@ from .settings import get_settings
 
 logger = logging.getLogger(__name__)
 
+# Stage 2 aggregation policy:
+# - Hard cap: discard ballots with completion below 25%
+# - Soft cap: weight retained ballots by completion ratio
+STAGE2_HARD_CAP_MIN_COMPLETION = 0.25
+
 
 from .providers.openai import OpenAIProvider
 from .providers.anthropic import AnthropicProvider
@@ -18,6 +24,7 @@ from .providers.google import GoogleProvider
 from .providers.mistral import MistralProvider
 from .providers.deepseek import DeepSeekProvider
 from .providers.openrouter import OpenRouterProvider
+from .providers.requesty import RequestyProvider
 from .providers.ollama import OllamaProvider
 from .providers.groq import GroqProvider
 from .providers.custom_openai import CustomOpenAIProvider
@@ -31,9 +38,44 @@ PROVIDERS = {
     "deepseek": DeepSeekProvider(),
     "groq": GroqProvider(),
     "openrouter": OpenRouterProvider(),
+    "requesty": RequestyProvider(),
     "ollama": OllamaProvider(),
     "custom": CustomOpenAIProvider(),
 }
+
+# Models that should always run at temperature 1.0.
+FORCED_TEMP_ONE_MODELS = {
+    "google/gemini-2.5-flash",
+    "x-ai/grok-4.1-fast",
+    "z-ai/glm-5",
+    "minimax/minimax-m2.5",
+}
+
+# Prefix-based matches for families/variants (e.g. ":free", "-exp", "-speciale").
+FORCED_TEMP_ONE_PREFIXES = (
+    "deepseek/deepseek-v3.2",
+    "arcee-ai/trinity-large-preview",
+)
+
+
+def _normalize_model_for_rules(model_id: str) -> str:
+    """Strip internal provider prefix so rules can match on canonical model id."""
+    if not model_id:
+        return ""
+    if ":" in model_id:
+        maybe_provider, rest = model_id.split(":", 1)
+        if maybe_provider in PROVIDERS:
+            return rest
+    return model_id
+
+
+def _should_force_temperature_one(model_id: str) -> bool:
+    """True when model should always use temperature=1.0."""
+    normalized = _normalize_model_for_rules(model_id).lower()
+    if normalized in FORCED_TEMP_ONE_MODELS:
+        return True
+    return any(normalized.startswith(prefix) for prefix in FORCED_TEMP_ONE_PREFIXES)
+
 
 def get_provider_for_model(model_id: str) -> Any:
     """Determine the provider for a given model ID."""
@@ -46,10 +88,42 @@ def get_provider_for_model(model_id: str) -> Any:
     return PROVIDERS["openrouter"]
 
 
+def _is_ollama_model(model_id: str) -> bool:
+    """True if model is local Ollama (single-instance, run sequentially)."""
+    return model_id.startswith("ollama:")
+
+def _extract_total_tokens(response: Dict[str, Any]) -> Any:
+    """Best-effort extraction of total token count from provider response."""
+    if not isinstance(response, dict):
+        return None
+    total_tokens = response.get("total_tokens")
+    if isinstance(total_tokens, int):
+        return total_tokens
+
+    usage = response.get("usage")
+    if isinstance(usage, dict):
+        if isinstance(usage.get("total_tokens"), int):
+            return usage.get("total_tokens")
+        prompt_tokens = usage.get("prompt_tokens")
+        completion_tokens = usage.get("completion_tokens")
+        if isinstance(prompt_tokens, int) or isinstance(completion_tokens, int):
+            return int(prompt_tokens or 0) + int(completion_tokens or 0)
+
+    return None
+
+def _extract_usage(response: Dict[str, Any]) -> Dict[str, Any]:
+    """Best-effort extraction of usage dict from provider response."""
+    if not isinstance(response, dict):
+        return {}
+    usage = response.get("usage")
+    return usage if isinstance(usage, dict) else {}
+
+
 async def query_model(model: str, messages: List[Dict[str, str]], timeout: float = 120.0, temperature: float = 0.7) -> Dict[str, Any]:
     """Dispatch query to appropriate provider."""
     provider = get_provider_for_model(model)
-    return await provider.query(model, messages, timeout, temperature)
+    effective_temperature = 1.0 if _should_force_temperature_one(model) else temperature
+    return await provider.query(model, messages, timeout, effective_temperature)
 
 
 async def query_models_parallel(models: List[str], messages: List[Dict[str, str]]) -> Dict[str, Any]:
@@ -128,64 +202,98 @@ async def stage1_collect_responses(user_query: str, search_context: str = "", re
 
     council_temp = settings.council_temperature
 
-    async def _query_safe(m: str):
-        try:
-            return m, await query_model(m, messages, temperature=council_temp)
-        except Exception as e:
-            return m, {"error": True, "error_message": str(e)}
+    # Split Ollama (local, single-instance) from cloud/API models; run Ollama sequentially
+    ollama_models = [m for m in models if _is_ollama_model(m)]
+    cloud_models = [m for m in models if not _is_ollama_model(m)]
 
-    # Create tasks
-    tasks = [asyncio.create_task(_query_safe(m)) for m in models]
-    
-    # Process as they complete
+    async def _query_safe(m: str):
+        started_at = time.perf_counter()
+        try:
+            response = await query_model(m, messages, temperature=council_temp)
+            elapsed_ms = max(0, int((time.perf_counter() - started_at) * 1000))
+            return m, response, elapsed_ms
+        except Exception as e:
+            elapsed_ms = max(0, int((time.perf_counter() - started_at) * 1000))
+            return m, {"error": True, "error_message": str(e)}, elapsed_ms
+
+    async def _run_ollama_sequential():
+        """Run Ollama models one at a time (single local instance)."""
+        out = []
+        for m in ollama_models:
+            if request and await request.is_disconnected():
+                raise asyncio.CancelledError("Client disconnected")
+            out.append(await _query_safe(m))
+        return out
+
+    def _make_result(model: str, response: dict, stage1_duration_ms: int) -> dict:
+        if response is None:
+            return None
+        stage1_total_tokens = _extract_total_tokens(response)
+        stage1_usage = _extract_usage(response)
+        stage1_response_id = response.get("response_id") if isinstance(response.get("response_id"), str) else None
+        if response.get('error'):
+            return {
+                "model": model,
+                "response": None,
+                "error": response.get('error'),
+                "error_message": response.get('error_message', 'Unknown error'),
+                "stage1_duration_ms": stage1_duration_ms,
+                "stage1_total_tokens": stage1_total_tokens,
+                "stage1_usage": stage1_usage,
+                "stage1_response_id": stage1_response_id,
+            }
+        content = response.get('content', '')
+        if not isinstance(content, str):
+            content = str(content) if content is not None else ''
+        return {
+            "model": model,
+            "response": content,
+            "error": None,
+            "stage1_duration_ms": stage1_duration_ms,
+            "stage1_total_tokens": stage1_total_tokens,
+            "stage1_usage": stage1_usage,
+            "stage1_response_id": stage1_response_id,
+        }
+
+    # Cloud/API: one task per model (parallel). Ollama: one task that runs all sequentially.
+    tasks = []
+    ollama_task = None
+    if ollama_models:
+        ollama_task = asyncio.create_task(_run_ollama_sequential())
+        tasks.append(ollama_task)
+    tasks.extend(asyncio.create_task(_query_safe(m)) for m in cloud_models)
+
     pending = set(tasks)
     try:
         while pending:
-            # Check for client disconnect
             if request and await request.is_disconnected():
                 logger.info("Client disconnected during Stage 1. Cancelling tasks...")
                 for t in pending:
                     t.cancel()
                 raise asyncio.CancelledError("Client disconnected")
 
-            # Wait for the next task to complete (with timeout to check for disconnects)
             done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED, timeout=1.0)
 
             for task in done:
                 try:
-                    model, response = await task
-                    
-                    result = None
-                    if response is not None:
-                        if response.get('error'):
-                            # Include failed models with error info
-                            result = {
-                                "model": model,
-                                "response": None,
-                                "error": response.get('error'),
-                                "error_message": response.get('error_message', 'Unknown error')
-                            }
-                        else:
-                            # Successful response - ensure content is always a string
-                            content = response.get('content', '')
-                            if not isinstance(content, str):
-                                # Handle case where API returns non-string content (array, object, etc.)
-                                content = str(content) if content is not None else ''
-                            result = {
-                                "model": model,
-                                "response": content,
-                                "error": None
-                            }
-                    
-                    if result:
-                        yield result
+                    raw = await task
+                    # Ollama task returns list of (model, response, elapsed_ms); cloud tasks return same tuple
+                    if task is ollama_task and isinstance(raw, list):
+                        for model, response, elapsed_ms in raw:
+                            result = _make_result(model, response, elapsed_ms)
+                            if result:
+                                yield result
+                    else:
+                        model, response, elapsed_ms = raw
+                        result = _make_result(model, response, elapsed_ms)
+                        if result:
+                            yield result
                 except asyncio.CancelledError:
                     raise
                 except Exception as e:
                     logger.error(f"Error processing Stage 1 task result: {e}")
 
     except asyncio.CancelledError:
-        # Ensure all tasks are cancelled if we get cancelled
         for t in tasks:
             if not t.done():
                 t.cancel()
@@ -251,77 +359,133 @@ async def stage2_collect_rankings(
     messages = [{"role": "user", "content": ranking_prompt}]
 
     # Only use models that successfully responded in Stage 1
-    # (no point asking failed models to rank - they'll just fail again)
     successful_models = [r['model'] for r in successful_results]
 
     # Use dedicated Stage 2 temperature (lower for consistent ranking output)
     stage2_temp = settings.stage2_temperature
+    expected_count = len(successful_results)
 
     async def _query_safe(m: str):
+        started_at = time.perf_counter()
+        metadata = {
+            "stage2_transform_applied": False,
+            "stage2_retry_reason": None,
+            "stage2_middle_out_mode": "retry_on_overflow",
+        }
         try:
-            return m, await query_model(m, messages, temperature=stage2_temp)
+            provider = get_provider_for_model(m)
+            if isinstance(provider, OpenRouterProvider):
+                response = await openrouter.query_model(
+                    m,
+                    messages,
+                    temperature=stage2_temp,
+                )
+                if openrouter.is_context_overflow_response(response):
+                    metadata["stage2_retry_reason"] = "context_overflow"
+                    metadata["stage2_transform_applied"] = True
+                    response = await openrouter.query_model(
+                        m,
+                        messages,
+                        temperature=stage2_temp,
+                        transforms=["middle-out"],
+                    )
+            else:
+                response = await query_model(m, messages, temperature=stage2_temp)
+            elapsed_ms = max(0, int((time.perf_counter() - started_at) * 1000))
+            return m, response, elapsed_ms, metadata
         except Exception as e:
-            return m, {"error": True, "error_message": str(e)}
+            elapsed_ms = max(0, int((time.perf_counter() - started_at) * 1000))
+            return m, {"error": True, "error_message": str(e)}, elapsed_ms, metadata
 
-    # Create tasks
-    tasks = [asyncio.create_task(_query_safe(m)) for m in successful_models]
+    # Run Ollama models sequentially; cloud models in parallel
+    ollama_models = [m for m in successful_models if _is_ollama_model(m)]
+    cloud_models = [m for m in successful_models if not _is_ollama_model(m)]
 
-    # Process as they complete
+    async def _run_ollama_sequential():
+        out = []
+        for m in ollama_models:
+            if request and await request.is_disconnected():
+                raise asyncio.CancelledError("Client disconnected")
+            out.append(await _query_safe(m))
+        return out
+
+    def _make_stage2_result(model: str, response: dict, stage2_duration_ms: int, metadata: dict = None) -> dict:
+        if response is None:
+            return None
+        metadata = metadata or {}
+        stage2_total_tokens = _extract_total_tokens(response)
+        stage2_usage = _extract_usage(response)
+        stage2_response_id = response.get("response_id") if isinstance(response.get("response_id"), str) else None
+        if response.get('error'):
+            return {
+                "model": model,
+                "ranking": None,
+                "parsed_ranking": [],
+                "error": response.get('error'),
+                "error_message": response.get('error_message', 'Unknown error'),
+                "stage2_duration_ms": stage2_duration_ms,
+                "stage2_total_tokens": stage2_total_tokens,
+                "stage2_usage": stage2_usage,
+                "stage2_response_id": stage2_response_id,
+                "stage2_transform_applied": metadata.get("stage2_transform_applied", False),
+                "stage2_retry_reason": metadata.get("stage2_retry_reason"),
+                "stage2_middle_out_mode": metadata.get("stage2_middle_out_mode"),
+            }
+        full_text = response.get('content', '')
+        if not isinstance(full_text, str):
+            full_text = str(full_text) if full_text is not None else ''
+        parsed = parse_ranking_from_text(full_text, expected_count=expected_count)
+        return {
+            "model": model,
+            "ranking": full_text,
+            "parsed_ranking": parsed,
+            "error": None,
+            "stage2_duration_ms": stage2_duration_ms,
+            "stage2_total_tokens": stage2_total_tokens,
+            "stage2_usage": stage2_usage,
+            "stage2_response_id": stage2_response_id,
+            "stage2_transform_applied": metadata.get("stage2_transform_applied", False),
+            "stage2_retry_reason": metadata.get("stage2_retry_reason"),
+            "stage2_middle_out_mode": metadata.get("stage2_middle_out_mode"),
+        }
+
+    tasks = []
+    ollama_task = None
+    if ollama_models:
+        ollama_task = asyncio.create_task(_run_ollama_sequential())
+        tasks.append(ollama_task)
+    tasks.extend(asyncio.create_task(_query_safe(m)) for m in cloud_models)
+
     pending = set(tasks)
     try:
         while pending:
-            # Check for client disconnect
             if request and await request.is_disconnected():
                 logger.info("Client disconnected during Stage 2. Cancelling tasks...")
                 for t in pending:
                     t.cancel()
                 raise asyncio.CancelledError("Client disconnected")
 
-            # Wait for the next task to complete (with timeout to check for disconnects)
             done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED, timeout=1.0)
 
             for task in done:
                 try:
-                    model, response = await task
-                    
-                    result = None
-                    if response is not None:
-                        if response.get('error'):
-                            # Include failed models with error info
-                            result = {
-                                "model": model,
-                                "ranking": None,
-                                "parsed_ranking": [],
-                                "error": response.get('error'),
-                                "error_message": response.get('error_message', 'Unknown error')
-                            }
-                        else:
-                            # Ensure content is always a string before parsing
-                            full_text = response.get('content', '')
-                            if not isinstance(full_text, str):
-                                # Handle case where API returns non-string content (array, object, etc.)
-                                full_text = str(full_text) if full_text is not None else ''
-                            
-                            # Parse with expected count to avoid duplicates
-                            expected_count = len(successful_results)
-                            parsed = parse_ranking_from_text(full_text, expected_count=expected_count)
-                            
-                            result = {
-                                "model": model,
-                                "ranking": full_text,
-                                "parsed_ranking": parsed,
-                                "error": None
-                            }
-                    
-                    if result:
-                        yield result
+                    raw = await task
+                    if task is ollama_task and isinstance(raw, list):
+                        for model, response, elapsed_ms, metadata in raw:
+                            result = _make_stage2_result(model, response, elapsed_ms, metadata)
+                            if result:
+                                yield result
+                    else:
+                        model, response, elapsed_ms, metadata = raw
+                        result = _make_stage2_result(model, response, elapsed_ms, metadata)
+                        if result:
+                            yield result
                 except asyncio.CancelledError:
                     raise
                 except Exception as e:
                     logger.error(f"Error processing task result: {e}")
 
     except asyncio.CancelledError:
-        # Ensure all tasks are cancelled if we get cancelled
         for t in tasks:
             if not t.done():
                 t.cancel()
@@ -494,8 +658,9 @@ def parse_ranking_from_text(ranking_text: str, expected_count: int = None) -> Li
 
 def calculate_aggregate_rankings(
     stage2_results: List[Dict[str, Any]],
-    label_to_model: Dict[str, str]
-) -> List[Dict[str, Any]]:
+    label_to_model: Dict[str, str],
+    return_diagnostics: bool = False
+) -> Any:
     """
     Calculate aggregate rankings across all models.
 
@@ -504,39 +669,83 @@ def calculate_aggregate_rankings(
         label_to_model: Mapping from anonymous labels to model names
 
     Returns:
-        List of dicts with model name and average rank, sorted best to worst
+        By default: List of dicts with model name and average rank, sorted best to worst.
+        If return_diagnostics=True: Tuple[List[Dict[str, Any]], Dict[str, Any]].
     """
     from collections import defaultdict
 
-    # Track positions for each model
-    model_positions = defaultdict(list)
+    expected_count = len(label_to_model)
+    valid_labels = set(label_to_model.keys())
+
+    # Track weighted sums for each model
+    model_rank_sum = defaultdict(float)
+    model_weight_sum = defaultdict(float)
+    model_rankings_count = defaultdict(int)
+
+    diagnostics = {
+        "ballots_total": len(stage2_results),
+        "ballots_used": 0,
+        "ballots_dropped_hard_cap": 0,
+        "hard_cap_min_completion": STAGE2_HARD_CAP_MIN_COMPLETION,
+    }
+
+    def _dedupe_valid_labels(labels: List[str]) -> List[str]:
+        """Preserve order, keep first occurrence, and ignore invalid labels."""
+        seen = set()
+        deduped = []
+        for label in labels:
+            if label not in valid_labels:
+                continue
+            if label in seen:
+                continue
+            seen.add(label)
+            deduped.append(label)
+        return deduped
 
     for ranking in stage2_results:
-        ranking_text = ranking['ranking']
+        ranking_text = ranking.get("ranking")
+        if not ranking_text:
+            diagnostics["ballots_dropped_hard_cap"] += 1
+            continue
 
         # Parse the ranking from the structured format
-        expected_count = len(label_to_model)
         parsed_ranking = parse_ranking_from_text(ranking_text, expected_count=expected_count)
+        parsed_ranking = _dedupe_valid_labels(parsed_ranking)
+        ranked_count = len(parsed_ranking)
+        completion_ratio = (ranked_count / expected_count) if expected_count > 0 else 0.0
+
+        # Hard cap: discard very incomplete ballots
+        if completion_ratio < STAGE2_HARD_CAP_MIN_COMPLETION:
+            diagnostics["ballots_dropped_hard_cap"] += 1
+            continue
+
+        # Soft cap: retained ballots weighted by completion ratio
+        ballot_weight = completion_ratio
+        diagnostics["ballots_used"] += 1
 
         for position, label in enumerate(parsed_ranking, start=1):
-            if label in label_to_model:
-                model_name = label_to_model[label]
-                model_positions[model_name].append(position)
+            model_name = label_to_model[label]
+            model_rank_sum[model_name] += ballot_weight * position
+            model_weight_sum[model_name] += ballot_weight
+            model_rankings_count[model_name] += 1
 
     # Calculate average position for each model
     aggregate = []
-    for model, positions in model_positions.items():
-        if positions:
-            avg_rank = sum(positions) / len(positions)
+    for model, weighted_sum in model_rank_sum.items():
+        total_weight = model_weight_sum[model]
+        if total_weight > 0:
+            avg_rank = weighted_sum / total_weight
             aggregate.append({
                 "model": model,
                 "average_rank": round(avg_rank, 2),
-                "rankings_count": len(positions)
+                "rankings_count": model_rankings_count[model]
             })
 
     # Sort by average rank (lower is better)
     aggregate.sort(key=lambda x: x['average_rank'])
 
+    if return_diagnostics:
+        return aggregate, diagnostics
     return aggregate
 
 

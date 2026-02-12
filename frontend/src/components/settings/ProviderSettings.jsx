@@ -33,6 +33,12 @@ export default function ProviderSettings({
     handleTestOpenRouter,
     isTestingOpenRouter,
     openrouterTestResult,
+    // Requesty
+    requestyApiKey,
+    setRequestyApiKey,
+    handleTestRequesty,
+    isTestingRequesty,
+    requestyTestResult,
     // Groq
     groqApiKey,
     setGroqApiKey,
@@ -123,6 +129,41 @@ export default function ProviderSettings({
                 )}
                 <p className="api-key-hint">
                     Get key at <a href="https://openrouter.ai/keys" target="_blank" rel="noopener noreferrer">openrouter.ai</a>
+                </p>
+            </form>
+
+            {/* Requesty */}
+            <form className="api-key-section" onSubmit={e => e.preventDefault()}>
+                <label>
+                    <img src={customEndpointIcon} alt="" className="provider-icon" />
+                    Requesty API Key
+                </label>
+                <div className="api-key-input-row">
+                    <input
+                        type="password"
+                        placeholder={settings?.requesty_api_key_set ? '••••••••••••••••' : 'Enter API key'}
+                        value={requestyApiKey}
+                        onChange={(e) => setRequestyApiKey(e.target.value)}
+                        className={settings?.requesty_api_key_set && !requestyApiKey ? 'key-configured' : ''}
+                    />
+                    <button
+                        className="test-button"
+                        onClick={handleTestRequesty}
+                        disabled={(!requestyApiKey && !settings?.requesty_api_key_set) || isTestingRequesty}
+                    >
+                        {isTestingRequesty ? 'Testing...' : (settings?.requesty_api_key_set && !requestyApiKey ? 'Retest' : 'Test')}
+                    </button>
+                </div>
+                {settings?.requesty_api_key_set && !requestyApiKey && (
+                    <div className="key-status set">✓ API key configured</div>
+                )}
+                {requestyTestResult && (
+                    <div className={`test-result ${requestyTestResult.success ? 'success' : 'error'}`}>
+                        {requestyTestResult.message}
+                    </div>
+                )}
+                <p className="api-key-hint">
+                    Get key at <a href="https://app.requesty.ai" target="_blank" rel="noopener noreferrer">requesty.ai</a>
                 </p>
             </form>
 

@@ -209,6 +209,18 @@ export default function Stage2({ rankings, labelToModel, aggregateRankings, star
                         {aggregateRankings.map((agg, index) => {
                             const visuals = getModelVisuals(agg.model);
                             const shortName = getShortModelName(agg.model);
+                            const parsedRowSeconds = Number(agg?.generation_time_seconds);
+                            const safeRowSeconds = Number.isFinite(parsedRowSeconds)
+                                ? Math.max(0, Math.round(parsedRowSeconds))
+                                : null;
+                            const generationTimeLabel = safeRowSeconds !== null ? `${safeRowSeconds}s` : null;
+                            const parsedRowTokens = Number(agg?.generation_total_tokens);
+                            const safeRowTokens = Number.isFinite(parsedRowTokens)
+                                ? Math.max(0, Math.round(parsedRowTokens))
+                                : null;
+                            const generationTokensLabel = safeRowTokens !== null
+                                ? safeRowTokens.toLocaleString('en-US')
+                                : null;
 
                             // Calculate bar width proportional to the rank value
                             // Higher rank = longer bar (matches the number visually)
@@ -226,21 +238,32 @@ export default function Stage2({ rankings, labelToModel, aggregateRankings, star
                                                 width: `${scorePercent}%`,
                                                 '--bar-color-rgb': hexToRgb(visuals.color)
                                             }}
-                                        >
-                                            <div className="rank-content">
-                                                <div className="rank-model-info">
-                                                    <span className="mini-avatar" style={{ backgroundColor: visuals.color }}>
-                                                        {visuals.icon}
-                                                    </span>
-                                                    <span className="rank-model-name">{shortName}</span>
-                                                </div>
+                                        />
+                                        <div className="rank-content">
+                                            <div className="rank-model-info">
+                                                <span className="mini-avatar" style={{ backgroundColor: visuals.color }}>
+                                                    {visuals.icon}
+                                                </span>
+                                                <span className="rank-model-name">{shortName}</span>
+                                            </div>
 
-                                                <div className="rank-stats">
+                                            <div className="rank-stats">
+                                                <span className="rank-score">
+                                                    {agg.average_rank.toFixed(2)}
+                                                </span>
+                                                {generationTimeLabel && (
                                                     <span className="rank-score">
-                                                        {agg.average_rank.toFixed(2)}
+                                                        {" | "}
+                                                        {generationTimeLabel}
                                                     </span>
-                                                    {index === 0 && <span className="trophy-icon">🏆</span>}
-                                                </div>
+                                                )}
+                                                {generationTokensLabel && (
+                                                    <span className="rank-score">
+                                                        {" | "}
+                                                        {generationTokensLabel}
+                                                    </span>
+                                                )}
+                                                {index === 0 && <span className="trophy-icon">🏆</span>}
                                             </div>
                                         </div>
                                     </div>

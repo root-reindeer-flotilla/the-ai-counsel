@@ -30,6 +30,7 @@ A local AI "Council" application where multiple LLMs (from OpenRouter or local O
 *   **Backend:** Python (FastAPI). Handles orchestration, API calls (OpenRouter/Ollama), search, and conversation storage (JSON).
 *   **Frontend:** React (Vite). Displays the chat interface, renders Markdown, manages settings state.
 *   **Storage:** Local JSON files in `data/conversations/`.
+*   **Local vs cloud execution:** Cloud/API models run in parallel in Stage 1 and Stage 2. **Ollama (local) models run sequentially** (one at a time) in those stages so a single Ollama instance is not overloaded; logic is in `council.py` (`_is_ollama_model`, `_run_ollama_sequential`).
 
 ## Setup & Running
 *   **Start:** `./start.sh` (runs both backend and frontend).
