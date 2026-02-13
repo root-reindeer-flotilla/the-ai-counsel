@@ -4,6 +4,7 @@ from typing import List, Dict, Any, Tuple
 import asyncio
 import logging
 import time
+import re
 from . import openrouter
 from . import ollama_client
 from .config import get_council_models, get_chairman_model
@@ -16,6 +17,13 @@ logger = logging.getLogger(__name__)
 # - Hard cap: discard ballots with completion below 25%
 # - Soft cap: weight retained ballots by completion ratio
 STAGE2_HARD_CAP_MIN_COMPLETION = 0.25
+
+
+# Thinking-tag patterns used for display parsing and prompt-safe sanitization.
+_THINK_BLOCK_PATTERNS = (
+    re.compile(r"<think\b[^>]*>([\s\S]*?)</think>", re.IGNORECASE),
+    re.compile(r"<thinking\b[^>]*>([\s\S]*?)</thinking>", re.IGNORECASE),
+)
 
 
 from .providers.openai import OpenAIProvider
@@ -51,12 +59,14 @@ FORCED_TEMP_ONE_MODELS = {
     "x-ai/grok-4.1-fast",
     "z-ai/glm-5",
     "minimax/minimax-m2.5",
+    "openai/gpt-oss-120b",
+    "openai/gpt-oss-20b",
 }
 
 # Prefix-based matches for families/variants (e.g. ":free", "-exp", "-speciale").
 FORCED_TEMP_ONE_PREFIXES = (
-    "deepseek/deepseek-v3.2",
-    "arcee-ai/trinity-large-preview",
+    "openai/gpt-oss-120b",
+    "openai/gpt-oss-20b",
 )
 
 
@@ -124,6 +134,118 @@ def _extract_usage(response: Dict[str, Any]) -> Dict[str, Any]:
         return {}
     usage = response.get("usage")
     return usage if isinstance(usage, dict) else {}
+
+
+def _to_text(value: Any) -> str:
+    """Convert arbitrary value to a safe string."""
+    if isinstance(value, str):
+        return value
+    if value is None:
+        return ""
+    return str(value)
+
+
+def _extract_thinking_segments(text: str) -> List[str]:
+    """Extract existing think/thinking blocks from response text."""
+    segments: List[str] = []
+    text = _to_text(text)
+    for pattern in _THINK_BLOCK_PATTERNS:
+        for match in pattern.findall(text):
+            segment = _to_text(match).strip()
+            if segment:
+                segments.append(segment)
+    return segments
+
+
+def strip_thinking_tags(text: Any) -> str:
+    """Remove think/thinking blocks from text for prompt-safe reuse."""
+    cleaned = _to_text(text)
+    for pattern in _THINK_BLOCK_PATTERNS:
+        cleaned = pattern.sub("\n\n", cleaned)
+    # Collapse accidental large gaps after stripping blocks.
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    return cleaned.strip()
+
+
+def _reasoning_details_to_text(reasoning_details: Any) -> str:
+    """Convert provider-specific reasoning_details payloads to readable text."""
+    if isinstance(reasoning_details, str):
+        return reasoning_details.strip()
+    if isinstance(reasoning_details, dict):
+        # Handle single-object payloads.
+        reasoning_details = [reasoning_details]
+    if not isinstance(reasoning_details, list):
+        return ""
+
+    lines: List[str] = []
+    for item in reasoning_details:
+        if isinstance(item, str):
+            if item.strip():
+                lines.append(item.strip())
+            continue
+        if not isinstance(item, dict):
+            continue
+        text_value = item.get("text")
+        summary_value = item.get("summary")
+        if isinstance(summary_value, list):
+            for part in summary_value:
+                if isinstance(part, str) and part.strip():
+                    lines.append(part.strip())
+        elif isinstance(summary_value, str) and summary_value.strip():
+            lines.append(summary_value.strip())
+        if isinstance(text_value, str) and text_value.strip():
+            lines.append(text_value.strip())
+
+    return "\n\n".join(lines).strip()
+
+
+def normalize_thinking_content(
+    content: Any,
+    reasoning: Any = None,
+    reasoning_details: Any = None,
+) -> Dict[str, str]:
+    """
+    Return both user-display text (with think block) and prompt-safe text (stripped).
+
+    Display text gets a single <think> block when thinking content exists from either:
+    - existing tags in content
+    - provider reasoning/reasoning_details fields
+    """
+    content_text = _to_text(content)
+    prompt_safe_text = strip_thinking_tags(content_text)
+
+    thinking_segments: List[str] = []
+    thinking_segments.extend(_extract_thinking_segments(content_text))
+
+    reasoning_text = _to_text(reasoning).strip()
+    reasoning_details_text = _reasoning_details_to_text(reasoning_details)
+    if reasoning_text:
+        thinking_segments.append(reasoning_text)
+    if reasoning_details_text:
+        thinking_segments.append(reasoning_details_text)
+
+    # Deduplicate while preserving order.
+    deduped_segments: List[str] = []
+    seen = set()
+    for seg in thinking_segments:
+        key = seg.strip()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        deduped_segments.append(key)
+
+    if deduped_segments:
+        joined_thinking = "\n\n".join(deduped_segments).strip()
+        display_text = f"<think>\n{joined_thinking}\n</think>"
+        if prompt_safe_text:
+            display_text = f"{display_text}\n\n{prompt_safe_text}"
+    else:
+        display_text = prompt_safe_text
+
+    return {
+        "display_text": display_text.strip(),
+        "prompt_safe_text": prompt_safe_text,
+    }
 
 
 async def query_model(model: str, messages: List[Dict[str, str]], timeout: float = 120.0, temperature: float = 0.7) -> Dict[str, Any]:
@@ -249,12 +371,15 @@ async def stage1_collect_responses(user_query: str, search_context: str = "", re
                 "stage1_usage": stage1_usage,
                 "stage1_response_id": stage1_response_id,
             }
-        content = response.get('content', '')
-        if not isinstance(content, str):
-            content = str(content) if content is not None else ''
+        normalized_content = normalize_thinking_content(
+            response.get("content", ""),
+            response.get("reasoning"),
+            response.get("reasoning_details"),
+        )
         return {
             "model": model,
-            "response": content,
+            "response": normalized_content["display_text"],
+            "response_prompt_safe": normalized_content["prompt_safe_text"],
             "error": None,
             "stage1_duration_ms": stage1_duration_ms,
             "stage1_total_tokens": stage1_total_tokens,
@@ -337,9 +462,9 @@ async def stage2_collect_rankings(
     # Yield the mapping first so the caller has it
     yield label_to_model
 
-    # Build the ranking prompt
+    # Build the ranking prompt from prompt-safe Stage 1 text
     responses_text = "\n\n".join([
-        f"Response {label}:\n{result['response']}"
+        f"Response {label}:\n{result.get('response_prompt_safe') or strip_thinking_tags(result.get('response', ''))}"
         for label, result in zip(labels, successful_results)
     ])
 
@@ -438,13 +563,16 @@ async def stage2_collect_rankings(
                 "stage2_retry_reason": metadata.get("stage2_retry_reason"),
                 "stage2_middle_out_mode": metadata.get("stage2_middle_out_mode"),
             }
-        full_text = response.get('content', '')
-        if not isinstance(full_text, str):
-            full_text = str(full_text) if full_text is not None else ''
-        parsed = parse_ranking_from_text(full_text, expected_count=expected_count)
+        normalized_ranking = normalize_thinking_content(
+            response.get("content", ""),
+            response.get("reasoning"),
+            response.get("reasoning_details"),
+        )
+        parsed = parse_ranking_from_text(normalized_ranking["prompt_safe_text"], expected_count=expected_count)
         return {
             "model": model,
-            "ranking": full_text,
+            "ranking": normalized_ranking["display_text"],
+            "ranking_prompt_safe": normalized_ranking["prompt_safe_text"],
             "parsed_ranking": parsed,
             "error": None,
             "stage2_duration_ms": stage2_duration_ms,
@@ -520,13 +648,13 @@ async def stage3_synthesize_final(
 
     # Build comprehensive context for chairman (only include successful responses)
     stage1_text = "\n\n".join([
-        f"Model: {result['model']}\nResponse: {result.get('response', 'No response')}"
+        f"Model: {result['model']}\nResponse: {result.get('response_prompt_safe') or strip_thinking_tags(result.get('response', 'No response'))}"
         for result in stage1_results
         if result.get('response') is not None
     ])
 
     stage2_text = "\n\n".join([
-        f"Model: {result['model']}\nRanking: {result.get('ranking', 'No ranking')}"
+        f"Model: {result['model']}\nRanking: {result.get('ranking_prompt_safe') or strip_thinking_tags(result.get('ranking', 'No ranking'))}"
         for result in stage2_results
         if result.get('ranking') is not None
     ])
@@ -585,18 +713,12 @@ async def stage3_synthesize_final(
                 "error_message": error_msg
             }
 
-        # Combine reasoning and content if available
-        content = response.get('content') or ''
-        reasoning = response.get('reasoning') or response.get('reasoning_details') or ''
-        
-        final_response = content
-        if reasoning and not content:
-            # If only reasoning is provided (some reasoning models do this)
-            final_response = f"**Reasoning:**\n{reasoning}"
-        elif reasoning and content:
-            # If both are provided, prepend reasoning in a collapsible block or just prepend
-            # For now, we'll just prepend it clearly
-            final_response = f"<think>\n{reasoning}\n</think>\n\n{content}"
+        normalized_final = normalize_thinking_content(
+            response.get("content", ""),
+            response.get("reasoning"),
+            response.get("reasoning_details"),
+        )
+        final_response = normalized_final["display_text"]
 
         if not final_response:
              final_response = "No response generated by the Chairman."

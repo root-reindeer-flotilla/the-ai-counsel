@@ -35,6 +35,15 @@ def _is_openrouter_gemini3_reasoning_target(model_id: str) -> bool:
     }
 
 
+def _is_openrouter_deepseek_reasoning_target(model_id: str) -> bool:
+    """True when OpenRouter model is DeepSeek V3.2 (or variant) that supports reasoning via enabled flag."""
+    model = _strip_openrouter_prefix(model_id or "")
+    if not model.startswith("deepseek/"):
+        return False
+    # deepseek-v3.2, deepseek-v3.2-exp, deepseek-v3.2-speciale, etc.
+    return "deepseek-v3.2" in model
+
+
 def _extract_error_info(response: httpx.Response) -> Dict[str, Any]:
     """Best-effort extraction of OpenRouter error details."""
     default_message = f"HTTP {response.status_code}"
@@ -154,6 +163,9 @@ async def query_model(
     }
     if _is_openrouter_gemini3_reasoning_target(model):
         payload["reasoning"] = {"effort": "high"}
+    elif _is_openrouter_deepseek_reasoning_target(model_id=model):
+        # DeepSeek V3.2: enable reasoning (thinking) via OpenRouter; response includes reasoning/reasoning_details
+        payload["reasoning"] = {"enabled": True}
     if transforms is not None:
         payload["transforms"] = transforms
 

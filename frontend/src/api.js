@@ -343,20 +343,12 @@ export const api = {
   },
 
   /**
-   * Send a message and receive streaming updates.
-   * @param {string} conversationId - The conversation ID
-   * @param {Object} options - Message options
-   * @param {string} options.content - The message content
-   * @param {boolean} options.webSearch - Whether to use web search
-   * @param {string} options.executionMode - Execution mode: 'chat_only', 'chat_ranking', or 'full'
-   * @param {function} onEvent - Callback function for each event: (eventType, data) => void
-   * @param {AbortSignal} signal - Optional AbortSignal to cancel the request
-   * @returns {Promise<void>}
+   * Start a resumable deliberation run.
    */
-  async sendMessageStream(conversationId, options, onEvent, signal) {
+  async startRun(conversationId, options) {
     const { content, webSearch = false, executionMode = 'full' } = options;
     const response = await fetch(
-      `${API_BASE}/api/conversations/${conversationId}/message/stream?_t=${Date.now()}`,
+      `${API_BASE}/api/conversations/${conversationId}/runs`,
       {
         method: 'POST',
         headers: {
@@ -364,13 +356,54 @@ export const api = {
           'Cache-Control': 'no-cache',
         },
         body: JSON.stringify({ content, web_search: webSearch, execution_mode: executionMode }),
-        signal,
-        cache: 'no-store',
+      }
+    );
+    if (!response.ok) {
+      throw new Error('Failed to start run');
+    }
+    return response.json();
+  },
+
+  /**
+   * Get active run for a conversation.
+   */
+  async getActiveRun(conversationId) {
+    const response = await fetch(`${API_BASE}/api/conversations/${conversationId}/runs/active`);
+    if (!response.ok) {
+      throw new Error('Failed to get active run');
+    }
+    return response.json();
+  },
+
+  /**
+   * Get a run snapshot.
+   */
+  async getRun(runId) {
+    const response = await fetch(`${API_BASE}/api/runs/${runId}`);
+    if (!response.ok) {
+      throw new Error('Failed to get run');
+    }
+    return response.json();
+  },
+
+  /**
+   * Stream events from an existing run.
+   */
+  async streamRun(runId, onEvent, signal, fromEvent = 0) {
+    const response = await fetch(
+      `${API_BASE}/api/runs/${runId}/stream?from_event=${encodeURIComponent(fromEvent)}&_t=${Date.now()}`,
+      {
+      method: 'GET',
+      headers: {
+        'Cache-Control': 'no-cache',
+      },
+      signal,
+      cache: 'no-store',
       }
     );
 
     if (!response.ok) {
-      throw new Error('Failed to send message');
+      throw new Error('Failed to stream run');
     }
 
     const reader = response.body.getReader();
@@ -381,7 +414,6 @@ export const api = {
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
-
         const chunk = decoder.decode(value, { stream: true });
         sseBuffer = parseSseDataChunk(sseBuffer, chunk, onEvent);
       }
@@ -393,5 +425,37 @@ export const api = {
     } finally {
       reader.releaseLock();
     }
+  },
+
+  /**
+   * Force-stop an active run.
+   */
+  async cancelRun(runId) {
+    const response = await fetch(`${API_BASE}/api/runs/${runId}/cancel`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+    });
+    if (!response.ok) {
+      throw new Error('Failed to cancel run');
+    }
+    return response.json();
+  },
+
+  /**
+   * Send a message and receive streaming updates.
+   * @param {string} conversationId - The conversation ID
+   * @param {Object} options - Message options
+   * @param {string} options.content - The message content
+   * @param {boolean} options.webSearch - Whether to use web search
+   * @param {string} options.executionMode - Execution mode: 'chat_only', 'chat_ranking', or 'full'
+   * @param {function} onEvent - Callback function for each event: (eventType, data) => void
+   * @param {AbortSignal} signal - Optional AbortSignal to cancel the request
+   * @returns {Promise<void>}
+   */
+  async sendMessageStream(conversationId, options, onEvent, signal) {
+    const run = await this.startRun(conversationId, options);
+    await this.streamRun(run.run_id, onEvent, signal);
   },
 };

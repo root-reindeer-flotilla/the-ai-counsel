@@ -2,23 +2,22 @@
 
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 from typing import List, Dict, Any, Optional
 import os
 import uuid
-import json
-import asyncio
-import time
 
 from . import storage
-from .council import generate_conversation_title, generate_search_query, stage1_collect_responses, stage2_collect_rankings, stage3_synthesize_final, calculate_aggregate_rankings, PROVIDERS
-from .search import perform_web_search, SearchProvider
-from .settings import get_settings, update_settings, Settings, DEFAULT_COUNCIL_MODELS, DEFAULT_CHAIRMAN_MODEL, AVAILABLE_MODELS
+from .council import PROVIDERS
+from .runs import RunManager, VALID_EXECUTION_MODES
+from .search import SearchProvider
+from .settings import get_settings, update_settings, Settings, DEFAULT_COUNCIL_MODELS, DEFAULT_CHAIRMAN_MODEL
 
 app = FastAPI(title="LLM Council Plus API")
+RUN_MANAGER = RunManager()
 
 # Enable CORS for local development and network access
 # Allow requests from any hostname on ports 5173 and 3000 (frontend)
@@ -97,488 +96,105 @@ async def delete_conversation(conversation_id: str):
     return {"status": "deleted"}
 
 
-@app.post("/api/conversations/{conversation_id}/message/stream")
-async def send_message_stream(conversation_id: str, body: SendMessageRequest, request: Request):
-    """Send a message and stream the 3-stage council process."""
-    # Validate execution_mode
-    valid_modes = ["chat_only", "chat_ranking", "full"]
-    if body.execution_mode not in valid_modes:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Invalid execution_mode. Must be one of: {valid_modes}"
+@app.post("/api/conversations/{conversation_id}/runs")
+async def start_conversation_run(conversation_id: str, body: SendMessageRequest):
+    """Start a background deliberation run and return a run id."""
+    try:
+        run = await RUN_MANAGER.start_run(
+            conversation_id=conversation_id,
+            content=body.content,
+            web_search=body.web_search,
+            execution_mode=body.execution_mode,
         )
-    
-    # Check if conversation exists
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    snapshot = await RUN_MANAGER.snapshot(run)
+    return snapshot
+
+
+@app.get("/api/conversations/{conversation_id}/runs/active")
+async def get_active_conversation_run(conversation_id: str):
+    """Get active run for a conversation, if any."""
     conversation = storage.get_conversation(conversation_id)
     if conversation is None:
         raise HTTPException(status_code=404, detail="Conversation not found")
+    run = await RUN_MANAGER.get_active_run_for_conversation(conversation_id)
+    if run is None:
+        return {"active_run": None}
+    return {"active_run": await RUN_MANAGER.snapshot(run)}
 
-    # Check if this is the first message
-    is_first_message = len(conversation["messages"]) == 0
 
-    async def event_generator():
-        try:
-            # Initialize variables for metadata
-            stage1_results = []
-            stage2_results = []
-            stage3_result = None
-            label_to_model = {}
-            aggregate_rankings = {}
-            ranking_diagnostics = {}
-            generation_time_ms = None
-            generation_time_seconds = None
-            stage1_started_at = None
-            stage1_completed_at = None
-            stage2_started_at = None
-            stage2_completed_at = None
-            stage1_total_cost = None
-            stage2_total_cost = None
-            stage1_total_input_tokens_logged = None
-            stage2_total_input_tokens_logged = None
-            stage1_total_output_tokens_logged = None
-            stage2_total_output_tokens_logged = None
-            stage1_total_tokens_logged = None
-            stage2_total_tokens_logged = None
+@app.get("/api/runs/{run_id}")
+async def get_run(run_id: str):
+    """Get a run snapshot."""
+    run = await RUN_MANAGER.get_run(run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="Run not found")
+    return await RUN_MANAGER.snapshot(run)
 
-            def _tokens_for_log(value: Any) -> str:
-                return str(value) if isinstance(value, int) else "null"
 
-            def _usage_tokens_for_log(usage: Any, keys: List[str]) -> Optional[int]:
-                if not isinstance(usage, dict):
-                    return None
-                for key in keys:
-                    value = usage.get(key)
-                    if isinstance(value, int):
-                        return value
-                return None
-
-            def _cost_for_log(usage: Any) -> str:
-                if not isinstance(usage, dict):
-                    return "null"
-                cost = usage.get("cost")
-                if cost is None:
-                    return "null"
-                try:
-                    return str(float(cost))
-                except (TypeError, ValueError):
-                    return "null"
-
-            def _blended_cost_per_million_for_log(tokens_value: Any, usage: Any) -> str:
-                if not isinstance(tokens_value, int) or tokens_value <= 0:
-                    return "null"
-                if not isinstance(usage, dict):
-                    return "null"
-                cost = usage.get("cost")
-                if cost is None:
-                    return "null"
-                try:
-                    return str((float(cost) / float(tokens_value)) * 1_000_000.0)
-                except (TypeError, ValueError, ZeroDivisionError):
-                    return "null"
-
-            def _sum_cost_for_log(results: List[Dict[str, Any]], usage_key: str) -> Optional[float]:
-                total = 0.0
-                has_cost = False
-                for result in results:
-                    usage = result.get(usage_key)
-                    if not isinstance(usage, dict):
-                        continue
-                    cost = usage.get("cost")
-                    if cost is None:
-                        continue
-                    try:
-                        total += float(cost)
-                        has_cost = True
-                    except (TypeError, ValueError):
-                        continue
-                return total if has_cost else None
-
-            def _sum_tokens_for_log(results: List[Dict[str, Any]], tokens_key: str) -> Optional[int]:
-                total = 0
-                has_tokens = False
-                for result in results:
-                    tokens = result.get(tokens_key)
-                    if isinstance(tokens, int) and tokens > 0:
-                        total += tokens
-                        has_tokens = True
-                return total if has_tokens else None
-
-            def _sum_usage_tokens_for_log(results: List[Dict[str, Any]], usage_key: str, token_keys: List[str]) -> Optional[int]:
-                total = 0
-                has_tokens = False
-                for result in results:
-                    usage = result.get(usage_key)
-                    token_count = _usage_tokens_for_log(usage, token_keys)
-                    if isinstance(token_count, int) and token_count >= 0:
-                        total += token_count
-                        has_tokens = True
-                return total if has_tokens else None
-            
-            # Add user message
-            storage.add_user_message(conversation_id, body.content)
-
-            # Start title generation in parallel (don't await yet)
-            title_task = None
-            if is_first_message:
-                title_task = asyncio.create_task(generate_conversation_title(body.content))
-
-            # Perform web search if requested
-            search_context = ""
-            search_query = ""
-            if body.web_search:
-                # Check for disconnect before starting search
-                if await request.is_disconnected():
-                    print("Client disconnected before web search")
-                    raise asyncio.CancelledError("Client disconnected")
-
-                settings = get_settings()
-                provider = SearchProvider(settings.search_provider)
-
-                # Set API keys if configured
-                if settings.serper_api_key and provider == SearchProvider.SERPER:
-                    os.environ["SERPER_API_KEY"] = settings.serper_api_key
-                if settings.tavily_api_key and provider == SearchProvider.TAVILY:
-                    os.environ["TAVILY_API_KEY"] = settings.tavily_api_key
-                if settings.brave_api_key and provider == SearchProvider.BRAVE:
-                    os.environ["BRAVE_API_KEY"] = settings.brave_api_key
-
-                yield f"data: {json.dumps({'type': 'search_start', 'data': {'provider': provider.value}})}\n\n"
-
-                # Check for disconnect before generating search query
-                if await request.is_disconnected():
-                    print("Client disconnected during search setup")
-                    raise asyncio.CancelledError("Client disconnected")
-
-                # Generate search query (passthrough - no AI model needed)
-                search_query = generate_search_query(body.content)
-
-                # Check for disconnect before performing search
-                if await request.is_disconnected():
-                    print("Client disconnected before search execution")
-                    raise asyncio.CancelledError("Client disconnected")
-
-                # Run search (now fully async for Tavily/Brave, threaded only for DuckDuckGo)
-                search_result = await perform_web_search(
-                    search_query, 
-                    settings.search_result_count,  # Configurable result count (default 8)
-                    provider, 
-                    settings.full_content_results,
-                    settings.search_keyword_extraction,
-                    hybrid_mode=settings.search_hybrid_mode  # Combine web+news for DuckDuckGo
-                )
-                search_context = search_result["results"]
-                extracted_query = search_result["extracted_query"]
-                search_intent = search_result.get("intent", "unknown")
-                yield f"data: {json.dumps({'type': 'search_complete', 'data': {'search_query': search_query, 'extracted_query': extracted_query, 'search_context': search_context, 'provider': provider.value, 'intent': search_intent}})}\n\n"
-                await asyncio.sleep(0.05)
-
-            # Stage 1: Collect responses
-            stage1_started_at = time.perf_counter()
-            yield f"data: {json.dumps({'type': 'stage1_start'})}\n\n"
-            await asyncio.sleep(0.05)
-            
-            total_models = 0
-            
-            async for item in stage1_collect_responses(body.content, search_context, request):
-                if isinstance(item, int):
-                    total_models = item
-                    print(f"DEBUG: Sending stage1_init with total={total_models}")
-                    yield f"data: {json.dumps({'type': 'stage1_init', 'total': total_models})}\n\n"
-                    continue
-                
-                stage1_results.append(item)
-                stage1_usage = item.get("stage1_usage")
-                stage1_input_tokens_value = _usage_tokens_for_log(stage1_usage, ["input_tokens", "prompt_tokens"])
-                stage1_output_tokens_value = _usage_tokens_for_log(stage1_usage, ["output_tokens", "completion_tokens"])
-                stage1_tokens_value = item.get("stage1_total_tokens")
-                stage1_input_tokens_label = _tokens_for_log(stage1_input_tokens_value)
-                stage1_output_tokens_label = _tokens_for_log(stage1_output_tokens_value)
-                stage1_tokens_label = _tokens_for_log(stage1_tokens_value)
-                stage1_cost_label = _cost_for_log(stage1_usage)
-                stage1_blended_label = _blended_cost_per_million_for_log(stage1_tokens_value, stage1_usage)
-                print(
-                    f"Stage 1 Progress: {len(stage1_results)}/{total_models} - "
-                    f"{item['model']} | {stage1_input_tokens_label} | {stage1_output_tokens_label} | "
-                    f"{stage1_tokens_label} | {stage1_cost_label} | {stage1_blended_label}"
-                )
-                yield f"data: {json.dumps({'type': 'stage1_progress', 'data': item, 'count': len(stage1_results), 'total': total_models})}\n\n"
-                await asyncio.sleep(0.01)
-
-            stage1_completed_at = time.perf_counter()
-            stage1_total_cost = _sum_cost_for_log(stage1_results, "stage1_usage")
-            stage1_total_input_tokens_logged = _sum_usage_tokens_for_log(stage1_results, "stage1_usage", ["input_tokens", "prompt_tokens"])
-            stage1_total_output_tokens_logged = _sum_usage_tokens_for_log(stage1_results, "stage1_usage", ["output_tokens", "completion_tokens"])
-            stage1_total_tokens_logged = _sum_tokens_for_log(stage1_results, "stage1_total_tokens")
-            stage1_total_blended = None
-            if stage1_total_cost is not None and stage1_total_tokens_logged is not None and stage1_total_tokens_logged > 0:
-                stage1_total_blended = (stage1_total_cost / float(stage1_total_tokens_logged)) * 1_000_000.0
-            print(
-                "Stage 1 Totals: "
-                f"{str(stage1_total_input_tokens_logged) if stage1_total_input_tokens_logged is not None else 'null'} | "
-                f"{str(stage1_total_output_tokens_logged) if stage1_total_output_tokens_logged is not None else 'null'} | "
-                f"{str(stage1_total_tokens_logged) if stage1_total_tokens_logged is not None else 'null'} | "
-                f"{str(stage1_total_cost) if stage1_total_cost is not None else 'null'} | "
-                f"{str(stage1_total_blended) if stage1_total_blended is not None else 'null'}"
-            )
-            yield f"data: {json.dumps({'type': 'stage1_complete', 'data': stage1_results})}\n\n"
-            await asyncio.sleep(0.05)
-
-            # Check if any models responded successfully in Stage 1
-            if not any(r for r in stage1_results if not r.get('error')):
-                error_msg = 'All models failed to respond in Stage 1, likely due to rate limits or API errors. Please try again or adjust your model selection.'
-                storage.add_error_message(conversation_id, error_msg)
-                yield f"data: {json.dumps({'type': 'error', 'message': error_msg})}\n\n"
-                return # Stop further processing
-
-            # Stage 2: Only if mode is 'chat_ranking' or 'full'
-            if body.execution_mode in ["chat_ranking", "full"]:
-                stage2_started_at = time.perf_counter()
-                yield f"data: {json.dumps({'type': 'stage2_start'})}\n\n"
-                await asyncio.sleep(0.05)
-                
-                # Iterate over the async generator
-                async for item in stage2_collect_rankings(body.content, stage1_results, search_context, request):
-                    # First item is the label mapping
-                    if isinstance(item, dict) and not item.get('model'):
-                        label_to_model = item
-                        # Send init event with total count
-                        yield f"data: {json.dumps({'type': 'stage2_init', 'total': len(label_to_model)})}\n\n"
-                        continue
-                    
-                    # Subsequent items are results
-                    stage2_results.append(item)
-                    
-                    # Send progress update
-                    stage2_usage = item.get("stage2_usage")
-                    stage2_input_tokens_value = _usage_tokens_for_log(stage2_usage, ["input_tokens", "prompt_tokens"])
-                    stage2_output_tokens_value = _usage_tokens_for_log(stage2_usage, ["output_tokens", "completion_tokens"])
-                    stage2_tokens_value = item.get("stage2_total_tokens")
-                    stage2_input_tokens_label = _tokens_for_log(stage2_input_tokens_value)
-                    stage2_output_tokens_label = _tokens_for_log(stage2_output_tokens_value)
-                    stage2_tokens_label = _tokens_for_log(stage2_tokens_value)
-                    stage2_cost_label = _cost_for_log(stage2_usage)
-                    stage2_blended_label = _blended_cost_per_million_for_log(stage2_tokens_value, stage2_usage)
-                    print(
-                        f"Stage 2 Progress: {len(stage2_results)}/{len(label_to_model)} - "
-                        f"{item['model']} | {stage2_input_tokens_label} | {stage2_output_tokens_label} | "
-                        f"{stage2_tokens_label} | {stage2_cost_label} | {stage2_blended_label}"
-                    )
-                    yield f"data: {json.dumps({'type': 'stage2_progress', 'data': item, 'count': len(stage2_results), 'total': len(label_to_model)})}\n\n"
-                    await asyncio.sleep(0.01)
-
-                aggregate_rankings, ranking_diagnostics = calculate_aggregate_rankings(
-                    stage2_results,
-                    label_to_model,
-                    return_diagnostics=True
-                )
-                stage2_completed_at = time.perf_counter()
-                stage2_total_cost = _sum_cost_for_log(stage2_results, "stage2_usage")
-                stage2_total_input_tokens_logged = _sum_usage_tokens_for_log(stage2_results, "stage2_usage", ["input_tokens", "prompt_tokens"])
-                stage2_total_output_tokens_logged = _sum_usage_tokens_for_log(stage2_results, "stage2_usage", ["output_tokens", "completion_tokens"])
-                stage2_total_tokens_logged = _sum_tokens_for_log(stage2_results, "stage2_total_tokens")
-                combined_stage12_cost = None
-                combined_stage12_input_tokens = None
-                combined_stage12_output_tokens = None
-                combined_stage12_tokens = None
-                if stage1_total_cost is not None or stage2_total_cost is not None:
-                    combined_stage12_cost = float(stage1_total_cost or 0) + float(stage2_total_cost or 0)
-                if stage1_total_input_tokens_logged is not None or stage2_total_input_tokens_logged is not None:
-                    combined_stage12_input_tokens = int(stage1_total_input_tokens_logged or 0) + int(stage2_total_input_tokens_logged or 0)
-                if stage1_total_output_tokens_logged is not None or stage2_total_output_tokens_logged is not None:
-                    combined_stage12_output_tokens = int(stage1_total_output_tokens_logged or 0) + int(stage2_total_output_tokens_logged or 0)
-                if stage1_total_tokens_logged is not None or stage2_total_tokens_logged is not None:
-                    combined_stage12_tokens = int(stage1_total_tokens_logged or 0) + int(stage2_total_tokens_logged or 0)
-                stage2_total_blended = None
-                if stage2_total_cost is not None and stage2_total_tokens_logged is not None and stage2_total_tokens_logged > 0:
-                    stage2_total_blended = (stage2_total_cost / float(stage2_total_tokens_logged)) * 1_000_000.0
-                combined_stage12_blended = None
-                if combined_stage12_cost is not None and combined_stage12_tokens is not None and combined_stage12_tokens > 0:
-                    combined_stage12_blended = (combined_stage12_cost / float(combined_stage12_tokens)) * 1_000_000.0
-                print(
-                    "Stage 2 Totals: "
-                    f"{str(stage2_total_input_tokens_logged) if stage2_total_input_tokens_logged is not None else 'null'} | "
-                    f"{str(stage2_total_output_tokens_logged) if stage2_total_output_tokens_logged is not None else 'null'} | "
-                    f"{str(stage2_total_tokens_logged) if stage2_total_tokens_logged is not None else 'null'} | "
-                    f"{str(stage2_total_cost) if stage2_total_cost is not None else 'null'} | "
-                    f"{str(stage2_total_blended) if stage2_total_blended is not None else 'null'}"
-                )
-                print(
-                    "Stage 1+2 Totals: "
-                    f"{str(combined_stage12_input_tokens) if combined_stage12_input_tokens is not None else 'null'} | "
-                    f"{str(combined_stage12_output_tokens) if combined_stage12_output_tokens is not None else 'null'} | "
-                    f"{str(combined_stage12_tokens) if combined_stage12_tokens is not None else 'null'} | "
-                    f"{str(combined_stage12_cost) if combined_stage12_cost is not None else 'null'} | "
-                    f"{str(combined_stage12_blended) if combined_stage12_blended is not None else 'null'}"
-                )
-
-                # Generation time excludes Stage 3 and includes Stage 1 + Stage 2 only.
-                if (
-                    stage1_started_at is not None and
-                    stage1_completed_at is not None and
-                    stage2_started_at is not None and
-                    stage2_completed_at is not None
-                ):
-                    stage1_ms = max(0, int((stage1_completed_at - stage1_started_at) * 1000))
-                    stage2_ms = max(0, int((stage2_completed_at - stage2_started_at) * 1000))
-                    generation_time_ms = stage1_ms + stage2_ms
-                    generation_time_seconds = max(0, int(round(generation_time_ms / 1000)))
-
-                # Per-model generation time for leaderboard rows:
-                # model stage1 call duration + model stage2 call duration.
-                stage1_times = {
-                    item["model"]: item.get("stage1_duration_ms")
-                    for item in stage1_results
-                    if item.get("model")
-                }
-                stage2_times = {
-                    item["model"]: item.get("stage2_duration_ms")
-                    for item in stage2_results
-                    if item.get("model")
-                }
-                stage1_tokens = {
-                    item["model"]: item.get("stage1_total_tokens")
-                    for item in stage1_results
-                    if item.get("model")
-                }
-                stage2_tokens = {
-                    item["model"]: item.get("stage2_total_tokens")
-                    for item in stage2_results
-                    if item.get("model")
-                }
-                stage1_usage = {
-                    item["model"]: item.get("stage1_usage")
-                    for item in stage1_results
-                    if item.get("model")
-                }
-                stage2_usage = {
-                    item["model"]: item.get("stage2_usage")
-                    for item in stage2_results
-                    if item.get("model")
-                }
-                stage1_response_ids = {
-                    item["model"]: item.get("stage1_response_id")
-                    for item in stage1_results
-                    if item.get("model")
-                }
-                stage2_response_ids = {
-                    item["model"]: item.get("stage2_response_id")
-                    for item in stage2_results
-                    if item.get("model")
-                }
-                enriched_aggregate_rankings = []
-                for item in aggregate_rankings:
-                    model_name = item.get("model")
-                    model_stage1_ms = stage1_times.get(model_name) or 0
-                    model_stage2_ms = stage2_times.get(model_name) or 0
-                    model_total_ms = max(0, int(model_stage1_ms + model_stage2_ms))
-                    model_stage1_tokens = stage1_tokens.get(model_name)
-                    model_stage2_tokens = stage2_tokens.get(model_name)
-                    model_total_tokens = None
-                    if isinstance(model_stage1_tokens, int) or isinstance(model_stage2_tokens, int):
-                        model_total_tokens = int(model_stage1_tokens or 0) + int(model_stage2_tokens or 0)
-                    model_stage1_usage = stage1_usage.get(model_name) if isinstance(stage1_usage.get(model_name), dict) else {}
-                    model_stage2_usage = stage2_usage.get(model_name) if isinstance(stage2_usage.get(model_name), dict) else {}
-                    stage1_cost = model_stage1_usage.get("cost")
-                    stage2_cost = model_stage2_usage.get("cost")
-                    generation_total_cost = None
-                    try:
-                        if stage1_cost is not None or stage2_cost is not None:
-                            generation_total_cost = float(stage1_cost or 0) + float(stage2_cost or 0)
-                    except (TypeError, ValueError):
-                        generation_total_cost = None
-                    enriched_aggregate_rankings.append({
-                        **item,
-                        "generation_time_ms": model_total_ms,
-                        "generation_time_seconds": max(0, int(round(model_total_ms / 1000))),
-                        "generation_total_tokens": model_total_tokens,
-                        "generation_total_cost": generation_total_cost,
-                        "stage1_usage": model_stage1_usage,
-                        "stage2_usage": model_stage2_usage,
-                        "stage1_response_id": stage1_response_ids.get(model_name),
-                        "stage2_response_id": stage2_response_ids.get(model_name),
-                    })
-                aggregate_rankings = enriched_aggregate_rankings
-
-                yield f"data: {json.dumps({'type': 'stage2_complete', 'data': stage2_results, 'metadata': {'label_to_model': label_to_model, 'aggregate_rankings': aggregate_rankings, 'ranking_diagnostics': ranking_diagnostics, 'generation_time_ms': generation_time_ms, 'generation_time_seconds': generation_time_seconds, 'search_query': search_query, 'search_context': search_context}})}\n\n"
-                await asyncio.sleep(0.05)
-
-            # Stage 3: Only if mode is 'full'
-            if body.execution_mode == "full":
-                yield f"data: {json.dumps({'type': 'stage3_start'})}\n\n"
-                await asyncio.sleep(0.05)
-
-                # Check for disconnect before starting Stage 3
-                if await request.is_disconnected():
-                    print("Client disconnected before Stage 3")
-                    raise asyncio.CancelledError("Client disconnected")
-
-                stage3_result = await stage3_synthesize_final(body.content, stage1_results, stage2_results, search_context)
-                yield f"data: {json.dumps({'type': 'stage3_complete', 'data': stage3_result})}\n\n"
-
-            # Wait for title generation if it was started
-            if title_task:
-                try:
-                    title = await title_task
-                    storage.update_conversation_title(conversation_id, title)
-                    yield f"data: {json.dumps({'type': 'title_complete', 'data': {'title': title}})}\n\n"
-                except Exception as e:
-                    print(f"Error waiting for title task: {e}")
-
-            # Save complete assistant message with metadata
-            metadata = {
-                "execution_mode": body.execution_mode,  # Save mode for historical context
-            }
-            
-            # Only include stage2/stage3 metadata if they were executed
-            if body.execution_mode in ["chat_ranking", "full"]:
-                metadata["label_to_model"] = label_to_model
-                metadata["aggregate_rankings"] = aggregate_rankings
-                metadata["ranking_diagnostics"] = ranking_diagnostics
-                metadata["generation_time_ms"] = generation_time_ms
-                metadata["generation_time_seconds"] = generation_time_seconds
-            
-            if search_context:
-                metadata["search_context"] = search_context
-            if search_query:
-                metadata["search_query"] = search_query
-
-            storage.add_assistant_message(
-                conversation_id,
-                stage1_results,
-                stage2_results if body.execution_mode in ["chat_ranking", "full"] else None,
-                stage3_result if body.execution_mode == "full" else None,
-                metadata
-            )
-
-            # Send completion event
-            yield f"data: {json.dumps({'type': 'complete'})}\n\n"
-
-        except asyncio.CancelledError:
-            print(f"Stream cancelled for conversation {conversation_id}")
-            # Even if cancelled, try to save the title if it's ready or nearly ready
-            if title_task:
-                try:
-                    # Give it a small grace period to finish if it's close
-                    title = await asyncio.wait_for(title_task, timeout=2.0)
-                    storage.update_conversation_title(conversation_id, title)
-                    print(f"Saved title despite cancellation: {title}")
-                except Exception as e:
-                    print(f"Could not save title during cancellation: {e}")
-            raise
-        except Exception as e:
-            print(f"Stream error: {e}")
-            # Save error to conversation history
-            storage.add_error_message(conversation_id, f"Error: {str(e)}")
-            # Send error event
-            yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
-
+@app.get("/api/runs/{run_id}/stream")
+async def stream_run(run_id: str, from_event: int = 0):
+    """Stream events for a run (supports reconnect/replay)."""
+    run = await RUN_MANAGER.get_run(run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="Run not found")
     return StreamingResponse(
-        event_generator(),
+        RUN_MANAGER.stream_events(run_id, from_event=from_event),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
             "Connection": "keep-alive",
-        }
+        },
+    )
+
+
+@app.post("/api/runs/{run_id}/cancel")
+async def cancel_run(run_id: str):
+    """Force-stop a running deliberation."""
+    run = await RUN_MANAGER.cancel_run(run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="Run not found")
+    return {"run_id": run.run_id, "status": run.status}
+
+
+@app.post("/api/conversations/{conversation_id}/message/stream")
+async def send_message_stream(conversation_id: str, body: SendMessageRequest):
+    """
+    Legacy endpoint kept for compatibility.
+    Internally starts a resumable run and streams that run's events.
+    """
+    # Preserve historical validation semantics used by tests/clients.
+    if body.execution_mode not in VALID_EXECUTION_MODES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid execution_mode. Must be one of: {VALID_EXECUTION_MODES}",
+        )
+    if storage.get_conversation(conversation_id) is None:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+
+    try:
+        run = await RUN_MANAGER.start_run(
+            conversation_id=conversation_id,
+            content=body.content,
+            web_search=body.web_search,
+            execution_mode=body.execution_mode,
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    return StreamingResponse(
+        RUN_MANAGER.stream_events(run.run_id),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+        },
     )
 
 

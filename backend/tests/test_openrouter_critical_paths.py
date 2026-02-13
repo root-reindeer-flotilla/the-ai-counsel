@@ -103,6 +103,33 @@ async def test_query_model_does_not_add_reasoning_effort_for_non_targets():
 
 
 @pytest.mark.anyio
+async def test_query_model_adds_reasoning_enabled_for_deepseek_v32():
+    """DeepSeek V3.2 on OpenRouter gets reasoning.enabled=True to turn on thinking mode."""
+    payloads = []
+    ok_response = _FakeResponse(
+        200,
+        {
+            "id": "resp_1",
+            "choices": [{"message": {"content": "ok", "reasoning": "internal thought"}}],
+            "usage": {"total_tokens": 10},
+        },
+    )
+
+    def _client_factory(*args, **kwargs):
+        return _FakeAsyncClient([ok_response], payloads)
+
+    with patch("backend.openrouter.get_openrouter_api_key", return_value="test-key"):
+        with patch("backend.openrouter.httpx.AsyncClient", side_effect=_client_factory):
+            result = await openrouter.query_model(
+                "openrouter:deepseek/deepseek-v3.2",
+                [{"role": "user", "content": "hi"}],
+            )
+
+    assert result["error"] is None
+    assert payloads[0]["reasoning"] == {"enabled": True}
+
+
+@pytest.mark.anyio
 async def test_bad_request_overflow_sets_context_overflow_flag():
     payloads = []
     bad_request = _FakeResponse(
