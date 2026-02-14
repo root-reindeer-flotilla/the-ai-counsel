@@ -161,11 +161,9 @@ async def query_model(
         # Disable OpenRouter's native web search; we do our own search and inject context in the prompt.
         "plugins": [{"id": "web", "enabled": False}],
     }
+    payload["reasoning"] = {"enabled": True}
     if _is_openrouter_gemini3_reasoning_target(model):
         payload["reasoning"] = {"effort": "high"}
-    elif _is_openrouter_deepseek_reasoning_target(model_id=model):
-        # DeepSeek V3.2: enable reasoning (thinking) via OpenRouter; response includes reasoning/reasoning_details
-        payload["reasoning"] = {"enabled": True}
     if transforms is not None:
         payload["transforms"] = transforms
 

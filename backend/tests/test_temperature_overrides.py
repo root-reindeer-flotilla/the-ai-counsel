@@ -12,8 +12,6 @@ from backend import council
         ("openrouter:google/gemini-3-flash-preview", True),
         ("google:gemini-3-flash-preview", True),
         ("openrouter:google/gemini-2.5-flash", True),
-        ("openrouter:deepseek/deepseek-v3.2", True),
-        ("openrouter:deepseek/deepseek-v3.2-exp", True),
         ("openrouter:x-ai/grok-4.1-fast", True),
         ("openrouter:z-ai/glm-5", True),
         ("openrouter:minimax/minimax-m2.5", True),
@@ -31,7 +29,6 @@ def test_should_force_temperature_one_by_model_id(model_id, expected):
     ("model_id", "expected_temperature"),
     [
         ("openrouter:google/gemini-3-pro-preview", 1.0),
-        ("openrouter:deepseek/deepseek-v3.2-speciale", 1.0),
         ("openrouter:z-ai/glm-5", 1.0),
         ("openrouter:openai/gpt-oss-120b", 1.0),
         ("openrouter:openai/gpt-4o-mini", 0.27),

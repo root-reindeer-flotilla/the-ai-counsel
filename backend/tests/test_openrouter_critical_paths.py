@@ -99,7 +99,7 @@ async def test_query_model_does_not_add_reasoning_effort_for_non_targets():
             )
 
     assert result["error"] is None
-    assert "reasoning" not in payloads[0]
+    assert payloads[0]["reasoning"] == {"enabled": True}
 
 
 @pytest.mark.anyio
