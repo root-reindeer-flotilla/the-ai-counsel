@@ -269,6 +269,7 @@ export default function ChatInterface({
                                             <Stage2
                                                 rankings={msg.stage2}
                                                 labelToModel={msg.metadata?.label_to_model}
+                                                stage2LabelMapsByEvaluator={msg.metadata?.stage2_label_maps_by_evaluator}
                                                 aggregateRankings={msg.metadata?.aggregate_rankings}
                                                 startTime={msg.timers?.stage2Start}
                                                 endTime={msg.timers?.stage2End}

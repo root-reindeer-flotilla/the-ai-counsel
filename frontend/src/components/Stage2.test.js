@@ -21,3 +21,14 @@ describe('Stage2 leaderboard metric formatting', () => {
     expect(src).toContain('{generationTokensLabel}');
   });
 });
+
+describe('Stage2 evaluator label map selection', () => {
+  it('prefers evaluator-specific mapping and falls back to global mapping', () => {
+    const src = readFileSync(resolve(__dirname, 'Stage2.jsx'), 'utf8');
+    expect(src).toContain('function getEvaluatorLabelMap');
+    expect(src).toContain('currentRanking?.stage2_label_model_map');
+    expect(src).toContain('stage2LabelMapsByEvaluator[evaluatorModel]');
+    expect(src).toContain('return labelToModel || {}');
+  });
+});
+

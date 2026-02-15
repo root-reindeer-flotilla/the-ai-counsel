@@ -17,13 +17,35 @@ function deAnonymizeText(text, labelToModel) {
     return result;
 }
 
+function getEvaluatorLabelMap(currentRanking, labelToModel, stage2LabelMapsByEvaluator) {
+    if (currentRanking?.stage2_label_model_map) {
+        return currentRanking.stage2_label_model_map;
+    }
+    const evaluatorModel = currentRanking?.model;
+    if (
+        evaluatorModel &&
+        stage2LabelMapsByEvaluator &&
+        stage2LabelMapsByEvaluator[evaluatorModel]
+    ) {
+        return stage2LabelMapsByEvaluator[evaluatorModel];
+    }
+    return labelToModel || {};
+}
+
 // Helper to convert hex to rgb for CSS variable
 function hexToRgb(hex) {
     const result = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex);
     return result ? `${parseInt(result[1], 16)}, ${parseInt(result[2], 16)}, ${parseInt(result[3], 16)}` : '255, 255, 255';
 }
 
-export default function Stage2({ rankings, labelToModel, aggregateRankings, startTime, endTime }) {
+export default function Stage2({
+    rankings,
+    labelToModel,
+    stage2LabelMapsByEvaluator,
+    aggregateRankings,
+    startTime,
+    endTime,
+}) {
     const [activeTab, setActiveTab] = useState(0);
 
     // Reset activeTab if it becomes out of bounds (e.g., during streaming)
@@ -41,6 +63,11 @@ export default function Stage2({ rankings, labelToModel, aggregateRankings, star
     const safeActiveTab = Math.min(activeTab, rankings.length - 1);
     const currentRanking = rankings[safeActiveTab] || {};
     const hasError = currentRanking?.error || false;
+    const currentLabelMap = getEvaluatorLabelMap(
+        currentRanking,
+        labelToModel,
+        stage2LabelMapsByEvaluator,
+    );
 
     // Get visuals for current tab
     const currentVisuals = getModelVisuals(currentRanking?.model);
@@ -56,7 +83,7 @@ export default function Stage2({ rankings, labelToModel, aggregateRankings, star
     const handleCopy = async () => {
         const ranking = currentRanking?.ranking;
         const rankingText = typeof ranking === 'string' ? ranking : String(ranking || '');
-        const textToCopy = deAnonymizeText(rankingText, labelToModel);
+        const textToCopy = deAnonymizeText(rankingText, currentLabelMap);
 
         if (!textToCopy) return;
 
@@ -167,7 +194,7 @@ export default function Stage2({ rankings, labelToModel, aggregateRankings, star
                                 content={(() => {
                                     const ranking = currentRanking?.ranking;
                                     const rankingText = typeof ranking === 'string' ? ranking : String(ranking || '');
-                                    return deAnonymizeText(rankingText, labelToModel);
+                                    return deAnonymizeText(rankingText, currentLabelMap);
                                 })()}
                             />
                         </div>
@@ -187,8 +214,8 @@ export default function Stage2({ rankings, labelToModel, aggregateRankings, star
                                     <ol>
                                         {currentRanking.parsed_ranking.map((label, i) => (
                                             <li key={i}>
-                                                {labelToModel && labelToModel[label]
-                                                    ? getShortModelName(labelToModel[label])
+                                                {currentLabelMap && currentLabelMap[label]
+                                                    ? getShortModelName(currentLabelMap[label])
                                                     : label}
                                             </li>
                                         ))}

@@ -42,6 +42,8 @@ class RunState:
     stage2_results: List[Dict[str, Any]] = field(default_factory=list)
     stage3_result: Optional[Dict[str, Any]] = None
     label_to_model: Dict[str, str] = field(default_factory=dict)
+    stage2_label_maps_by_evaluator: Dict[str, Dict[str, str]] = field(default_factory=dict)
+    stage2_candidate_maps_by_evaluator: Dict[str, Dict[str, str]] = field(default_factory=dict)
     aggregate_rankings: List[Dict[str, Any]] = field(default_factory=list)
     ranking_diagnostics: Dict[str, Any] = field(default_factory=dict)
     search_context: str = ""
@@ -166,6 +168,8 @@ class RunManager:
             "stage3_result": run.stage3_result,
             "metadata": {
                 "label_to_model": run.label_to_model,
+                "stage2_label_maps_by_evaluator": run.stage2_label_maps_by_evaluator,
+                "stage2_candidate_maps_by_evaluator": run.stage2_candidate_maps_by_evaluator,
                 "aggregate_rankings": run.aggregate_rankings,
                 "ranking_diagnostics": run.ranking_diagnostics,
                 "generation_time_ms": run.generation_time_ms,
@@ -198,6 +202,8 @@ class RunManager:
         metadata: Dict[str, Any] = {"execution_mode": run.execution_mode}
         if run.execution_mode in ["chat_ranking", "full"]:
             metadata["label_to_model"] = run.label_to_model
+            metadata["stage2_label_maps_by_evaluator"] = run.stage2_label_maps_by_evaluator
+            metadata["stage2_candidate_maps_by_evaluator"] = run.stage2_candidate_maps_by_evaluator
             metadata["aggregate_rankings"] = run.aggregate_rankings
             metadata["ranking_diagnostics"] = run.ranking_diagnostics
             metadata["generation_time_ms"] = run.generation_time_ms
@@ -240,6 +246,71 @@ class RunManager:
         stage1_completed_at = None
         stage2_started_at = None
         stage2_completed_at = None
+
+        def _tokens_for_log(value: Any) -> str:
+            return str(value) if isinstance(value, int) else "null"
+
+        def _usage_tokens_for_log(usage: Any, keys: List[str]) -> Optional[int]:
+            if not isinstance(usage, dict):
+                return None
+            for key in keys:
+                token_value = usage.get(key)
+                if isinstance(token_value, int):
+                    return token_value
+            return None
+
+        def _cost_for_log(usage: Any) -> str:
+            if not isinstance(usage, dict):
+                return "null"
+            cost = usage.get("cost")
+            if cost is None:
+                return "null"
+            try:
+                return str(float(cost))
+            except (TypeError, ValueError):
+                return "null"
+
+        def _sum_cost_for_log(results: List[Dict[str, Any]], usage_key: str) -> Optional[float]:
+            total = 0.0
+            has_cost = False
+            for result in results:
+                usage = result.get(usage_key)
+                if not isinstance(usage, dict):
+                    continue
+                cost = usage.get("cost")
+                if cost is None:
+                    continue
+                try:
+                    total += float(cost)
+                    has_cost = True
+                except (TypeError, ValueError):
+                    continue
+            return total if has_cost else None
+
+        def _sum_tokens_for_log(results: List[Dict[str, Any]], tokens_key: str) -> Optional[int]:
+            total = 0
+            has_tokens = False
+            for result in results:
+                tokens = result.get(tokens_key)
+                if isinstance(tokens, int) and tokens > 0:
+                    total += tokens
+                    has_tokens = True
+            return total if has_tokens else None
+
+        def _sum_usage_tokens_for_log(
+            results: List[Dict[str, Any]],
+            usage_key: str,
+            token_keys: List[str],
+        ) -> Optional[int]:
+            total = 0
+            has_tokens = False
+            for result in results:
+                usage = result.get(usage_key)
+                token_count = _usage_tokens_for_log(usage, token_keys)
+                if isinstance(token_count, int) and token_count >= 0:
+                    total += token_count
+                    has_tokens = True
+            return total if has_tokens else None
 
         try:
             run.status = "running"
@@ -292,6 +363,18 @@ class RunManager:
                     await self._emit(run, {"type": "stage1_init", "total": item})
                     continue
                 run.stage1_results.append(item)
+                stage1_usage = item.get("stage1_usage")
+                stage1_input_tokens_value = _usage_tokens_for_log(stage1_usage, ["input_tokens", "prompt_tokens"])
+                stage1_output_tokens_value = _usage_tokens_for_log(stage1_usage, ["output_tokens", "completion_tokens"])
+                stage1_tokens_value = item.get("stage1_total_tokens")
+                print(
+                    f"Stage 1 Progress: {len(run.stage1_results)}/{run.stage1_total_models} - "
+                    f"{item.get('model', 'unknown')} | "
+                    f"{_tokens_for_log(stage1_input_tokens_value)} | "
+                    f"{_tokens_for_log(stage1_output_tokens_value)} | "
+                    f"{_tokens_for_log(stage1_tokens_value)} | "
+                    f"{_cost_for_log(stage1_usage)}"
+                )
                 await self._emit(
                     run,
                     {
@@ -303,6 +386,25 @@ class RunManager:
                 )
 
             stage1_completed_at = time.perf_counter()
+            stage1_total_cost = _sum_cost_for_log(run.stage1_results, "stage1_usage")
+            stage1_total_input_tokens = _sum_usage_tokens_for_log(
+                run.stage1_results,
+                "stage1_usage",
+                ["input_tokens", "prompt_tokens"],
+            )
+            stage1_total_output_tokens = _sum_usage_tokens_for_log(
+                run.stage1_results,
+                "stage1_usage",
+                ["output_tokens", "completion_tokens"],
+            )
+            stage1_total_tokens = _sum_tokens_for_log(run.stage1_results, "stage1_total_tokens")
+            print(
+                "Stage 1 Totals: "
+                f"{str(stage1_total_input_tokens) if stage1_total_input_tokens is not None else 'null'} | "
+                f"{str(stage1_total_output_tokens) if stage1_total_output_tokens is not None else 'null'} | "
+                f"{str(stage1_total_tokens) if stage1_total_tokens is not None else 'null'} | "
+                f"{str(stage1_total_cost) if stage1_total_cost is not None else 'null'}"
+            )
             await self._emit(run, {"type": "stage1_complete", "data": run.stage1_results})
 
             if not any(r for r in run.stage1_results if not r.get("error")):
@@ -320,12 +422,32 @@ class RunManager:
                 await self._emit(run, {"type": "stage2_start"})
                 async for item in stage2_collect_rankings(run.content, run.stage1_results, run.search_context, None):
                     self._raise_if_cancelled(run)
+                    if isinstance(item, dict) and item.get("type") == "stage2_init_data":
+                        run.label_to_model = item.get("label_to_model", {})
+                        run.stage2_label_maps_by_evaluator = item.get("stage2_label_maps_by_evaluator", {})
+                        run.stage2_candidate_maps_by_evaluator = item.get("stage2_candidate_maps_by_evaluator", {})
+                        run.stage2_total_models = len(run.label_to_model)
+                        await self._emit(run, {"type": "stage2_init", "total": run.stage2_total_models})
+                        continue
                     if isinstance(item, dict) and not item.get("model"):
+                        # Backward compatibility for older stage2 generator format.
                         run.label_to_model = item
                         run.stage2_total_models = len(item)
                         await self._emit(run, {"type": "stage2_init", "total": run.stage2_total_models})
                         continue
                     run.stage2_results.append(item)
+                    stage2_usage = item.get("stage2_usage")
+                    stage2_input_tokens_value = _usage_tokens_for_log(stage2_usage, ["input_tokens", "prompt_tokens"])
+                    stage2_output_tokens_value = _usage_tokens_for_log(stage2_usage, ["output_tokens", "completion_tokens"])
+                    stage2_tokens_value = item.get("stage2_total_tokens")
+                    print(
+                        f"Stage 2 Progress: {len(run.stage2_results)}/{run.stage2_total_models} - "
+                        f"{item.get('model', 'unknown')} | "
+                        f"{_tokens_for_log(stage2_input_tokens_value)} | "
+                        f"{_tokens_for_log(stage2_output_tokens_value)} | "
+                        f"{_tokens_for_log(stage2_tokens_value)} | "
+                        f"{_cost_for_log(stage2_usage)}"
+                    )
                     await self._emit(
                         run,
                         {
@@ -421,6 +543,44 @@ class RunManager:
                     )
                 run.aggregate_rankings = enriched_aggregate_rankings
                 stage2_completed_at = time.perf_counter()
+                stage2_total_cost = _sum_cost_for_log(run.stage2_results, "stage2_usage")
+                stage2_total_input_tokens = _sum_usage_tokens_for_log(
+                    run.stage2_results,
+                    "stage2_usage",
+                    ["input_tokens", "prompt_tokens"],
+                )
+                stage2_total_output_tokens = _sum_usage_tokens_for_log(
+                    run.stage2_results,
+                    "stage2_usage",
+                    ["output_tokens", "completion_tokens"],
+                )
+                stage2_total_tokens = _sum_tokens_for_log(run.stage2_results, "stage2_total_tokens")
+                print(
+                    "Stage 2 Totals: "
+                    f"{str(stage2_total_input_tokens) if stage2_total_input_tokens is not None else 'null'} | "
+                    f"{str(stage2_total_output_tokens) if stage2_total_output_tokens is not None else 'null'} | "
+                    f"{str(stage2_total_tokens) if stage2_total_tokens is not None else 'null'} | "
+                    f"{str(stage2_total_cost) if stage2_total_cost is not None else 'null'}"
+                )
+                combined_stage12_cost = None
+                if stage1_total_cost is not None or stage2_total_cost is not None:
+                    combined_stage12_cost = float(stage1_total_cost or 0) + float(stage2_total_cost or 0)
+                combined_stage12_input_tokens = None
+                if stage1_total_input_tokens is not None or stage2_total_input_tokens is not None:
+                    combined_stage12_input_tokens = int(stage1_total_input_tokens or 0) + int(stage2_total_input_tokens or 0)
+                combined_stage12_output_tokens = None
+                if stage1_total_output_tokens is not None or stage2_total_output_tokens is not None:
+                    combined_stage12_output_tokens = int(stage1_total_output_tokens or 0) + int(stage2_total_output_tokens or 0)
+                combined_stage12_tokens = None
+                if stage1_total_tokens is not None or stage2_total_tokens is not None:
+                    combined_stage12_tokens = int(stage1_total_tokens or 0) + int(stage2_total_tokens or 0)
+                print(
+                    "Stage 1+2 Totals: "
+                    f"{str(combined_stage12_input_tokens) if combined_stage12_input_tokens is not None else 'null'} | "
+                    f"{str(combined_stage12_output_tokens) if combined_stage12_output_tokens is not None else 'null'} | "
+                    f"{str(combined_stage12_tokens) if combined_stage12_tokens is not None else 'null'} | "
+                    f"{str(combined_stage12_cost) if combined_stage12_cost is not None else 'null'}"
+                )
                 if (
                     stage1_started_at is not None
                     and stage1_completed_at is not None
@@ -439,6 +599,8 @@ class RunManager:
                         "data": run.stage2_results,
                         "metadata": {
                             "label_to_model": run.label_to_model,
+                            "stage2_label_maps_by_evaluator": run.stage2_label_maps_by_evaluator,
+                            "stage2_candidate_maps_by_evaluator": run.stage2_candidate_maps_by_evaluator,
                             "aggregate_rankings": run.aggregate_rankings,
                             "ranking_diagnostics": run.ranking_diagnostics,
                             "generation_time_ms": run.generation_time_ms,
