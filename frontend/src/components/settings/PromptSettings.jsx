@@ -107,8 +107,6 @@ export default function PromptSettings({
   handleResetPrompt,
   activePromptTab,
   setActivePromptTab,
-  stage2Temperature,
-  setStage2Temperature,
 }) {
   const promptConfigs = variant === 'advisor' ? ADVISOR_PROMPTS : COUNCIL_PROMPTS;
   const activeConfig = promptConfigs.find(prompt => prompt.id === activePromptTab) || promptConfigs[0];
@@ -161,25 +159,6 @@ export default function PromptSettings({
         </button>
       </div>
 
-      {variant === 'council' && activeConfig.id === 'stage2' && setStage2Temperature && (
-        <div className="config-section" style={{ marginTop: '24px' }}>
-          <label className="config-label">Stage 2 Heat</label>
-          <p className="section-description">
-            Controls how much variation the peer ranking step allows. Lower values keep ranking more consistent.
-          </p>
-          <div className="temperature-control">
-            <input
-              type="range"
-              min="0"
-              max="2"
-              step="0.1"
-              value={stage2Temperature}
-              onChange={(event) => setStage2Temperature(parseFloat(event.target.value))}
-            />
-            <span className="temperature-value">{stage2Temperature}</span>
-          </div>
-        </div>
-      )}
     </section>
   );
 }

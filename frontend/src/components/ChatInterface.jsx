@@ -12,6 +12,8 @@ import AdvisorSetup from './AdvisorSetup';
 import MarkdownContent from './MarkdownContent';
 import Stage4, { Stage4Skeleton } from './Stage4';
 import RoundNavigator from './RoundNavigator';
+import CostReport from './CostReport';
+import DocumentUpload from './DocumentUpload';
 import './ChatInterface.css';
 
 function hasStage1Results(msg) {
@@ -58,12 +60,46 @@ function renderStage1Content(msg) {
 
 function isCouncilTurnPending(msg, isActiveTurn, isLoading) {
     if (!isActiveTurn || !isLoading || msg.error || msg.aborted) return false;
-    if (msg.loading?.search || msg.loading?.stage1 || msg.loading?.stage2 || msg.loading?.stage3) {
+    if (msg.loading?.search || msg.loading?.stage1 || msg.loading?.stage2 || msg.loading?.stage3 || msg.loading?.stage4) {
         return false;
     }
     if (hasStage1Results(msg) || hasStage2Results(msg) || msg.stage3) return false;
     if (msg.metadata?.search_context) return false;
     return true;
+}
+
+import { CRITIQUE_MODE_LABELS } from '../constants/critiqueMode';
+
+function DebateConfigBar({ critiqueMode, debateRounds, autoConverge, convergenceThreshold, onOpenSettings }) {
+    const modeLabel = CRITIQUE_MODE_LABELS[critiqueMode] || critiqueMode;
+    const roundsLabel = debateRounds === 1 ? '1 round' : `${debateRounds} rounds`;
+    const showAutoConverge = debateRounds > 1 && autoConverge;
+
+    return (
+        <div className="debate-config-bar">
+            <div className="debate-config-bar__info">
+                <span className="debate-config-bar__label">Debate:</span>
+                <span className="debate-config-bar__pill">{modeLabel}</span>
+                <span className="debate-config-bar__dot">·</span>
+                <span className="debate-config-bar__value">{roundsLabel}</span>
+                {showAutoConverge && (
+                    <>
+                        <span className="debate-config-bar__dot">·</span>
+                        <span className="debate-config-bar__converge">
+                            Auto-converge ({convergenceThreshold} stable)
+                        </span>
+                    </>
+                )}
+            </div>
+            <button
+                type="button"
+                className="debate-config-bar__link"
+                onClick={() => onOpenSettings?.('debate')}
+            >
+                Council Debate Config →
+            </button>
+        </div>
+    );
 }
 
 export default function ChatInterface({
@@ -72,6 +108,7 @@ export default function ChatInterface({
     onAbort,
     isLoading,
     councilConfigured,
+    providersConfigured = true,
     onOpenSettings,
     councilModels = [],
     chairmanModel = null,
@@ -83,10 +120,17 @@ export default function ChatInterface({
     onStartDebate,
     onNewConversation,
     onCouncilChange,
+    critiqueMode = 'freeform',
+    debateRounds = 1,
+    autoConverge = true,
+    convergenceThreshold = 2,
 }) {
     const [input, setInput] = useState('');
     const [activeSearchProvider, setActiveSearchProvider] = useState(null);
     const [searchPopoverOpen, setSearchPopoverOpen] = useState(false);
+    const [documentPayload, setDocumentPayload] = useState({ documents: [], attachments: [], warnings: [] });
+    const [documentsBusy, setDocumentsBusy] = useState(false);
+    const [documentResetKey, setDocumentResetKey] = useState(0);
     const searchPopoverRef = useRef(null);
     const messagesEndRef = useRef(null);
     const messagesContainerRef = useRef(null);
@@ -135,9 +179,11 @@ export default function ChatInterface({
 
     const handleSubmit = (e) => {
         e.preventDefault();
-        if (input.trim() && !isLoading) {
-            onSendMessage(input, activeSearchProvider);
+        if (input.trim() && !isLoading && !documentsBusy) {
+            onSendMessage(input, activeSearchProvider, documentPayload);
             setInput('');
+            setDocumentPayload({ documents: [], attachments: [], warnings: [] });
+            setDocumentResetKey((key) => key + 1);
         }
     };
 
@@ -165,7 +211,7 @@ export default function ChatInterface({
         return (
             <div className="chat-interface">
                 <div className="empty-state">
-                    <h1>Welcome to LLM Council <span className="plus-text">Plus</span></h1>
+                    <h1>Welcome to The AI <span className="plus-text">Counsel</span></h1>
                     <p className="hero-message">
                         Configure your council below, then start a session or ask your question.
                     </p>
@@ -204,7 +250,7 @@ export default function ChatInterface({
                 ) : (conversation.messages.length === 0) ? (
                     <div className="hero-container">
                         <div className="hero-content">
-                            <h1>Welcome to LLM Council <span className="text-gradient">Plus</span></h1>
+                            <h1>Welcome to The AI <span className="text-gradient">Counsel</span></h1>
                             <p className="hero-subtitle">
                                 Configure your council below, then ask your question.
                             </p>
@@ -246,8 +292,8 @@ export default function ChatInterface({
                                     else if (knownMode === 'chat_ranking') label = '⚖️ Chat + Ranking';
                                     else if (knownMode === 'full') {
                                         if (rounds > 1) {
-                                            const capitalizedCritique = critique.charAt(0).toUpperCase() + critique.slice(1);
-                                            label = `🏛️ Full Debate (${rounds} Rds • ${capitalizedCritique})`;
+                                            const critiqueLabel = CRITIQUE_MODE_LABELS[critique] || critique;
+                                            label = `🏛️ Full Debate (${rounds} Rds • ${critiqueLabel})`;
                                         } else {
                                             label = '🏛️ Full Deliberation';
                                         }
@@ -260,7 +306,19 @@ export default function ChatInterface({
 
                             <div className="message-content">
                                 {msg.role === 'user' ? (
-                                    <MarkdownContent>{msg.content}</MarkdownContent>
+                                    <>
+                                        <MarkdownContent>{msg.content}</MarkdownContent>
+                                        {Array.isArray(msg.attachments) && msg.attachments.length > 0 && (
+                                            <div className="message-attachments">
+                                                {msg.attachments.map((attachment, attachmentIndex) => (
+                                                    <span className="message-attachment-chip" key={`${attachment.name}-${attachmentIndex}`}>
+                                                        <span className="message-attachment-icon">📎</span>
+                                                        <span>{attachment.name}</span>
+                                                    </span>
+                                                ))}
+                                            </div>
+                                        )}
+                                    </>
                                 ) : (msg.mode === 'advisors' || msg.type === 'advisor_debate') ? (
                                     <DebateView
                                         personas={msg.personas || []}
@@ -270,9 +328,11 @@ export default function ChatInterface({
                                         currentRound={msg.currentRound || msg.rounds?.length || 1}
                                         maxRounds={msg.maxRounds || msg.metadata?.max_rounds || 3}
                                         isRunning={msg.isRunning || false}
+                                        phase={msg.phase || null}
                                         question={msg.question || ''}
                                         webSearch={msg.webSearch}
                                         error={msg.error || null}
+                                        costReport={msg.metadata?.cost_report}
                                     />
                                 ) : (
                                     <CouncilMessageRenderer
@@ -295,18 +355,28 @@ export default function ChatInterface({
                     })
                 )}
 
-                {/* Bottom Spacer for floating input */}
+                {/* Bottom spacer for message scroll anchoring */}
                 <div ref={messagesEndRef} style={{ height: '20px' }} />
             </div>
 
-            {/* Floating Command Capsule — hidden for advisor debates */}
+            {/* Docked Command Capsule — hidden for advisor debates */}
             {mode !== 'advisors' && <div className="input-area">
+                <DebateConfigBar
+                    critiqueMode={critiqueMode}
+                    debateRounds={debateRounds}
+                    autoConverge={autoConverge}
+                    convergenceThreshold={convergenceThreshold}
+                    onOpenSettings={onOpenSettings}
+                />
                 {!councilConfigured ? (
                     <div className="input-container config-required">
                         <span className="config-message">
-                            ⚠️ Council not ready — add at least one member
-                            {executionMode === 'full' ? ' and a chairman' : ''}.
-                            <button className="config-link" onClick={() => onOpenSettings('llm_keys')}>Configure API Keys</button>
+                            ⚠️ Council not ready — add at least one member.
+                            {!providersConfigured && (
+                                <button className="config-link" onClick={() => onOpenSettings('llm_keys')}>
+                                    Configure API Keys
+                                </button>
+                            )}
                         </span>
                     </div>
                 ) : (
@@ -370,17 +440,24 @@ export default function ChatInterface({
                                     ⏹
                                 </button>
                             ) : (
-                                <button type="submit" className="send-button" disabled={!input.trim()}>
+                                <button type="submit" className="send-button" disabled={!input.trim() || documentsBusy}>
                                     ➤
                                 </button>
                             )}
                         </div>
 
                         <div className="input-row-bottom">
+                            <DocumentUpload
+                                disabled={isLoading}
+                                resetKey={documentResetKey}
+                                onChange={setDocumentPayload}
+                                onBusyChange={setDocumentsBusy}
+                            />
                             <ExecutionModeToggle
                                 value={executionMode}
                                 onChange={onExecutionModeChange}
                                 disabled={isLoading}
+                                chairmanModel={chairmanModel}
                             />
                         </div>
                     </form>
@@ -484,6 +561,11 @@ function CouncilMessageRenderer({
                 />
             )}
 
+            <CostReport
+                report={displayMetadata.cost_report}
+                title={totalRounds > 1 ? 'Debate Cost' : 'Run Cost'}
+            />
+
             {/* Stage 1: Council Grid (during active round deliberation only) */}
             {shouldShowStage1CouncilGrid(msg) && (
                 <div className="stage-container">
@@ -561,7 +643,13 @@ function CouncilMessageRenderer({
             {showStage4 && (
                 <div className="stage-scroll-anchor">
                     {msg.loading?.stage4 && !displayMetadata.stage4 ? (
-                        <Stage4Skeleton />
+                        <>
+                            <div className="stage-loading">
+                                <div className="spinner"></div>
+                                <span>📝 Stage 4: Generating corrected draft…</span>
+                            </div>
+                            <Stage4Skeleton />
+                        </>
                     ) : (
                         <Stage4
                             correctedDraft={displayMetadata.stage4}

@@ -2,6 +2,8 @@ import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react'
 import { api, buildAvailableSearchProviders } from '../api';
 import SearchableModelSelect from './SearchableModelSelect';
 import { getShortModelName } from '../utils/modelHelpers';
+import { filterOAuthModels, OAUTH_PROVIDERS } from '../constants/oauthProviders';
+import DocumentUpload from './DocumentUpload';
 import './AdvisorSetup.css';
 
 const RECOMMENDED_PERSONA_IDS = ['skeptic', 'pragmatist', 'innovator'];
@@ -54,6 +56,35 @@ function snapshotsEqual(a, b) {
   return JSON.stringify(a) === JSON.stringify(b);
 }
 
+function removePersonaFromPreset(preset, personaId) {
+  const modelAssignments = preset.model_assignments == null
+    ? preset.model_assignments
+    : Object.fromEntries(
+        Object.entries(preset.model_assignments).filter(([id]) => id !== personaId)
+      );
+  return {
+    ...preset,
+    persona_ids: (preset.persona_ids || []).filter((id) => id !== personaId),
+    model_assignments: modelAssignments,
+  };
+}
+
+function removePersonaFromSnapshot(snapshot, personaId) {
+  if (!snapshot) return snapshot;
+  const modelAssignments = snapshot.model_assignments == null
+    ? null
+    : Object.fromEntries(
+        Object.entries(snapshot.model_assignments).filter(([id]) => id !== personaId)
+      );
+  return {
+    ...snapshot,
+    persona_ids: (snapshot.persona_ids || []).filter((id) => id !== personaId),
+    model_assignments: modelAssignments && Object.keys(modelAssignments).length > 0
+      ? modelAssignments
+      : null,
+  };
+}
+
 function newPresetId() {
   if (typeof crypto !== 'undefined' && crypto.randomUUID) {
     return crypto.randomUUID();
@@ -70,6 +101,7 @@ function hasAnyDirectProviderKey(settings) {
     || settings.deepseek_api_key_set
     || settings.groq_api_key_set
     || settings.nvidia_api_key_set
+    || settings.opencode_api_key_set
   );
 }
 
@@ -81,25 +113,44 @@ const DIRECT_PROVIDER_KEY_FLAGS = {
   deepseek: 'deepseek_api_key_set',
   groq: 'groq_api_key_set',
   nvidia: 'nvidia_api_key_set',
+  'opencode-zen': 'opencode_api_key_set',
+  'opencode-go': 'opencode_api_key_set',
+  // Backend returns capitalized labels with a space; allow both forms.
+  'opencode zen': 'opencode_api_key_set',
+  'opencode go': 'opencode_api_key_set',
 };
 
-/** Advisor setup shows models for configured providers, not only council toggles. */
+/** Filter direct models respecting global provider toggles. */
 function filterDirectModelsForAdvisor(directModels, settings) {
+  const ep = settings.enabled_providers || {};
+  const dt = settings.direct_provider_toggles || {};
   return directModels.filter((model) => {
-    if (model.provider === 'Groq') return settings.groq_api_key_set;
-    const providerKey = (model.provider || '').toLowerCase();
+    if (model.id?.startsWith('xai-oauth:') || model.id?.startsWith('openai-oauth:') || model.id?.startsWith('github-copilot:')) {
+      return false;
+    }
+    if (model.provider === 'Groq') {
+      return settings.groq_api_key_set && (ep.groq !== false);
+    }
+    if (!ep.direct) return false;
+    const providerKey = (model.provider || '').toLowerCase().replace(/\s+/g, '-');
+    if (dt[providerKey] === false) return false;
     const flag = DIRECT_PROVIDER_KEY_FLAGS[providerKey];
     return flag ? settings[flag] : false;
   });
 }
 
-/** Advisors use every configured provider — independent of Council Config toggles. */
+/** Model sources respect global provider toggles. */
 function getAdvisorModelSources(settings) {
+  const ep = settings.enabled_providers || {};
+  const hasOAuth = OAUTH_PROVIDERS.some(
+    (p) => settings[p.connectedKey] && ep[p.id] !== false
+  );
   return {
-    openrouter: !!settings.openrouter_api_key_set,
-    ollama: !!settings.ollama_base_url,
-    direct: hasAnyDirectProviderKey(settings),
-    custom: !!settings.custom_endpoint_url,
+    openrouter: !!settings.openrouter_api_key_set && (ep.openrouter !== false),
+    ollama: !!settings.ollama_base_url && (ep.ollama !== false),
+    direct: hasAnyDirectProviderKey(settings) && (ep.direct !== false),
+    custom: !!settings.custom_endpoint_url && (ep.custom !== false),
+    oauth: hasOAuth,
   };
 }
 
@@ -118,13 +169,18 @@ export default function AdvisorSetup({
   const [modelAssignments, setModelAssignments] = useState({});
   const [rounds, setRounds] = useState(3);
   const [editingPersona, setEditingPersona] = useState(null);
+  const [isCreatingPersona, setIsCreatingPersona] = useState(false);
   const [editForm, setEditForm] = useState({ name: '', role: '', description: '', system_prompt: '', avatar_emoji: '' });
   const [editSaving, setEditSaving] = useState(false);
+  const [editError, setEditError] = useState(null);
   const [searchProvider, setSearchProvider] = useState(null);
   const [availableSearchProviders, setAvailableSearchProviders] = useState([{ id: 'duckduckgo', name: 'DuckDuckGo' }]);
   const [searchPopoverOpen, setSearchPopoverOpen] = useState(false);
   const searchPopoverRef = useRef(null);
   const [question, setQuestion] = useState('');
+  const [documentPayload, setDocumentPayload] = useState({ documents: [], attachments: [], warnings: [] });
+  const [documentsBusy, setDocumentsBusy] = useState(false);
+  const [documentResetKey, setDocumentResetKey] = useState(0);
   const [personasExpanded, setPersonasExpanded] = useState(true);
   const [presets, setPresets] = useState([]);
   const [activePresetId, setActivePresetId] = useState(null);
@@ -169,7 +225,7 @@ export default function AdvisorSetup({
         const loadSources = getAdvisorModelSources(settings);
         const ollamaUrl = settings.ollama_base_url || 'http://localhost:11434';
 
-        const [orModels, ollamaModels, directModels, customModels] = await Promise.all([
+        const [orModels, ollamaModels, directModels, customModels, oauthModels] = await Promise.all([
           loadSources.openrouter
             ? api.getModels().then(d => d.models || []).catch(() => [])
             : [],
@@ -189,9 +245,14 @@ export default function AdvisorSetup({
           loadSources.custom
             ? api.getCustomEndpointModels().then(d => d.models || []).catch(() => [])
             : [],
+          loadSources.oauth
+            ? api.getDirectModels()
+              .then(d => filterOAuthModels(Array.isArray(d) ? d : (d.models || []), settings))
+              .catch(() => [])
+            : [],
         ]);
 
-        const combined = [...orModels, ...ollamaModels, ...directModels, ...customModels];
+        const combined = [...orModels, ...ollamaModels, ...directModels, ...customModels, ...oauthModels];
         const unique = new Map();
         combined.forEach(m => unique.set(m.id, m));
         const sorted = Array.from(unique.values())
@@ -501,8 +562,12 @@ export default function AdvisorSetup({
     return null;
   }, [selectedPersonaIds, personas, modelMode, chosenModel, modelAssignments]);
 
+  const BLANK_PERSONA_FORM = { name: '', role: '', description: '', system_prompt: '', avatar_emoji: '' };
+
   const openEditModal = (e, persona) => {
     e.stopPropagation();
+    setIsCreatingPersona(false);
+    setEditError(null);
     setEditingPersona(persona);
     setEditForm({
       name: persona.name,
@@ -513,38 +578,103 @@ export default function AdvisorSetup({
     });
   };
 
+  const openCreateModal = () => {
+    setIsCreatingPersona(true);
+    setEditError(null);
+    setEditingPersona({ avatar_emoji: '🧑‍💼', is_custom: true });
+    setEditForm(BLANK_PERSONA_FORM);
+  };
+
   const closeEditModal = () => {
     setEditingPersona(null);
+    setIsCreatingPersona(false);
     setEditSaving(false);
+    setEditError(null);
   };
 
   const runEditAction = async (apiFn, errorMsg) => {
     if (!editingPersona || editSaving) return;
     setEditSaving(true);
+    setEditError(null);
     try {
-      const result = await apiFn(editingPersona.id);
-      setPersonas((prev) => prev.map((p) => p.id === result.id ? result : p));
+      const result = await apiFn();
+      if (result) {
+        setPersonas((prev) => prev.map((p) => p.id === result.id ? result : p));
+      }
       closeEditModal();
     } catch (err) {
       console.error(errorMsg, err);
+      setEditError(err.message || errorMsg);
       setEditSaving(false);
     }
   };
 
-  const handleEditSave = () => runEditAction(
-    (id) => api.updatePersona(id, editForm),
-    'Failed to save persona:'
-  );
+  const handleEditSave = () => {
+    if (isCreatingPersona) {
+      if (!editForm.name.trim() || !editForm.role.trim() || !editForm.system_prompt.trim()) {
+        setEditError('Name, role, and system prompt are required.');
+        return;
+      }
+      return runEditAction(
+        async () => {
+          const created = await api.createPersona(editForm);
+          setPersonas((prev) => [...prev, created]);
+          return null;
+        },
+        'Failed to create advisor:'
+      );
+    }
+    return runEditAction(
+      () => api.updatePersona(editingPersona.id, editForm),
+      'Failed to save persona:'
+    );
+  };
 
   const handleEditReset = () => runEditAction(
-    api.resetPersona,
+    () => api.resetPersona(editingPersona.id),
     'Failed to reset persona:'
   );
+
+  const handleEditDelete = () => {
+    if (!editingPersona || editSaving) return;
+    if (!window.confirm(`Delete ${editingPersona.name || 'this advisor'}? Saved presets will remove this advisor.`)) {
+      return;
+    }
+
+    return runEditAction(
+      async () => {
+        const deletedId = editingPersona.id;
+        const nextSelectedPersonaIds = selectedPersonaIds.filter((id) => id !== deletedId);
+        const nextModelAssignments = Object.fromEntries(
+          Object.entries(modelAssignments).filter(([id]) => id !== deletedId)
+        );
+        const nextPresets = presets.map((preset) => removePersonaFromPreset(preset, deletedId));
+
+        await api.deletePersona(deletedId);
+        setPersonas((prev) => prev.filter((p) => p.id !== deletedId));
+        setSelectedPersonaIds(nextSelectedPersonaIds);
+        setModelAssignments(nextModelAssignments);
+        setPresets(nextPresets);
+        if (activePresetId) {
+          const activePreset = presets.find((preset) => preset.id === activePresetId);
+          if (activePreset?.persona_ids?.includes(deletedId)) {
+            loadedSnapshotRef.current = removePersonaFromSnapshot(
+              loadedSnapshotRef.current,
+              deletedId
+            );
+          }
+        }
+        return null;
+      },
+      'Failed to delete advisor:'
+    );
+  };
 
   const canStart =
     selectedPersonaIds.length >= 2 &&
     (modelMode === 'simple' ? !!chosenModel : selectedPersonaIds.every((id) => !!modelAssignments[id])) &&
-    question.trim().length > 0;
+    question.trim().length > 0 &&
+    !documentsBusy;
 
   const getHint = () => {
     if (canStart) return '↵ Enter to start · Shift+Enter for new line';
@@ -564,8 +694,12 @@ export default function AdvisorSetup({
       modelAssignments: modelMode === 'advanced' ? modelAssignments : null,
       maxRounds: rounds,
       searchProvider,
+      documents: documentPayload.documents || [],
+      attachments: documentPayload.attachments || [],
     };
     onStartDebate(payload);
+    setDocumentPayload({ documents: [], attachments: [], warnings: [] });
+    setDocumentResetKey((key) => key + 1);
   };
 
   // ── Render ───────────────────────────────────────────────────────────────
@@ -610,6 +744,12 @@ export default function AdvisorSetup({
             )}
           </button>
         </div>
+        <DocumentUpload
+          disabled={isLoading}
+          resetKey={documentResetKey}
+          onChange={setDocumentPayload}
+          onBusyChange={setDocumentsBusy}
+        />
       </div>
 
       {/* Rounds + Web Search — compact config directly below question */}
@@ -934,6 +1074,15 @@ export default function AdvisorSetup({
                     </div>
                   );
                 })}
+                <button
+                  type="button"
+                  className="advisor-setup__persona-card advisor-setup__persona-card--add"
+                  onClick={openCreateModal}
+                >
+                  <span className="advisor-setup__persona-add-icon">＋</span>
+                  <span className="advisor-setup__persona-name">Add Advisor</span>
+                  <span className="advisor-setup__persona-desc">Create a custom persona with your own system prompt</span>
+                </button>
               </div>
             )}
           </div>
@@ -1023,8 +1172,8 @@ export default function AdvisorSetup({
         <div className="advisor-setup__edit-overlay" onClick={closeEditModal}>
           <div className="advisor-setup__edit-modal" onClick={(e) => e.stopPropagation()}>
             <div className="advisor-setup__edit-header">
-              <span className="advisor-setup__edit-emoji">{editingPersona.avatar_emoji}</span>
-              <span className="advisor-setup__edit-title">Edit Persona</span>
+              <span className="advisor-setup__edit-emoji">{editForm.avatar_emoji || editingPersona.avatar_emoji}</span>
+              <span className="advisor-setup__edit-title">{isCreatingPersona ? 'New Advisor' : 'Edit Persona'}</span>
               <button type="button" className="advisor-setup__edit-close" onClick={closeEditModal} aria-label="Close">✕</button>
             </div>
 
@@ -1053,6 +1202,7 @@ export default function AdvisorSetup({
                   className="advisor-setup__edit-input"
                   value={editForm.name}
                   onChange={(e) => setEditForm((f) => ({ ...f, name: e.target.value }))}
+                  placeholder={isCreatingPersona ? 'e.g. The Futurist' : ''}
                 />
               </label>
 
@@ -1063,6 +1213,7 @@ export default function AdvisorSetup({
                   className="advisor-setup__edit-input"
                   value={editForm.role}
                   onChange={(e) => setEditForm((f) => ({ ...f, role: e.target.value }))}
+                  placeholder={isCreatingPersona ? 'e.g. Trend Forecaster' : ''}
                 />
               </label>
 
@@ -1073,6 +1224,7 @@ export default function AdvisorSetup({
                   rows={2}
                   value={editForm.description}
                   onChange={(e) => setEditForm((f) => ({ ...f, description: e.target.value }))}
+                  placeholder={isCreatingPersona ? 'Shown on the advisor card in the gallery' : ''}
                 />
               </label>
 
@@ -1083,12 +1235,17 @@ export default function AdvisorSetup({
                   rows={7}
                   value={editForm.system_prompt}
                   onChange={(e) => setEditForm((f) => ({ ...f, system_prompt: e.target.value }))}
+                  placeholder={isCreatingPersona ? 'You are The Futurist. Your job is to...' : ''}
                 />
               </label>
+
+              {editError && (
+                <p className="advisor-setup__edit-error">{editError}</p>
+              )}
             </div>
 
             <div className="advisor-setup__edit-footer">
-              {editingPersona.is_customized && (
+              {!isCreatingPersona && editingPersona.is_customized && !editingPersona.is_custom && (
                 <button
                   type="button"
                   className="advisor-setup__edit-btn advisor-setup__edit-btn--reset"
@@ -1096,6 +1253,16 @@ export default function AdvisorSetup({
                   disabled={editSaving}
                 >
                   Reset to Default
+                </button>
+              )}
+              {!isCreatingPersona && editingPersona.is_custom && (
+                <button
+                  type="button"
+                  className="advisor-setup__edit-btn advisor-setup__edit-btn--delete"
+                  onClick={handleEditDelete}
+                  disabled={editSaving}
+                >
+                  Delete Advisor
                 </button>
               )}
               <div className="advisor-setup__edit-footer-right">
@@ -1113,7 +1280,7 @@ export default function AdvisorSetup({
                   onClick={handleEditSave}
                   disabled={editSaving}
                 >
-                  {editSaving ? 'Saving…' : 'Save'}
+                  {editSaving ? 'Saving…' : isCreatingPersona ? 'Create Advisor' : 'Save'}
                 </button>
               </div>
             </div>

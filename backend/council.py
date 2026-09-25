@@ -1,14 +1,20 @@
 """3-stage LLM Council orchestration."""
 
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any, Optional
 import asyncio
 import logging
-from . import openrouter
-from . import ollama_client
+import re
 from .config import get_council_models, get_chairman_model
+from .costs import attach_cost
 from .settings import get_settings
+from .prompts import apply_response_language
+from .providers.timeouts import request_timeout
 
 logger = logging.getLogger(__name__)
+
+
+THINK_BLOCK_RE = re.compile(r"<think\b[^>]*>[\s\S]*?</think>", re.IGNORECASE)
+UNCLOSED_THINK_RE = re.compile(r"<think\b[^>]*>[\s\S]*$", re.IGNORECASE)
 
 
 from .providers.openai import OpenAIProvider
@@ -21,6 +27,10 @@ from .providers.ollama import OllamaProvider
 from .providers.groq import GroqProvider
 from .providers.custom_openai import CustomOpenAIProvider
 from .providers.nvidia import NvidiaProvider
+from .providers.opencode import OpenCodeProvider
+from .providers.xai_oauth import XaiOAuthProvider
+from .providers.openai_oauth import OpenAIOauthProvider
+from .providers.github_copilot import GitHubCopilotProvider
 
 # Initialize providers
 PROVIDERS = {
@@ -34,26 +44,64 @@ PROVIDERS = {
     "openrouter": OpenRouterProvider(),
     "ollama": OllamaProvider(),
     "custom": CustomOpenAIProvider(),
+    "opencode-zen": OpenCodeProvider(product="zen"),
+    "opencode-go": OpenCodeProvider(product="go"),
+    "xai-oauth": XaiOAuthProvider(),
+    "openai-oauth": OpenAIOauthProvider(),
+    "github-copilot": GitHubCopilotProvider(),
 }
+
+def get_provider_name_for_model(model_id: str) -> str:
+    """Provider key for a model ID, for per-provider configuration lookups."""
+    if ":" in model_id:
+        provider_name = model_id.split(":", 1)[0]
+        if provider_name in PROVIDERS:
+            return provider_name
+    return "openrouter"
+
 
 def get_provider_for_model(model_id: str) -> Any:
     """Determine the provider for a given model ID."""
-    if ":" in model_id:
-        provider_name = model_id.split(":")[0]
-        if provider_name in PROVIDERS:
-            return PROVIDERS[provider_name]
-
-    # Default to OpenRouter for unprefixed models (legacy support)
-    return PROVIDERS["openrouter"]
+    return PROVIDERS[get_provider_name_for_model(model_id)]
 
 
-async def query_model(model: str, messages: List[Dict[str, str]], timeout: float = 120.0, temperature: float = 0.7) -> Dict[str, Any]:
-    """Dispatch query to appropriate provider."""
+async def query_model(
+    model: str,
+    messages: List[Dict[str, str]],
+    timeout: Optional[float] = None,
+    temperature: float = 0.7,
+    *,
+    conversation_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Dispatch query to appropriate provider.
+
+    `timeout=None` resolves the configured per-provider timeout. Callers that
+    pass an explicit value keep it -- preflight deliberately uses a short one.
+    """
     provider = get_provider_for_model(model)
-    return await provider.query(model, messages, timeout, temperature)
+    if timeout is None:
+        timeout = request_timeout(get_provider_name_for_model(model))
+    if isinstance(provider, OpenCodeProvider):
+        response = await provider.query(
+            model,
+            messages,
+            timeout,
+            temperature,
+            session_id=conversation_id,
+        )
+    else:
+        response = await provider.query(model, messages, timeout, temperature)
+    if isinstance(response, dict):
+        return await attach_cost(model, response)
+    return response
 
 
-async def query_models_parallel(models: List[str], messages: List[Dict[str, str]]) -> Dict[str, Any]:
+async def query_models_parallel(
+    models: List[str],
+    messages: List[Dict[str, str]],
+    *,
+    conversation_id: Optional[str] = None,
+) -> Dict[str, Any]:
     """Dispatch parallel query to appropriate providers."""
     tasks = []
     model_to_task_map = {}
@@ -73,7 +121,7 @@ async def query_models_parallel(models: List[str], messages: List[Dict[str, str]
     
     async def _query_safe(m: str):
         try:
-            return m, await query_model(m, messages)
+            return m, await query_model(m, messages, conversation_id=conversation_id)
         except Exception as e:
             return m, {"error": True, "error_message": str(e)}
 
@@ -83,6 +131,39 @@ async def query_models_parallel(models: List[str], messages: List[Dict[str, str]
     return dict(results)
 
 
+def strip_thinking_blocks(text: Any) -> str:
+    """Remove hidden-reasoning markup from model-visible text."""
+
+    cleaned = str(text or "").strip()
+    cleaned = THINK_BLOCK_RE.sub("", cleaned)
+    cleaned = UNCLOSED_THINK_RE.sub("", cleaned)
+    return cleaned.strip()
+
+
+def clean_generated_short_text(text: str, fallback: str = "Untitled Conversation", max_length: int = 50) -> str:
+    """Clean model-generated labels such as titles and search queries."""
+
+    cleaned = strip_thinking_blocks(text)
+    cleaned = " ".join(cleaned.replace("\r", " ").replace("\n", " ").split())
+    cleaned = cleaned.strip(" \"'`“”‘’.,;:-")
+    cleaned = re.sub(r"^\s*(?:title|search query)\s*:\s*", "", cleaned, flags=re.IGNORECASE)
+    cleaned = cleaned.strip(" \"'`“”‘’.,;:-")
+
+    if not cleaned:
+        cleaned = strip_thinking_blocks(fallback)
+        cleaned = " ".join(cleaned.replace("\r", " ").replace("\n", " ").split())
+        cleaned = cleaned.strip(" \"'`“”‘’.,;:-")
+        cleaned = re.sub(r"^\s*(?:title|search query)\s*:\s*", "", cleaned, flags=re.IGNORECASE)
+        cleaned = cleaned.strip(" \"'`“”‘’.,;:-")
+
+    if not cleaned:
+        cleaned = "Untitled Conversation"
+
+    if len(cleaned) > max_length:
+        cleaned = cleaned[: max_length - 3].rstrip(" \"'`“”‘’.,;:-") + "..."
+    return cleaned
+
+
 async def stage1_collect_responses(
     user_query: str,
     search_context: str = "",
@@ -90,7 +171,9 @@ async def stage1_collect_responses(
     models_override: "List[str] | None" = None,
     history: "List[Dict[str, str]] | None" = None,
     messages_override: "List[Dict[str, str]] | None" = None,
-    per_model_messages: "Dict[str, List[Dict[str, str]]] | None" = None
+    per_model_messages: "Dict[str, List[Dict[str, str]]] | None" = None,
+    *,
+    conversation_id: Optional[str] = None,
 ) -> Any:
     """
     Stage 1: Collect individual responses from all council models.
@@ -131,6 +214,9 @@ async def stage1_collect_responses(
         logger.warning(f"Error formatting Stage 1 prompt: {e}. Using fallback.")
         prompt = f"{search_context_block}Question: {user_query}" if search_context_block else user_query
 
+    if messages_override is None and per_model_messages is None:
+        prompt = apply_response_language(prompt, settings.response_language)
+
     if messages_override is not None:
         messages = messages_override
     else:
@@ -146,7 +232,12 @@ async def stage1_collect_responses(
     async def _query_safe(m: str):
         try:
             model_msgs = per_model_messages.get(m, messages) if per_model_messages else messages
-            return m, await query_model(m, model_msgs, temperature=council_temp)
+            return m, await query_model(
+                m,
+                model_msgs,
+                temperature=council_temp,
+                conversation_id=conversation_id,
+            )
         except Exception as e:
             return m, {"error": True, "error_message": str(e)}
 
@@ -179,7 +270,9 @@ async def stage1_collect_responses(
                                 "model": model,
                                 "response": None,
                                 "error": response.get('error'),
-                                "error_message": response.get('error_message', 'Unknown error')
+                                "error_message": response.get('error_message', 'Unknown error'),
+                                "usage": response.get('usage'),
+                                "cost": response.get('cost'),
                             }
                         else:
                             # Successful response - ensure content is always a string
@@ -187,10 +280,13 @@ async def stage1_collect_responses(
                             if not isinstance(content, str):
                                 # Handle case where API returns non-string content (array, object, etc.)
                                 content = str(content) if content is not None else ''
+                            content = strip_thinking_blocks(content)
                             result = {
                                 "model": model,
                                 "response": content,
-                                "error": None
+                                "error": None,
+                                "usage": response.get('usage'),
+                                "cost": response.get('cost'),
                             }
                     
                     if result:
@@ -214,6 +310,8 @@ async def stage2_collect_rankings(
     search_context: str = "",
     request: Any = None,
     prompt_override: "str | None" = None,
+    *,
+    conversation_id: Optional[str] = None,
 ) -> Any: # Returns an async generator
     """
     Stage 2: Collect peer rankings from all council models.
@@ -278,6 +376,8 @@ async def stage2_collect_rankings(
                 f"Rank these responses. FINAL RANKING must include ONLY: {valid_label_list}."
             )
 
+    ranking_prompt = apply_response_language(ranking_prompt, settings.response_language)
+
     messages = [{"role": "user", "content": ranking_prompt}]
 
     # Only use models that successfully responded in Stage 1
@@ -289,7 +389,12 @@ async def stage2_collect_rankings(
 
     async def _query_safe(m: str):
         try:
-            return m, await query_model(m, messages, temperature=stage2_temp)
+            return m, await query_model(
+                m,
+                messages,
+                temperature=stage2_temp,
+                conversation_id=conversation_id,
+            )
         except Exception as e:
             return m, {"error": True, "error_message": str(e)}
 
@@ -323,7 +428,9 @@ async def stage2_collect_rankings(
                                 "ranking": None,
                                 "parsed_ranking": [],
                                 "error": response.get('error'),
-                                "error_message": response.get('error_message', 'Unknown error')
+                                "error_message": response.get('error_message', 'Unknown error'),
+                                "usage": response.get('usage'),
+                                "cost": response.get('cost'),
                             }
                         else:
                             # Ensure content is always a string before parsing
@@ -331,6 +438,7 @@ async def stage2_collect_rankings(
                             if not isinstance(full_text, str):
                                 # Handle case where API returns non-string content (array, object, etc.)
                                 full_text = str(full_text) if full_text is not None else ''
+                            full_text = strip_thinking_blocks(full_text)
                             
                             # Parse with expected count to avoid duplicates
                             expected_count = len(successful_results)
@@ -345,7 +453,9 @@ async def stage2_collect_rankings(
                                 "model": model,
                                 "ranking": full_text,
                                 "parsed_ranking": parsed,
-                                "error": None
+                                "error": None,
+                                "usage": response.get('usage'),
+                                "cost": response.get('cost'),
                             }
                     
                     if result:
@@ -387,7 +497,9 @@ async def stage3_synthesize_final(
     stage2_results: List[Dict[str, Any]],
     search_context: str = "",
     chairman_override: "str | None" = None,
-    prompt_override: "str | None" = None
+    prompt_override: "str | None" = None,
+    *,
+    conversation_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Stage 3: Chairman synthesizes final response.
@@ -432,14 +544,13 @@ async def stage3_synthesize_final(
             logger.warning(f"Error formatting Stage 3 prompt: {e}. Using fallback.")
             chairman_prompt = f"Question: {user_query}\n\nSynthesis required."
 
-    # Determine message structure based on whether the prompt is default or custom
     from .prompts import STAGE3_PROMPT_DEFAULT
-    
+    chairman_prompt = apply_response_language(chairman_prompt, settings.response_language)
+
     # Check if we are using the default prompt (or if it's empty/None, which falls back to default)
     is_default_prompt = (not settings.stage3_prompt) or (settings.stage3_prompt.strip() == STAGE3_PROMPT_DEFAULT.strip())
 
     if is_default_prompt:
-        # If using default, split into System (Persona) and User (Data) for better adherence at low temp
         messages = [
             {"role": "system", "content": "You are the Chairman of an LLM Council. Your task is to synthesize the provided model responses into a single, comprehensive answer."},
             {"role": "user", "content": chairman_prompt}
@@ -453,7 +564,12 @@ async def stage3_synthesize_final(
     chairman_temp = settings.chairman_temperature
 
     try:
-        response = await query_model(chairman_model, messages, temperature=chairman_temp)
+        response = await query_model(
+            chairman_model,
+            messages,
+            temperature=chairman_temp,
+            conversation_id=conversation_id,
+        )
 
         # Check for error in response
         if response is None or response.get('error'):
@@ -462,21 +578,14 @@ async def stage3_synthesize_final(
                 "model": chairman_model,
                 "response": f"Error synthesizing final answer: {error_msg}",
                 "error": True,
-                "error_message": error_msg
+                "error_message": error_msg,
+                "usage": response.get('usage') if response else None,
+                "cost": response.get('cost') if response else None,
             }
 
-        # Combine reasoning and content if available
-        content = response.get('content') or ''
-        reasoning = response.get('reasoning') or response.get('reasoning_details') or ''
-        
-        final_response = content
-        if reasoning and not content:
-            # If only reasoning is provided (some reasoning models do this)
-            final_response = f"**Reasoning:**\n{reasoning}"
-        elif reasoning and content:
-            # If both are provided, prepend reasoning in a collapsible block or just prepend
-            # For now, we'll just prepend it clearly
-            final_response = f"<think>\n{reasoning}\n</think>\n\n{content}"
+        content = strip_thinking_blocks(response.get('content') or '')
+        reasoning = strip_thinking_blocks(response.get('reasoning') or response.get('reasoning_details') or '')
+        final_response = content or reasoning
 
         if not final_response:
              final_response = "No response generated by the Chairman."
@@ -484,17 +593,26 @@ async def stage3_synthesize_final(
         return {
             "model": chairman_model,
             "response": final_response,
-            "error": False
+            "error": False,
+            "usage": response.get('usage'),
+            "cost": response.get('cost'),
         }
 
     except Exception as e:
         logger.error(f"Unexpected error in Stage 3 synthesis: {e}")
-        return {
+        error_response = {
             "model": chairman_model,
-            "response": f"Error: Unable to generate final synthesis due to unexpected error.",
+            "response": "Error: Unable to generate final synthesis due to unexpected error.",
             "error": True,
-            "error_message": str(e)
+            "error_message": str(e),
+            "usage": None,
+            "cost": None,
         }
+        try:
+            await attach_cost(chairman_model, error_response)
+        except Exception as attach_err:
+            logger.warning("Failed to attach cost on Stage 3 error: %s", attach_err)
+        return error_response
 
 
 def parse_ranking_from_text(
@@ -614,7 +732,11 @@ def calculate_aggregate_rankings(
     return aggregate
 
 
-async def generate_conversation_title(user_query: str) -> str:
+async def generate_conversation_title(
+    user_query: str,
+    *,
+    conversation_id: Optional[str] = None,
+) -> str:
     """
     Generate a short title for a conversation based on the first user message.
 
@@ -639,36 +761,34 @@ async def generate_conversation_title(user_query: str) -> str:
         prompt = prompt_template.format(user_query=user_query)
     except Exception as e:
         logger.warning(f"Error formatting title prompt: {e}. Using fallback.")
-        title = user_query.strip()
-        return title[:47] + "..." if len(title) > 50 else title
+        return clean_generated_short_text(user_query)
 
     chairman_model = get_chairman_model()
     messages = [{"role": "user", "content": prompt}]
     
     try:
-        response = await query_model(chairman_model, messages, temperature=0.3)
+        response = await query_model(
+            chairman_model,
+            messages,
+            temperature=0.3,
+            conversation_id=conversation_id,
+        )
         if response and not response.get('error'):
-            title = response.get('content', '').strip()
-            # Clean up quotes
-            title = title.strip('"\'')
-            if len(title) > 50:
-                title = title[:47] + "..."
+            title = clean_generated_short_text(response.get('content', ''), fallback=user_query)
             if title:
                 return title
     except Exception as e:
         logger.error(f"Error generating title: {e}")
 
     # Simple heuristic fallback
-    title = user_query.strip()
-    if not title:
-        return "Untitled Conversation"
-    title = title.strip('"\'')
-    if len(title) > 50:
-        title = title[:47] + "..."
-    return title
+    return clean_generated_short_text(user_query)
 
 
-async def generate_search_query(user_query: str) -> str:
+async def generate_search_query(
+    user_query: str,
+    *,
+    conversation_id: Optional[str] = None,
+) -> str:
     """Generate search query from user query using the Chairman model.
     
     Args:
@@ -692,15 +812,17 @@ async def generate_search_query(user_query: str) -> str:
     messages = [{"role": "user", "content": prompt}]
     
     try:
-        response = await query_model(chairman_model, messages, temperature=0.1)
+        response = await query_model(
+            chairman_model,
+            messages,
+            temperature=0.1,
+            conversation_id=conversation_id,
+        )
         if response and not response.get('error'):
-            query = response.get('content', '').strip()
-            # Clean up quotes and conversational text if any leaked
-            query = query.strip('"\'')
+            query = clean_generated_short_text(response.get('content', ''), fallback=user_query, max_length=100)
             if query:
-                return query[:100]
+                return query
     except Exception as e:
         logger.error(f"Error generating search query: {e}")
 
     return user_query[:100]  # Fallback to direct query
-

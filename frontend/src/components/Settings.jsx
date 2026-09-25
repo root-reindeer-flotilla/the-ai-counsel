@@ -6,6 +6,10 @@ import CouncilConfig from './settings/CouncilConfig';
 import SearchSettings from './settings/SearchSettings';
 import PromptSettings from './settings/PromptSettings';
 import DebateSettings from './settings/DebateSettings';
+import GeneralSettings, { RESPONSE_LANGUAGE_DEFAULT } from './settings/GeneralSettings';
+import { RESPONSE_LANGUAGES_FALLBACK } from '../constants/responseLanguages';
+import { normalizeFontSize } from '../utils/fontSize';
+import { countStoredCredentials, filterOAuthModels, OAUTH_PROVIDERS } from '../constants/oauthProviders';
 import './Settings.css';
 
 const PROMPT_FIELDS = [
@@ -35,6 +39,7 @@ const hasAnyDirectKey = (data) => !!(
   || data?.mistral_api_key_set
   || data?.deepseek_api_key_set
   || data?.nvidia_api_key_set
+  || data?.opencode_api_key_set
 );
 
 /** Council toggles cannot be ON for providers that have no credentials. */
@@ -44,6 +49,9 @@ const normalizeEnabledProviders = (enabledProviders, data, ollamaConnected) => (
   groq: !!enabledProviders?.groq && !!data?.groq_api_key_set,
   direct: !!enabledProviders?.direct && hasAnyDirectKey(data),
   custom: !!enabledProviders?.custom && !!data?.custom_endpoint_url,
+  'xai-oauth': !!enabledProviders?.['xai-oauth'] && !!data?.xai_oauth_connected,
+  'openai-oauth': !!enabledProviders?.['openai-oauth'] && !!data?.openai_oauth_connected,
+  'github-copilot': !!enabledProviders?.['github-copilot'] && !!data?.github_copilot_connected,
 });
 
 const normalizeDirectProviderToggles = (toggles, data) => ({
@@ -53,9 +61,11 @@ const normalizeDirectProviderToggles = (toggles, data) => ({
   mistral: !!toggles?.mistral && !!data?.mistral_api_key_set,
   deepseek: !!toggles?.deepseek && !!data?.deepseek_api_key_set,
   nvidia: !!toggles?.nvidia && !!data?.nvidia_api_key_set,
+  'opencode-zen': !!toggles?.['opencode-zen'] && !!data?.opencode_api_key_set,
+  'opencode-go': !!toggles?.['opencode-go'] && !!data?.opencode_api_key_set,
 });
 
-export default function Settings({ onClose, ollamaStatus, onRefreshOllama, initialSection = 'llm_keys' }) {
+export default function Settings({ onClose, ollamaStatus, onRefreshOllama, initialSection = 'llm_keys', onFontSizeChange }) {
   const [activeSection, setActiveSection] = useState(initialSection);
 
   const [settings, setSettings] = useState(null);
@@ -64,6 +74,10 @@ export default function Settings({ onClose, ollamaStatus, onRefreshOllama, initi
   const [fullContentResults, setFullContentResults] = useState(3);
   const [searchResultCount, setSearchResultCount] = useState(8);
   const [searchHybridMode, setSearchHybridMode] = useState(true);
+  const [dateFormat, setDateFormat] = useState('auto');
+  const [fontSize, setFontSize] = useState('default');
+  const [responseLanguage, setResponseLanguage] = useState(RESPONSE_LANGUAGE_DEFAULT);
+  const [responseLanguages, setResponseLanguages] = useState(RESPONSE_LANGUAGES_FALLBACK);
 
   // OpenRouter State
   const [openrouterApiKey, setOpenrouterApiKey] = useState('');
@@ -101,6 +115,12 @@ export default function Settings({ onClose, ollamaStatus, onRefreshOllama, initi
   });
   const [directAvailableModels, setDirectAvailableModels] = useState([]);
 
+  // OpenCode (Zen + Go) State — single key, shared between products
+  const [opencodeApiKey, setOpencodeApiKey] = useState('');
+  const [isTestingOpencode, setIsTestingOpencode] = useState(false);
+  const [opencodeTestResult, setOpencodeTestResult] = useState(null);
+  const [opencodeAvailableModels, setOpencodeAvailableModels] = useState([]);
+
   // Validation State
   const [validatingKeys, setValidatingKeys] = useState({});
   const [keyValidationStatus, setKeyValidationStatus] = useState({});
@@ -119,14 +139,28 @@ export default function Settings({ onClose, ollamaStatus, onRefreshOllama, initi
   const [isTestingTinyfish, setIsTestingTinyfish] = useState(false);
   const [tinyfishTestResult, setTinyfishTestResult] = useState(null);
   const [showResetConfirm, setShowResetConfirm] = useState(false);
+  const [showDisconnectAllConfirm, setShowDisconnectAllConfirm] = useState(false);
+  const [disconnectAllBusy, setDisconnectAllBusy] = useState(false);
+  const [credentialStorageTarget, setCredentialStorageTarget] = useState(null);
+  const [credentialStorageBusy, setCredentialStorageBusy] = useState(false);
+  const [relayItems, setRelayItems] = useState([]);
+  const [relayDiscoverReason, setRelayDiscoverReason] = useState(null);
+  const [relaySelected, setRelaySelected] = useState([]);
+  const [relayDiscoverBusy, setRelayDiscoverBusy] = useState(false);
+  const [relayImportBusy, setRelayImportBusy] = useState(false);
+  const [relayImportMessage, setRelayImportMessage] = useState(null);
+  const [relayBannerVisible, setRelayBannerVisible] = useState(false);
 
   // Enabled Providers (which sources are available)
   const [enabledProviders, setEnabledProviders] = useState({
     openrouter: true,
     ollama: false,
     groq: false,
-    direct: false,  // Master toggle for all direct connections
-    custom: false   // Custom OpenAI-compatible endpoint
+    direct: false,
+    custom: false,
+    'xai-oauth': false,
+    'openai-oauth': false,
+    'github-copilot': false,
   });
 
   // Individual direct provider toggles
@@ -137,6 +171,8 @@ export default function Settings({ onClose, ollamaStatus, onRefreshOllama, initi
     mistral: false,
     deepseek: false,
     nvidia: false,
+    'opencode-zen': false,
+    'opencode-go': false,
   });
 
   // Council Configuration (unified across all providers)
@@ -162,11 +198,10 @@ export default function Settings({ onClose, ollamaStatus, onRefreshOllama, initi
   const [isSaving, setIsSaving] = useState(false);
   const [error, setError] = useState(null);
   const [success, setSuccess] = useState(false);
-  const [hasChanges, setHasChanges] = useState(false);
+  const [successMessage, setSuccessMessage] = useState(null);
   const [validationErrors, setValidationErrors] = useState({});
 
-  // Ref for chairman select to focus on validation error
-  const chairmanSelectRef = useRef(null);
+  
 
   // Remote/Local filter toggles per model type
   const [councilMemberFilters, setCouncilMemberFilters] = useState({});  // Per-member filters (indexed by member index)
@@ -181,47 +216,99 @@ export default function Settings({ onClose, ollamaStatus, onRefreshOllama, initi
     setActiveSection(initialSection);
   }, [initialSection]);
 
-  // Check for changes
+  // Debounced auto-save for all settings (API keys still save on successful test)
+  const autoSaveTimerRef = useRef(null);
+  const isInitialLoadRef = useRef(true);
+
   useEffect(() => {
-    if (!settings) return;
+    if (!settings || isInitialLoadRef.current) return;
 
-    const checkChanges = () => {
-      if (selectedSearchProvider !== settings.search_provider) return true;
-      if (searchKeywordExtraction !== (settings.search_keyword_extraction || 'direct')) return true;
-      if (fullContentResults !== (settings.full_content_results ?? 3)) return true;
-      if (searchResultCount !== (settings.search_result_count ?? 8)) return true;
-      if (searchHybridMode !== (settings.search_hybrid_mode ?? true)) return true;
-      if (showFreeOnly !== (settings.show_free_only ?? false)) return true;
+    const settingsChanged =
+      selectedSearchProvider !== (settings.search_provider || 'duckduckgo') ||
+      searchKeywordExtraction !== (settings.search_keyword_extraction || 'direct') ||
+      fullContentResults !== (settings.full_content_results ?? 3) ||
+      searchResultCount !== (settings.search_result_count ?? 8) ||
+      searchHybridMode !== (settings.search_hybrid_mode ?? true) ||
+      showFreeOnly !== (settings.show_free_only ?? false) ||
+      dateFormat !== (settings.date_format || 'auto') ||
+      fontSize !== normalizeFontSize(settings.font_size) ||
+      responseLanguage !== (settings.response_language || RESPONSE_LANGUAGE_DEFAULT) ||
+      JSON.stringify(enabledProviders) !== JSON.stringify(settings.enabled_providers) ||
+      JSON.stringify(directProviderToggles) !== JSON.stringify(settings.direct_provider_toggles) ||
+      JSON.stringify(councilModels) !== JSON.stringify(settings.council_models) ||
+      chairmanModel !== (settings.chairman_model || '') ||
+      councilTemperature !== (settings.council_temperature ?? 0.5) ||
+      chairmanTemperature !== (settings.chairman_temperature ?? 0.4) ||
+      stage2Temperature !== (settings.stage2_temperature ?? 0.3) ||
+      JSON.stringify(councilMemberFilters) !== JSON.stringify(settings.council_member_filters || {}) ||
+      chairmanFilter !== (settings.chairman_filter || 'remote') ||
+      PROMPT_FIELDS.some((key) => prompts[key] !== settings[key]) ||
+      critiqueMode !== (settings.critique_mode || 'freeform') ||
+      debateRounds !== (settings.debate_rounds || 1) ||
+      autoConverge !== (settings.auto_converge !== undefined ? settings.auto_converge : true) ||
+      convergenceThreshold !== (settings.convergence_threshold || 2);
 
-      // Enabled Providers
-      if (JSON.stringify(enabledProviders) !== JSON.stringify(settings.enabled_providers)) return true;
-      if (JSON.stringify(directProviderToggles) !== JSON.stringify(settings.direct_provider_toggles)) return true;
+    if (!settingsChanged) return;
 
-      // Council Configuration (unified)
-      if (JSON.stringify(councilModels) !== JSON.stringify(settings.council_models)) return true;
-      if (chairmanModel !== settings.chairman_model) return true;
-      if (councilTemperature !== (settings.council_temperature ?? 0.5)) return true;
-      if (chairmanTemperature !== (settings.chairman_temperature ?? 0.4)) return true;
-      if (stage2Temperature !== (settings.stage2_temperature ?? 0.3)) return true;
+    const councilChanged =
+      JSON.stringify(councilModels) !== JSON.stringify(settings.council_models) ||
+      chairmanModel !== (settings.chairman_model || '');
+    const hasValidCouncil = councilModels.some((m) => m && m.length > 0);
+    const hasValidChairman = chairmanModel && chairmanModel.length > 0;
+    if (councilChanged && !hasValidCouncil && !hasValidChairman) {
+      return;
+    }
 
-      // Remote/Local filters
-      if (JSON.stringify(councilMemberFilters) !== JSON.stringify(settings.council_member_filters || {})) return true;
-      if (chairmanFilter !== (settings.chairman_filter || 'remote')) return true;
-      // Prompts
-      if (PROMPT_FIELDS.some(key => prompts[key] !== settings[key])) return true;
+    if (autoSaveTimerRef.current) {
+      clearTimeout(autoSaveTimerRef.current);
+    }
 
-      // Debate Settings
-      if (critiqueMode !== (settings.critique_mode || 'freeform')) return true;
-      if (debateRounds !== (settings.debate_rounds || 1)) return true;
-      if (autoConverge !== (settings.auto_converge !== undefined ? settings.auto_converge : true)) return true;
-      if (convergenceThreshold !== (settings.convergence_threshold || 2)) return true;
+    autoSaveTimerRef.current = setTimeout(async () => {
+      setIsSaving(true);
+      setError(null);
+      try {
+        const updates = {
+          search_provider: selectedSearchProvider,
+          search_keyword_extraction: searchKeywordExtraction,
+          full_content_results: fullContentResults,
+          search_result_count: searchResultCount,
+          search_hybrid_mode: searchHybridMode,
+          show_free_only: showFreeOnly,
+          date_format: dateFormat,
+          font_size: fontSize,
+          response_language: responseLanguage,
+          enabled_providers: enabledProviders,
+          direct_provider_toggles: directProviderToggles,
+          council_models: councilModels,
+          chairman_model: chairmanModel,
+          council_temperature: councilTemperature,
+          chairman_temperature: chairmanTemperature,
+          stage2_temperature: stage2Temperature,
+          council_member_filters: councilMemberFilters,
+          chairman_filter: chairmanFilter,
+          critique_mode: critiqueMode,
+          debate_rounds: debateRounds,
+          auto_converge: autoConverge,
+          convergence_threshold: convergenceThreshold,
+          ...prompts,
+        };
+        await api.updateSettings(updates);
+        setSettings((prev) => ({ ...prev, ...updates }));
+        setSuccess(true);
+        setTimeout(() => setSuccess(false), 2000);
+      } catch (err) {
+        console.error('Failed to auto-save settings:', err);
+        setError('Failed to save settings');
+      } finally {
+        setIsSaving(false);
+      }
+    }, 1000);
 
-      // Note: API keys are auto-saved on test, so we don't check them here
-
-      return false;
+    return () => {
+      if (autoSaveTimerRef.current) {
+        clearTimeout(autoSaveTimerRef.current);
+      }
     };
-
-    setHasChanges(checkChanges());
   }, [
     settings,
     selectedSearchProvider,
@@ -230,6 +317,9 @@ export default function Settings({ onClose, ollamaStatus, onRefreshOllama, initi
     searchResultCount,
     searchHybridMode,
     showFreeOnly,
+    dateFormat,
+    fontSize,
+    responseLanguage,
     enabledProviders,
     directProviderToggles,
     councilModels,
@@ -247,7 +337,11 @@ export default function Settings({ onClose, ollamaStatus, onRefreshOllama, initi
   ]);
 
   // Helper to determine if filters need to switch based on availability
-  const isRemoteAvailable = enabledProviders.openrouter || enabledProviders.direct || enabledProviders.groq || enabledProviders.custom;
+  const isRemoteAvailable = enabledProviders.openrouter
+    || enabledProviders.direct
+    || enabledProviders.groq
+    || enabledProviders.custom
+    || OAUTH_PROVIDERS.some((p) => enabledProviders[p.id]);
   const isLocalAvailable = enabledProviders.ollama;
 
   const getNewFilter = (currentFilter) => {
@@ -300,70 +394,6 @@ export default function Settings({ onClose, ollamaStatus, onRefreshOllama, initi
 
   }, [enabledProviders, chairmanFilter]);
 
-  // Auto-save council configuration with debounce
-  const autoSaveTimerRef = useRef(null);
-  const isInitialLoadRef = useRef(true);
-  const prevCouncilModelsRef = useRef(null);
-  const prevChairmanModelRef = useRef(null);
-
-  useEffect(() => {
-    // Skip auto-save on initial load
-    if (isInitialLoadRef.current) {
-      return;
-    }
-
-    // Skip if settings haven't loaded yet
-    if (!settings) {
-      return;
-    }
-
-    // Check if council models or chairman actually changed (not just re-rendered)
-    const councilModelsStr = JSON.stringify(councilModels);
-    const prevCouncilModelsStr = JSON.stringify(prevCouncilModelsRef.current);
-    const chairmanChanged = chairmanModel !== prevChairmanModelRef.current;
-    const councilChanged = councilModelsStr !== prevCouncilModelsStr;
-
-    if (!councilChanged && !chairmanChanged) {
-      return;
-    }
-
-    // Update refs
-    prevCouncilModelsRef.current = councilModels;
-    prevChairmanModelRef.current = chairmanModel;
-
-    // Skip if all values are empty (reset state)
-    const hasValidCouncil = councilModels.some(m => m && m.length > 0);
-    const hasValidChairman = chairmanModel && chairmanModel.length > 0;
-    if (!hasValidCouncil && !hasValidChairman) {
-      return;
-    }
-
-    // Clear any existing timer
-    if (autoSaveTimerRef.current) {
-      clearTimeout(autoSaveTimerRef.current);
-    }
-
-    // Debounce auto-save by 1 second
-    autoSaveTimerRef.current = setTimeout(async () => {
-      try {
-        await api.updateSettings({
-          council_models: councilModels,
-          chairman_model: chairmanModel
-        });
-        console.log('Auto-saved council configuration');
-      } catch (err) {
-        console.error('Failed to auto-save council configuration:', err);
-      }
-    }, 1000);
-
-    // Cleanup on unmount
-    return () => {
-      if (autoSaveTimerRef.current) {
-        clearTimeout(autoSaveTimerRef.current);
-      }
-    };
-  }, [councilModels, chairmanModel, settings]);
-
   // Clear validation errors when chairman or council members change
   useEffect(() => {
     if (Object.keys(validationErrors).length > 0) {
@@ -386,6 +416,7 @@ export default function Settings({ onClose, ollamaStatus, onRefreshOllama, initi
   }, [chairmanModel, councilModels, validationErrors]);
 
   const loadSettings = async () => {
+    isInitialLoadRef.current = true;
     try {
       const data = await api.getSettings();
       let defaults = {};
@@ -409,6 +440,16 @@ export default function Settings({ onClose, ollamaStatus, onRefreshOllama, initi
       setSearchResultCount(data.search_result_count ?? 8);
       setSearchHybridMode(data.search_hybrid_mode ?? true);
       setShowFreeOnly(data.show_free_only ?? false);
+      setDateFormat(data.date_format || 'auto');
+      const loadedFontSize = normalizeFontSize(data.font_size);
+      setFontSize(loadedFontSize);
+      onFontSizeChange?.(loadedFontSize);
+      setResponseLanguage(data.response_language || RESPONSE_LANGUAGE_DEFAULT);
+      setResponseLanguages(
+        Array.isArray(data.valid_response_languages) && data.valid_response_languages.length > 0
+          ? data.valid_response_languages
+          : RESPONSE_LANGUAGES_FALLBACK
+      );
 
       // Enabled Providers — never show ON for sources that aren't configured
       if (data.enabled_providers) {
@@ -443,6 +484,8 @@ export default function Settings({ onClose, ollamaStatus, onRefreshOllama, initi
           mistral: !!data.mistral_api_key_set,
           deepseek: !!data.deepseek_api_key_set,
           nvidia: !!data.nvidia_api_key_set,
+          'opencode-zen': !!data.opencode_api_key_set,
+          'opencode-go': !!data.opencode_api_key_set,
         }, data));
       }
 
@@ -455,10 +498,6 @@ export default function Settings({ onClose, ollamaStatus, onRefreshOllama, initi
       setChairmanTemperature(data.chairman_temperature ?? 0.4);
       setStage2Temperature(data.stage2_temperature ?? 0.3);
 
-      // Initialize refs for auto-save tracking (prevents auto-save on initial load)
-      prevCouncilModelsRef.current = loadedCouncilModels;
-      prevChairmanModelRef.current = loadedChairmanModel;
-      // Mark initial load as complete after a short delay to let state settle
       setTimeout(() => {
         isInitialLoadRef.current = false;
       }, 500);
@@ -503,6 +542,9 @@ export default function Settings({ onClose, ollamaStatus, onRefreshOllama, initi
       loadOllamaModels(data.ollama_base_url || 'http://localhost:11434');
       if (data.custom_endpoint_url) {
         loadCustomEndpointModels();
+      }
+      if (data.opencode_api_key_set) {
+        loadOpencodeModels();
       }
 
     } catch (err) {
@@ -576,11 +618,14 @@ export default function Settings({ onClose, ollamaStatus, onRefreshOllama, initi
 
       // Auto-save if connection succeeds
       if (result.success) {
+        const nextEnabled = { ...enabledProviders, custom: true };
         await api.updateSettings({
           custom_endpoint_name: customEndpointName,
           custom_endpoint_url: customEndpointUrl,
-          custom_endpoint_api_key: customEndpointApiKey || null
+          custom_endpoint_api_key: customEndpointApiKey || null,
+          enabled_providers: nextEnabled
         });
+        setEnabledProviders(nextEnabled);
         // Reload settings to get the updated state
         const updatedSettings = await api.getSettings();
         setSettings(updatedSettings);
@@ -602,6 +647,44 @@ export default function Settings({ onClose, ollamaStatus, onRefreshOllama, initi
     setCustomEndpointTestResult(null);
   };
 
+  const handleDisconnectProviderKey = async ({
+    secretField,
+    label = 'provider',
+    enabledPatch = null,
+    directTogglePatch = null,
+    extraUpdates = null,
+    onLocalClear,
+  }) => {
+    try {
+      setError(null);
+      const updates = { [secretField]: '', ...(extraUpdates || {}) };
+      if (enabledPatch) {
+        updates.enabled_providers = { ...enabledProviders, ...enabledPatch };
+      }
+      if (directTogglePatch) {
+        updates.direct_provider_toggles = { ...directProviderToggles, ...directTogglePatch };
+      }
+      const result = await api.updateSettings(updates);
+      onLocalClear?.();
+      if (enabledPatch) {
+        setEnabledProviders((prev) => ({ ...prev, ...enabledPatch }));
+      }
+      if (directTogglePatch) {
+        setDirectProviderToggles((prev) => ({ ...prev, ...directTogglePatch }));
+      }
+      // Prefer server response so UI clears even before a full reload.
+      if (result && typeof result === 'object') {
+        setSettings((prev) => ({ ...prev, ...result }));
+      }
+      await loadSettings();
+      await loadModels();
+      setSuccess(true);
+      setTimeout(() => setSuccess(false), 3000);
+    } catch (err) {
+      setError(err.message || `Failed to disconnect ${label}`);
+    }
+  };
+
   const handleClearCustomEndpoint = async () => {
     try {
       await api.updateSettings({
@@ -611,13 +694,81 @@ export default function Settings({ onClose, ollamaStatus, onRefreshOllama, initi
         enabled_providers: { ...enabledProviders, custom: false },
       });
       resetCustomEndpointLocalState();
-      setEnabledProviders(prev => ({ ...prev, custom: false }));
+      setEnabledProviders((prev) => ({ ...prev, custom: false }));
       await loadSettings();
+      await loadModels();
       setSuccess(true);
       setTimeout(() => setSuccess(false), 3000);
     } catch (err) {
       setError('Failed to disconnect custom endpoint');
     }
+  };
+
+  const handleDisconnectOpenRouter = () => handleDisconnectProviderKey({
+    secretField: 'openrouter_api_key',
+    label: 'OpenRouter',
+    enabledPatch: { openrouter: false },
+    onLocalClear: () => {
+      setOpenrouterApiKey('');
+      setOpenrouterTestResult(null);
+    },
+  });
+
+  const handleDisconnectGroq = () => handleDisconnectProviderKey({
+    secretField: 'groq_api_key',
+    label: 'Groq',
+    enabledPatch: { groq: false },
+    onLocalClear: () => {
+      setGroqApiKey('');
+      setGroqTestResult(null);
+    },
+  });
+
+  const handleDisconnectDirectKey = (providerId, keyField) => handleDisconnectProviderKey({
+    secretField: keyField,
+    label: providerId,
+    directTogglePatch: { [providerId]: false },
+    onLocalClear: () => {
+      setDirectKeys((prev) => ({ ...prev, [keyField]: '' }));
+      setKeyValidationStatus((prev) => {
+        const next = { ...prev };
+        delete next[providerId];
+        return next;
+      });
+    },
+  });
+
+  const handleDisconnectOpencode = () => handleDisconnectProviderKey({
+    secretField: 'opencode_api_key',
+    label: 'OpenCode',
+    directTogglePatch: { 'opencode-zen': false, 'opencode-go': false },
+    onLocalClear: () => {
+      setOpencodeApiKey('');
+      setOpencodeTestResult(null);
+    },
+  });
+
+  const handleDisconnectSearchKey = (providerId) => {
+    const field = `${providerId}_api_key`;
+    const localClearers = {
+      serper: () => { setSerperApiKey(''); setSerperTestResult(null); },
+      tavily: () => { setTavilyApiKey(''); setTavilyTestResult(null); },
+      brave: () => { setBraveApiKey(''); setBraveTestResult(null); },
+      tinyfish: () => { setTinyfishApiKey(''); setTinyfishTestResult(null); },
+    };
+    return handleDisconnectProviderKey({
+      secretField: field,
+      label: providerId,
+      extraUpdates: selectedSearchProvider === providerId
+        ? { search_provider: 'duckduckgo' }
+        : null,
+      onLocalClear: () => {
+        localClearers[providerId]?.();
+        if (selectedSearchProvider === providerId) {
+          setSelectedSearchProvider('duckduckgo');
+        }
+      },
+    });
   };
 
   const handleTestSerper = async () => {
@@ -770,8 +921,13 @@ export default function Settings({ onClose, ollamaStatus, onRefreshOllama, initi
 
       // Auto-save API key if validation succeeds and a new key was provided
       if (result.success && openrouterApiKey) {
-        await api.updateSettings({ openrouter_api_key: openrouterApiKey });
+        const nextEnabled = { ...enabledProviders, openrouter: true };
+        await api.updateSettings({
+          openrouter_api_key: openrouterApiKey,
+          enabled_providers: nextEnabled
+        });
         setOpenrouterApiKey(''); // Clear input after save
+        setEnabledProviders(nextEnabled);
 
         // Reload settings
         await loadSettings();
@@ -802,8 +958,13 @@ export default function Settings({ onClose, ollamaStatus, onRefreshOllama, initi
 
       // Auto-save API key if validation succeeds and a new key was provided
       if (result.success && groqApiKey) {
-        await api.updateSettings({ groq_api_key: groqApiKey });
+        const nextEnabled = { ...enabledProviders, groq: true };
+        await api.updateSettings({
+          groq_api_key: groqApiKey,
+          enabled_providers: nextEnabled
+        });
         setGroqApiKey(''); // Clear input after save
+        setEnabledProviders(nextEnabled);
 
         // Reload settings
         await loadSettings();
@@ -832,7 +993,12 @@ export default function Settings({ onClose, ollamaStatus, onRefreshOllama, initi
 
       if (result.success) {
         // Auto-save base URL if connection succeeds
-        await api.updateSettings({ ollama_base_url: ollamaBaseUrl });
+        const nextEnabled = { ...enabledProviders, ollama: true };
+        await api.updateSettings({
+          ollama_base_url: ollamaBaseUrl,
+          enabled_providers: nextEnabled
+        });
+        setEnabledProviders(nextEnabled);
 
         // Reload settings
         await loadSettings();
@@ -852,201 +1018,21 @@ export default function Settings({ onClose, ollamaStatus, onRefreshOllama, initi
     }
   };
 
-  const handleCouncilModelChange = (index, modelId) => {
-    setCouncilModels(prev => {
-      const updated = [...prev];
-      updated[index] = modelId;
-      return updated;
-    });
-  };
-
-
-
-  const handleMemberFilterChange = (index, filter) => {
-    setCouncilMemberFilters(prev => ({
-      ...prev,
-      [index]: filter
-    }));
-
-    // Clear the model selection for this member when switching filters
-    setCouncilModels(prev => {
-      const updated = [...prev];
-      updated[index] = '';
-      return updated;
-    });
-  };
-
-  // Calculate Rate Limit Warning
-  const getRateLimitWarning = () => {
-    if (!settings || !availableModels || availableModels.length === 0) return null;
-
-    let openRouterFreeCount = 0;
-
-    const totalCouncilMembers = councilModels.length;
-    let totalRequestsPerRun = (totalCouncilMembers * 2) + 2; // Stage 1, Stage 2, Chairman, Search Query
-
-    // Check OpenRouter free models
-    councilModels.forEach(modelId => {
-      const isRemote = !modelId.includes(':') || modelId.startsWith('openrouter:');
-      if (isRemote) {
-        const modelData = availableModels.find(m => m.id === modelId || m.id === modelId.replace('openrouter:', ''));
-        if (modelData && modelData.is_free) {
-          openRouterFreeCount++;
-        }
-      }
-    });
-
-    // Check Chairman and Search Query Model
-    const chairmanModelData = availableModels.find(m => m.id === chairmanModel || m.id === chairmanModel.replace('openrouter:', ''));
-    if (chairmanModelData && chairmanModelData.is_free && (!chairmanModel.includes(':') || chairmanModel.startsWith('openrouter:'))) {
-      openRouterFreeCount++;
+  const handleDisconnectOllama = async () => {
+    try {
+      setError(null);
+      const nextEnabled = { ...enabledProviders, ollama: false };
+      await api.updateSettings({ enabled_providers: nextEnabled });
+      setEnabledProviders(nextEnabled);
+      setOllamaTestResult(null);
+      setOllamaAvailableModels([]);
+      await loadSettings();
+      await loadModels();
+      setSuccess(true);
+      setTimeout(() => setSuccess(false), 3000);
+    } catch (err) {
+      setError(err.message || 'Failed to disconnect Ollama');
     }
-
-    // Logic for OpenRouter Warnings
-    // OpenRouter: 20 RPM, 50 RPD (without credits)
-    if (openRouterFreeCount > 0) {
-      if (totalRequestsPerRun > 10 && openRouterFreeCount >= 3) { // 10 requests is approx half of 20 RPM
-        return {
-          type: 'error',
-          title: 'High Rate Limit Risk (OpenRouter)',
-          message: `Your council configuration generates ~${totalRequestsPerRun} requests per run, with ${openRouterFreeCount} free OpenRouter models. This may exceed the 20 requests/minute limit. Consider using Groq or Ollama for some members.`
-        };
-      } else if (openRouterFreeCount === totalRequestsPerRun) { // All requests from free OpenRouter
-        return {
-          type: 'warning',
-          title: 'Daily Limit Caution (OpenRouter)',
-          message: 'Free OpenRouter models are limited to 50 requests/day (without credits). Use Groq (14k/day) or Ollama for unlimited usage.'
-        };
-      }
-    }
-
-    // Logic for Groq Warnings
-    // Groq: 30 RPM, 14,400 RPD (for Llama models)
-    let groqRequests = 0;
-    councilModels.forEach(id => {
-      if (id.startsWith('groq:')) groqRequests += 2; // Stage 1 + Stage 2
-    });
-    if (chairmanModel.startsWith('groq:')) groqRequests += 1;
-
-    if (groqRequests > 15) {
-      return {
-        type: 'warning',
-        title: 'High Concurrency Caution (Groq)',
-        message: `Your configuration uses ${groqRequests} Groq requests per run. The free tier limit is 30 requests/minute. You may experience throttling if you send messages quickly.`
-      };
-    }
-
-    return null;
-  };
-
-  const rateLimitWarning = getRateLimitWarning();
-
-  const handleFeelingLucky = () => {
-    // 1. Get pool of available models respecting "Free Only" filter
-    let candidateModels = filteredAvailableModels;
-
-    if (!candidateModels || candidateModels.length === 0) {
-      setError("No models available to randomize! Check your enabled providers.");
-      setTimeout(() => setError(null), 3000);
-      return;
-    }
-
-    // Filter out models with known small context windows (< 8k) to prevent Stage 2 errors
-    // Note: context_length might be undefined for some providers, we assume those are safe or unknown
-    const safeModels = candidateModels.filter(m => !m.context_length || m.context_length >= 8192);
-
-    // If we have enough safe models, use them. Otherwise fallback to all.
-    if (safeModels.length >= 2) {
-      candidateModels = safeModels;
-    }
-
-    // Helper to pick random item
-    const pickRandom = (arr) => arr[Math.floor(Math.random() * arr.length)];
-
-    // Helper to determine filter type (remote/local) from model ID
-    const getFilterForModel = (modelId) => {
-      return modelId.startsWith('ollama:') ? 'local' : 'remote';
-    };
-
-    // 2. Randomize Council Members (Unique if possible)
-    let remainingModels = [...candidateModels];
-    const newCouncilModels = [];
-    const newMemberFilters = {};
-
-    // We need to fill 'councilModels.length' slots
-    for (let i = 0; i < councilModels.length; i++) {
-      // If we ran out of unique models, refill the pool
-      if (remainingModels.length === 0) {
-        remainingModels = [...candidateModels];
-      }
-
-      const randomIndex = Math.floor(Math.random() * remainingModels.length);
-      const selectedModel = remainingModels[randomIndex];
-
-      newCouncilModels.push(selectedModel.id);
-      newMemberFilters[i] = getFilterForModel(selectedModel.id);
-
-      // Remove selected to avoid duplicates (until we run out)
-      remainingModels.splice(randomIndex, 1);
-    }
-
-    // 3. Randomize Chairman
-    const randomChairman = pickRandom(candidateModels);
-
-    // Apply Updates
-    setCouncilModels(newCouncilModels);
-    setCouncilMemberFilters(newMemberFilters);
-
-    setChairmanModel(randomChairman.id);
-    setChairmanFilter(getFilterForModel(randomChairman.id));
-
-    setSuccess(true);
-    setTimeout(() => setSuccess(false), 2000);
-  };
-
-  const handleAddCouncilMember = () => {
-    const newIndex = councilModels.length;
-
-    // Determine best default filter based on what's available
-    let defaultFilter = 'remote';
-    const isRemoteAvailable = enabledProviders.openrouter || enabledProviders.direct || enabledProviders.groq || enabledProviders.custom;
-    const isLocalAvailable = enabledProviders.ollama && ollamaAvailableModels.length > 0;
-
-    if (!isRemoteAvailable && isLocalAvailable) {
-      defaultFilter = 'local';
-    }
-
-    // Get models for the chosen filter
-    const filtered = filterByRemoteLocal(filteredAvailableModels, defaultFilter);
-
-    // Even if no models found, we should allow adding the slot so user can switch filter/provider
-    // But we try to pick a default if possible
-    const defaultModel = filtered.length > 0 ? filtered[0].id : '';
-
-    setCouncilModels(prev => [...prev, defaultModel]);
-
-    // Initialize filter for new member
-    setCouncilMemberFilters(prev => ({
-      ...prev,
-      [newIndex]: defaultFilter
-    }));
-  };
-
-  const handleRemoveCouncilMember = (index) => {
-    setCouncilModels(prev => prev.filter((_, i) => i !== index));
-    // Clean up filters - shift indices down
-    setCouncilMemberFilters(prev => {
-      const newFilters = {};
-      Object.keys(prev).forEach(key => {
-        const idx = parseInt(key);
-        if (idx < index) {
-          newFilters[idx] = prev[idx];
-        } else if (idx > index) {
-          newFilters[idx - 1] = prev[idx];
-        }
-      });
-      return newFilters;
-    });
   };
 
   const handlePromptChange = (key, value) => {
@@ -1073,8 +1059,64 @@ export default function Settings({ onClose, ollamaStatus, onRefreshOllama, initi
     }
   };
 
+  const handleDateFormatChange = (newFormat) => setDateFormat(newFormat);
+
+  const handleFontSizeChange = (newFontSize) => {
+    const normalized = normalizeFontSize(newFontSize);
+    setFontSize(normalized);
+    onFontSizeChange?.(normalized);
+  };
+
+  const handleResponseLanguageChange = (newLanguage) => setResponseLanguage(newLanguage);
+
   const handleResetToDefaults = () => {
     setShowResetConfirm(true);
+  };
+
+  const confirmDisconnectAllProviders = async () => {
+    setDisconnectAllBusy(true);
+    setError(null);
+    try {
+      const result = await api.disconnectAllProviders();
+      setShowDisconnectAllConfirm(false);
+      setKeyValidationStatus({});
+      setOpenrouterTestResult(null);
+      setGroqTestResult(null);
+      setOpencodeTestResult(null);
+      setTavilyTestResult(null);
+      setBraveTestResult(null);
+      setSerperTestResult(null);
+      setTinyfishTestResult(null);
+      setRelayImportMessage(null);
+      resetCustomEndpointLocalState();
+      setOpenrouterApiKey('');
+      setGroqApiKey('');
+      setOpencodeApiKey('');
+      setDirectKeys({
+        openai_api_key: '',
+        anthropic_api_key: '',
+        google_api_key: '',
+        mistral_api_key: '',
+        deepseek_api_key: '',
+        nvidia_api_key: '',
+      });
+      await loadSettings();
+      await loadModels();
+      setSuccessMessage(
+        result?.message
+        || `Disconnected all providers (${result?.cleared ?? 0} credentials cleared).`
+      );
+      setSuccess(true);
+      setTimeout(() => {
+        setSuccess(false);
+        setSuccessMessage(null);
+      }, 4000);
+    } catch (err) {
+      setError(err.message || 'Failed to disconnect all providers');
+      setShowDisconnectAllConfirm(false);
+    } finally {
+      setDisconnectAllBusy(false);
+    }
   };
 
   const confirmResetToDefaults = async () => {
@@ -1087,7 +1129,10 @@ export default function Settings({ onClose, ollamaStatus, onRefreshOllama, initi
         ollama: false,
         groq: false,
         direct: false,
-        custom: false
+        custom: false,
+        'xai-oauth': false,
+        'openai-oauth': false,
+        'github-copilot': false,
       });
       resetCustomEndpointLocalState();
 
@@ -1117,6 +1162,10 @@ export default function Settings({ onClose, ollamaStatus, onRefreshOllama, initi
       setSearchKeywordExtraction('direct');
       setFullContentResults(3);
       setShowFreeOnly(false);
+      setDateFormat('auto');
+      setFontSize('default');
+      onFontSizeChange?.('default');
+      setResponseLanguage(RESPONSE_LANGUAGE_DEFAULT);
       setOllamaBaseUrl('http://localhost:11434');
 
       // Reset debate settings
@@ -1139,7 +1188,10 @@ export default function Settings({ onClose, ollamaStatus, onRefreshOllama, initi
           ollama: false,
           groq: false,
           direct: false,
-          custom: false
+          custom: false,
+          'xai-oauth': false,
+          'openai-oauth': false,
+          'github-copilot': false,
         },
         custom_endpoint_name: '',
         custom_endpoint_url: '',
@@ -1150,7 +1202,9 @@ export default function Settings({ onClose, ollamaStatus, onRefreshOllama, initi
           google: false,
           mistral: false,
           deepseek: false,
-          nvidia: false
+          nvidia: false,
+          'opencode-zen': false,
+          'opencode-go': false,
         },
         council_models: ['', ''],
         chairman_model: '',
@@ -1165,17 +1219,91 @@ export default function Settings({ onClose, ollamaStatus, onRefreshOllama, initi
         debate_rounds: 1,
         auto_converge: true,
         convergence_threshold: 2,
+        date_format: 'auto',
+        font_size: 'default',
+        response_language: RESPONSE_LANGUAGE_DEFAULT,
         ...defaultPrompts,
       };
       await api.updateSettings(updates);
 
+      await loadSettings();
       setSuccess(true);
-      // Navigate to Council Config so user sees the blank state
       setActiveSection('council');
 
       setTimeout(() => setSuccess(false), 3000);
     } catch (err) {
       setError('Failed to reset settings');
+    }
+  };
+
+  const handleTestOpencode = async () => {
+    const apiKey = opencodeApiKey;
+    if (!apiKey && !settings?.opencode_api_key_set) return;
+
+    setIsTestingOpencode(true);
+    setOpencodeTestResult(null);
+
+    try {
+      const result = await api.testOpencodeKey(apiKey || '');
+      // result is either { success, message } (single product) or { success, results: {zen, go} }
+      if (result?.results) {
+        const zenOk = result.results.zen?.success;
+        const goOk = result.results.go?.success;
+        const summary = [
+          zenOk ? '✓ Zen' : '✗ Zen',
+          goOk ? '✓ Go' : '✗ Go',
+        ].join(' · ');
+        const messages = [result.results.zen?.message, result.results.go?.message]
+          .filter(Boolean)
+          .join(' / ');
+        setOpencodeTestResult({
+          success: result.success,
+          message: `${summary} — ${messages}`,
+        });
+      } else {
+        setOpencodeTestResult({
+          success: !!result?.success,
+          message: result?.message || 'No response from OpenCode',
+        });
+      }
+
+      if (result?.success && apiKey) {
+        const nextEnabled = { ...enabledProviders, direct: true };
+        const nextDirectToggles = { ...directProviderToggles, 'opencode-zen': true, 'opencode-go': true };
+        await api.updateSettings({
+          opencode_api_key: apiKey,
+          enabled_providers: nextEnabled,
+          direct_provider_toggles: nextDirectToggles
+        });
+        setOpencodeApiKey('');
+        setEnabledProviders(nextEnabled);
+        setDirectProviderToggles(nextDirectToggles);
+        await loadSettings();
+        await loadOpencodeModels();
+        setSuccess(true);
+        setTimeout(() => setSuccess(false), 3000);
+      }
+    } catch (err) {
+      setOpencodeTestResult({
+        success: false,
+        message: err?.response?.data?.detail || err?.message || 'Test failed',
+      });
+    } finally {
+      setIsTestingOpencode(false);
+    }
+  };
+
+  const loadOpencodeModels = async () => {
+    try {
+      const all = await api.getDirectModels();
+      const opencodeOnly = (all || []).filter(m => {
+        const name = m.provider || '';
+        return name === 'OpenCode Zen' || name === 'OpenCode Go';
+      });
+      setOpencodeAvailableModels(opencodeOnly);
+    } catch (err) {
+      console.error('Failed to load OpenCode models:', err);
+      setOpencodeAvailableModels([]);
     }
   };
 
@@ -1200,8 +1328,16 @@ export default function Settings({ onClose, ollamaStatus, onRefreshOllama, initi
 
       // Auto-save API key if validation succeeds AND it was a new key
       if (result.success && apiKey) {
-        await api.updateSettings({ [keyField]: apiKey });
+        const nextEnabled = { ...enabledProviders, direct: true };
+        const nextDirectToggles = { ...directProviderToggles, [providerId]: true };
+        await api.updateSettings({
+          [keyField]: apiKey,
+          enabled_providers: nextEnabled,
+          direct_provider_toggles: nextDirectToggles
+        });
         setDirectKeys(prev => ({ ...prev, [keyField]: '' })); // Clear input after save
+        setEnabledProviders(nextEnabled);
+        setDirectProviderToggles(nextDirectToggles);
 
         // Reload settings
         await loadSettings();
@@ -1253,6 +1389,11 @@ export default function Settings({ onClose, ollamaStatus, onRefreshOllama, initi
 
       // Ollama Base URL
       ollama_base_url: ollamaBaseUrl,
+
+      // Display
+      date_format: dateFormat,
+      font_size: fontSize,
+      response_language: responseLanguage,
 
       // Prompts
       prompts: prompts
@@ -1315,6 +1456,11 @@ export default function Settings({ onClose, ollamaStatus, onRefreshOllama, initi
         // Apply Ollama Base URL
         if (config.ollama_base_url) setOllamaBaseUrl(config.ollama_base_url);
 
+        // Apply Display Preferences
+        if (config.date_format) setDateFormat(config.date_format);
+        if (config.font_size) handleFontSizeChange(config.font_size);
+        if (config.response_language) setResponseLanguage(config.response_language);
+
         // Apply Prompts
         if (config.prompts) {
           setPrompts(prev => ({ ...prev, ...config.prompts }));
@@ -1342,112 +1488,129 @@ export default function Settings({ onClose, ollamaStatus, onRefreshOllama, initi
     event.target.value = '';
   };
 
-  const handleSave = async () => {
+  const currentCredentialStorage = settings?.credential_storage_preferred
+    ?? settings?.credential_storage
+    ?? 'file';
+
+  const handleCredentialStorageChange = (mode) => {
+    if (mode === currentCredentialStorage) return;
+    setCredentialStorageTarget(mode);
+  };
+
+  const confirmCredentialStorageMigration = async () => {
+    if (!credentialStorageTarget) return;
+    setCredentialStorageBusy(true);
     setError(null);
-    setSuccess(false);
-    setValidationErrors({});
-
-    // Validate council configuration
-    const hasAnyCouncilMember = councilModels.some(m => m && m.length > 0);
-    const emptyMemberIndices = councilModels
-      .map((m, i) => (!m || m.length === 0) ? i : -1)
-      .filter(i => i !== -1);
-    const hasEmptyMembers = emptyMemberIndices.length > 0;
-    const hasChairman = chairmanModel && chairmanModel.length > 0;
-
-    // If there are empty council member slots, show error
-    if (hasEmptyMembers) {
-      const firstEmptyIndex = emptyMemberIndices[0];
-      setValidationErrors({ [`member_${firstEmptyIndex}`]: true });
-      setError(`Please select a model for Member ${firstEmptyIndex + 1} or remove the empty slot.`);
-      setActiveSection('council');
-      return;
-    }
-
-    const currentMode = settings?.execution_mode || DEFAULT_EXECUTION_MODE;
-    if (currentMode === 'full' && hasAnyCouncilMember && !hasChairman) {
-      setValidationErrors({ chairman: true });
-      setError('Please select a Chairman to complete the council configuration.');
-      
-      // Focus on the chairman select and scroll to council section
-      setActiveSection('council');
-      setTimeout(() => {
-        if (chairmanSelectRef.current) {
-          chairmanSelectRef.current.scrollIntoView({ behavior: 'smooth', block: 'center' });
-          chairmanSelectRef.current.focus();
-        }
-      }, 100);
-      return;
-    }
-
-    setIsSaving(true);
-
     try {
-      const updates = {
-        search_provider: selectedSearchProvider,
-        search_keyword_extraction: searchKeywordExtraction,
-        full_content_results: fullContentResults,
-        search_result_count: searchResultCount,
-        search_hybrid_mode: searchHybridMode,
-        show_free_only: showFreeOnly,
-
-        // Enabled Providers
-        enabled_providers: enabledProviders,
-        direct_provider_toggles: directProviderToggles,
-
-        // Council Configuration (unified)
-        council_models: councilModels,
-        chairman_model: chairmanModel,
-        council_temperature: councilTemperature,
-        chairman_temperature: chairmanTemperature,
-        stage2_temperature: stage2Temperature,
-
-        // Remote/Local filters for each selection
-        council_member_filters: councilMemberFilters,
-        chairman_filter: chairmanFilter,
-        // Debate Settings
-        critique_mode: critiqueMode,
-        debate_rounds: debateRounds,
-        auto_converge: autoConverge,
-        convergence_threshold: convergenceThreshold,
-        // Prompts
-        ...prompts
-      };
-
-      // Only send API keys if they've been changed
-      if (tavilyApiKey && !tavilyApiKey.startsWith('•')) {
-        updates.tavily_api_key = tavilyApiKey;
-      }
-      if (braveApiKey && !braveApiKey.startsWith('•')) {
-        updates.brave_api_key = braveApiKey;
-      }
-      if (openrouterApiKey && !openrouterApiKey.startsWith('•')) {
-        updates.openrouter_api_key = openrouterApiKey;
-      }
-      if (groqApiKey && !groqApiKey.startsWith('•')) {
-        updates.groq_api_key = groqApiKey;
-      }
-
-      // Add Direct Provider Keys
-      Object.entries(directKeys).forEach(([key, value]) => {
-        if (value && !value.startsWith('•')) {
-          updates[key] = value;
-        }
-      });
-
-      await api.updateSettings(updates);
-      setSuccess(true);
-      setTavilyApiKey('');
-      setBraveApiKey('');
-      setOpenrouterApiKey('');
-
+      const result = await api.setCredentialStorage(credentialStorageTarget);
+      setCredentialStorageTarget(null);
       await loadSettings();
+      const moved = result.moved ?? 0;
+      setSuccess(true);
+      if (moved > 0) {
+        setError(null);
+      }
       setTimeout(() => setSuccess(false), 3000);
     } catch (err) {
-      setError('Failed to save settings');
+      setError(err.message || 'Failed to migrate credentials');
+      setCredentialStorageTarget(null);
     } finally {
-      setIsSaving(false);
+      setCredentialStorageBusy(false);
     }
+  };
+
+  const handleDiscoverRelayAi = async () => {
+    setRelayDiscoverBusy(true);
+    setRelayDiscoverReason(null);
+    setRelayImportMessage(null);
+    try {
+      const data = await api.discoverRelayAi();
+      const items = data.items || [];
+      setRelayItems(items);
+      setRelayDiscoverReason(data.reason || data.hint || null);
+      setRelaySelected(items.filter((i) => !i.already_configured_in_counsel).map((i) => i.relay_id));
+      if (items.length > 0 && !settings?.relay_ai_import_dismissed) {
+        setRelayBannerVisible(true);
+      }
+    } catch (err) {
+      setRelayDiscoverReason(err.message);
+      setRelayItems([]);
+    } finally {
+      setRelayDiscoverBusy(false);
+    }
+  };
+
+  const handleImportRelayAi = async () => {
+    if (relaySelected.length === 0) return;
+    setRelayImportBusy(true);
+    setError(null);
+    setRelayImportMessage(null);
+    try {
+      const selected = [...relaySelected];
+      const result = await api.importRelayAi(selected, true);
+      // Clear stale Retest errors from before import (keys were in store, not settings.json).
+      setKeyValidationStatus({});
+      setOpenrouterTestResult(null);
+      setGroqTestResult(null);
+      setOpencodeTestResult(null);
+      setTavilyTestResult(null);
+      setBraveTestResult(null);
+      setSerperTestResult(null);
+      setTinyfishTestResult(null);
+      await loadSettings();
+      await loadModels();
+      // Update local list — do not re-discover (avoids another macOS Keychain prompt storm).
+      setRelayItems((prev) => prev.map((item) => (
+        selected.includes(item.relay_id)
+          ? { ...item, already_configured_in_counsel: true }
+          : item
+      )));
+      setRelaySelected([]);
+
+      const importedCount = Array.isArray(result?.imported) ? result.imported.length : selected.length;
+      const skippedCount = Array.isArray(result?.skipped) ? result.skipped.length : 0;
+      const errorCount = result?.errors ? Object.keys(result.errors).length : 0;
+      let message = `✓ Imported successfully — ${importedCount} credential${importedCount === 1 ? '' : 's'} added.`;
+      if (skippedCount > 0) {
+        message += ` ${skippedCount} skipped.`;
+      }
+      if (errorCount > 0) {
+        message += ` ${errorCount} failed.`;
+      }
+      setRelayImportMessage({
+        tone: errorCount > 0 && importedCount === 0 ? 'error' : 'success',
+        text: message,
+      });
+      setSuccess(true);
+      setTimeout(() => setSuccess(false), 4000);
+    } catch (err) {
+      setRelayImportMessage({
+        tone: 'error',
+        text: err.message || 'Failed to import credentials',
+      });
+      setError(err.message || 'Failed to import credentials');
+    } finally {
+      setRelayImportBusy(false);
+    }
+  };
+
+  const handleDismissRelayBanner = async () => {
+    try {
+      await api.dismissRelayImport();
+      setRelayBannerVisible(false);
+      setSettings((prev) => ({ ...prev, relay_ai_import_dismissed: true }));
+    } catch (err) {
+      setError(err.message || 'Failed to dismiss banner');
+    }
+  };
+
+  const handleOAuthSettingsChange = (data) => {
+    setSettings(data);
+    setEnabledProviders(normalizeEnabledProviders(
+      data.enabled_providers || enabledProviders,
+      data,
+      ollamaStatus?.connected
+    ));
   };
 
   // Helper function to check if a direct provider is configured
@@ -1459,6 +1622,8 @@ export default function Settings({ onClose, ollamaStatus, onRefreshOllama, initi
       case 'Mistral': return !!(directKeys.mistral_api_key || settings?.mistral_api_key_set);
       case 'DeepSeek': return !!(directKeys.deepseek_api_key || settings?.deepseek_api_key_set);
       case 'NVIDIA': return !!(directKeys.nvidia_api_key || settings?.nvidia_api_key_set);
+      case 'OpenCode Zen': return !!settings?.opencode_api_key_set;
+      case 'OpenCode Go': return !!settings?.opencode_api_key_set;
       default: return false;
     }
   };
@@ -1492,7 +1657,7 @@ export default function Settings({ onClose, ollamaStatus, onRefreshOllama, initi
     if (enabledProviders.direct) {
       const filteredDirectModels = directAvailableModels.filter(m => {
         if (m.provider === 'Groq') return false; // Handled separately above
-        const providerKey = m.provider.toLowerCase();
+        const providerKey = m.provider.toLowerCase().replace(/\s+/g, '-');
         const individualToggleEnabled = directProviderToggles[providerKey];
         const providerConfigured = isDirectProviderConfigured(m.provider);
         return individualToggleEnabled && providerConfigured;
@@ -1505,7 +1670,14 @@ export default function Settings({ onClose, ollamaStatus, onRefreshOllama, initi
       models.push(...customEndpointModels);
     }
 
-    // Deduplicate by model ID (prefer direct connections over OpenRouter for same model)
+    if (settings) {
+      models.push(...filterOAuthModels(directAvailableModels, {
+        ...settings,
+        enabled_providers: enabledProviders,
+      }));
+    }
+
+    // Deduplicate by model ID
     // Since direct models are added last, always set to overwrite earlier entries
     const uniqueModels = new Map();
     models.forEach(model => {
@@ -1524,40 +1696,8 @@ export default function Settings({ onClose, ollamaStatus, onRefreshOllama, initi
     settings
   ]);
 
-  // Get filtered models for council member selection (respects free filter)
-  const filteredAvailableModels = useMemo(() => {
-    const all = allAvailableModels;
-    if (!showFreeOnly) return all;
-
-    // Filter logic:
-    // 1. If it's an OpenRouter model, checks if it's free.
-    // 2. If it's NOT OpenRouter (Direct, Ollama, Custom), keep it visible.
-    return all.filter(m => {
-      // Check if it's an OpenRouter model
-      const isOpenRouter = m.source === 'openrouter' || m.provider === 'OpenRouter' || m.id.startsWith('openrouter:');
-
-      // If it is OpenRouter, apply the free filter
-      if (isOpenRouter) {
-        return m.is_free;
-      }
-
-      // Otherwise (Direct, Ollama, Custom), always show
-      return true;
-    });
-  }, [allAvailableModels, showFreeOnly]);
 
 
-
-  // Filter models by remote/local for specific use case
-  const filterByRemoteLocal = (models, filter) => {
-    if (filter === 'local') {
-      // Only Ollama models
-      return models.filter(m => m.id.startsWith('ollama:'));
-    } else {
-      // Remote: OpenRouter + Direct providers (exclude Ollama)
-      return models.filter(m => !m.id.startsWith('ollama:'));
-    }
-  };
 
   if (!settings) {
     return (
@@ -1587,13 +1727,22 @@ export default function Settings({ onClose, ollamaStatus, onRefreshOllama, initi
     <div className="settings-overlay" onClick={onClose}>
       <div className="settings-modal" onClick={e => e.stopPropagation()}>
         <div className="settings-header">
-          <h2>Settings</h2>
+          <div>
+            <h2>Settings</h2>
+            <p className="settings-header-subtitle">Changes save automatically</p>
+          </div>
           <button className="close-button" onClick={onClose}>&times;</button>
         </div>
 
         <div className="settings-body">
           {/* Sidebar Navigation */}
           <div className="settings-sidebar">
+            <button
+              className={`sidebar-nav-item ${activeSection === 'general' ? 'active' : ''}`}
+              onClick={() => setActiveSection('general')}
+            >
+              General
+            </button>
             <button
               className={`sidebar-nav-item ${activeSection === 'llm_keys' ? 'active' : ''}`}
               onClick={() => setActiveSection('llm_keys')}
@@ -1641,6 +1790,30 @@ export default function Settings({ onClose, ollamaStatus, onRefreshOllama, initi
           {/* Main Content Area */}
           <div className="settings-main-panel">
 
+            {activeSection === 'general' && (
+              <GeneralSettings
+                dateFormat={dateFormat}
+                onDateFormatChange={handleDateFormatChange}
+                fontSize={fontSize}
+                onFontSizeChange={handleFontSizeChange}
+                responseLanguage={responseLanguage}
+                onResponseLanguageChange={handleResponseLanguageChange}
+                responseLanguages={responseLanguages}
+                settings={settings}
+                relayItems={relayItems}
+                relaySelected={relaySelected}
+                setRelaySelected={setRelaySelected}
+                relayBannerVisible={relayBannerVisible}
+                relayDiscoverBusy={relayDiscoverBusy}
+                relayImportBusy={relayImportBusy}
+                relayImportMessage={relayImportMessage}
+                relayDiscoverReason={relayDiscoverReason}
+                onDiscoverRelayAi={handleDiscoverRelayAi}
+                onImportRelayAi={handleImportRelayAi}
+                onDismissRelayBanner={handleDismissRelayBanner}
+              />
+            )}
+
             {/* API KEYS (LLM API Keys) */}
             {activeSection === 'llm_keys' && (
               <ProviderSettings
@@ -1667,13 +1840,22 @@ export default function Settings({ onClose, ollamaStatus, onRefreshOllama, initi
                 isTestingOllama={isTestingOllama}
                 ollamaTestResult={ollamaTestResult}
                 ollamaStatus={ollamaStatus}
+                ollamaEnabled={!!enabledProviders.ollama}
                 loadOllamaModels={loadOllamaModels}
+                onDisconnectOllama={handleDisconnectOllama}
                 // Direct
                 directKeys={directKeys}
                 setDirectKeys={setDirectKeys}
                 handleTestDirectKey={handleTestDirectKey}
                 validatingKeys={validatingKeys}
                 keyValidationStatus={keyValidationStatus}
+                // OpenCode
+                opencodeApiKey={opencodeApiKey}
+                setOpencodeApiKey={setOpencodeApiKey}
+                handleTestOpencode={handleTestOpencode}
+                isTestingOpencode={isTestingOpencode}
+                opencodeTestResult={opencodeTestResult}
+                opencodeAvailableModels={opencodeAvailableModels}
                 // Custom Endpoint
                 customEndpointName={customEndpointName}
                 setCustomEndpointName={(val) => { setCustomEndpointName(val); setCustomEndpointTestResult(null); }}
@@ -1686,6 +1868,16 @@ export default function Settings({ onClose, ollamaStatus, onRefreshOllama, initi
                 customEndpointTestResult={customEndpointTestResult}
                 customEndpointModels={customEndpointModels}
                 onClearCustomEndpoint={handleClearCustomEndpoint}
+                onDisconnectOpenRouter={handleDisconnectOpenRouter}
+                onDisconnectGroq={handleDisconnectGroq}
+                onDisconnectDirectKey={handleDisconnectDirectKey}
+                onDisconnectOpencode={handleDisconnectOpencode}
+                onOAuthSettingsChange={handleOAuthSettingsChange}
+                onOAuthModelsRefresh={loadModels}
+                currentCredentialStorage={currentCredentialStorage}
+                credentialStorageBusy={credentialStorageBusy}
+                onCredentialStorageChange={handleCredentialStorageChange}
+                onNavigateToGeneral={() => setActiveSection('general')}
               />
             )}
 
@@ -1694,51 +1886,20 @@ export default function Settings({ onClose, ollamaStatus, onRefreshOllama, initi
               <CouncilConfig
                 settings={settings}
                 ollamaStatus={ollamaStatus}
-                // State
                 enabledProviders={enabledProviders}
                 setEnabledProviders={setEnabledProviders}
                 directProviderToggles={directProviderToggles}
                 setDirectProviderToggles={setDirectProviderToggles}
-                showFreeOnly={showFreeOnly}
-                setShowFreeOnly={setShowFreeOnly}
-                isLoadingModels={isLoadingModels}
-                rateLimitWarning={rateLimitWarning}
                 councilModels={councilModels}
-                councilMemberFilters={councilMemberFilters}
                 chairmanModel={chairmanModel}
-                setChairmanModel={setChairmanModel}
-                chairmanFilter={chairmanFilter}
-                setChairmanFilter={setChairmanFilter}
                 councilTemperature={councilTemperature}
                 setCouncilTemperature={setCouncilTemperature}
                 chairmanTemperature={chairmanTemperature}
                 setChairmanTemperature={setChairmanTemperature}
-                // Debate state
-                critiqueMode={critiqueMode}
-                setCritiqueMode={setCritiqueMode}
-                debateRounds={debateRounds}
-                setDebateRounds={setDebateRounds}
-                autoConverge={autoConverge}
-                setAutoConverge={setAutoConverge}
-                convergenceThreshold={convergenceThreshold}
-                setConvergenceThreshold={setConvergenceThreshold}
-                // Data
-                allModels={allAvailableModels}
-                filteredModels={filteredAvailableModels}
-                ollamaAvailableModels={ollamaAvailableModels}
+                stage2Temperature={stage2Temperature}
+                setStage2Temperature={setStage2Temperature}
                 customEndpointName={customEndpointName}
                 customEndpointUrl={customEndpointUrl}
-                // Callbacks
-                handleFeelingLucky={handleFeelingLucky}
-                handleMemberFilterChange={handleMemberFilterChange}
-                handleCouncilModelChange={handleCouncilModelChange}
-                handleRemoveCouncilMember={handleRemoveCouncilMember}
-                handleAddCouncilMember={handleAddCouncilMember}
-                setActiveSection={setActiveSection}
-                setActivePromptTab={setActivePromptTab}
-                // Validation
-                validationErrors={validationErrors}
-                chairmanSelectRef={chairmanSelectRef}
               />
             )}
 
@@ -1766,8 +1927,6 @@ export default function Settings({ onClose, ollamaStatus, onRefreshOllama, initi
                 handleResetPrompt={handleResetPrompt}
                 activePromptTab={activePromptTab}
                 setActivePromptTab={setActivePromptTab}
-                stage2Temperature={stage2Temperature}
-                setStage2Temperature={setStage2Temperature}
               />
             )}
 
@@ -1826,6 +1985,7 @@ export default function Settings({ onClose, ollamaStatus, onRefreshOllama, initi
                 setSearchResultCount={setSearchResultCount}
                 searchHybridMode={searchHybridMode}
                 setSearchHybridMode={setSearchHybridMode}
+                onDisconnectSearchKey={handleDisconnectSearchKey}
               />
             )}
 
@@ -1833,10 +1993,14 @@ export default function Settings({ onClose, ollamaStatus, onRefreshOllama, initi
             {activeSection === 'import_export' && (
               <section className="settings-section">
                 <h3>Backup & Reset</h3>
-                <p className="section-description">
-                  Save or restore your council configuration (models, prompts, settings).
-                  <br /><em>Note: API keys are NOT exported for security.</em>
-                </p>
+
+                <div className="subsection">
+                  <h4>Import / Export</h4>
+                  <p className="section-description">
+                    Save or restore your council configuration (models, prompts, settings).
+                    <br /><em>Note: API keys are NOT exported for security.</em>
+                  </p>
+                </div>
 
                 <div className="subsection">
                   <div className="council-actions" style={{ display: 'flex', gap: '12px', alignItems: 'center', flexWrap: 'wrap' }}>
@@ -1867,6 +2031,21 @@ export default function Settings({ onClose, ollamaStatus, onRefreshOllama, initi
                 <div className="subsection" style={{ marginTop: '32px', paddingTop: '20px', borderTop: '1px solid rgba(255, 255, 255, 0.1)' }}>
                   <h4 style={{ color: '#f87171' }}>Danger Zone</h4>
                   <p className="section-description">
+                    Disconnect every LLM API key, search key, and subscription OAuth login.
+                    Council models, prompts, and other settings are left alone. Env-provided keys
+                    are ignored until you save a new key.
+                  </p>
+                  <button
+                    className="reset-button"
+                    type="button"
+                    onClick={() => setShowDisconnectAllConfirm(true)}
+                    style={{ marginTop: '10px' }}
+                    disabled={disconnectAllBusy}
+                  >
+                    {disconnectAllBusy ? 'Disconnecting…' : 'Disconnect All Providers'}
+                  </button>
+
+                  <p className="section-description" style={{ marginTop: '24px' }}>
                     Reset all settings to their default values. This will clear your council selection and custom prompts.
                     API keys will be preserved.
                   </p>
@@ -1889,9 +2068,12 @@ export default function Settings({ onClose, ollamaStatus, onRefreshOllama, initi
           {error && <div className="settings-error">{error}</div>}
           {success && (
             <div className="settings-success">
-              {activeSection === 'llm_keys' && !settings?.openrouter_api_key_set && !ollamaStatus?.connected
-                ? 'Defaults loaded. Please configure an API Key.'
-                : 'Settings saved!'}
+              {successMessage
+                || (activeSection === 'general' && relayImportMessage?.tone === 'success'
+                  ? relayImportMessage.text
+                  : activeSection === 'llm_keys' && !settings?.openrouter_api_key_set && !ollamaStatus?.connected
+                    ? 'Defaults loaded. Please configure an API Key.'
+                    : 'Settings saved!')}
             </div>
           )}
 
@@ -1899,16 +2081,91 @@ export default function Settings({ onClose, ollamaStatus, onRefreshOllama, initi
             <button className="cancel-button" onClick={onClose}>
               Close
             </button>
-            <button
-              className="save-button"
-              onClick={handleSave}
-              disabled={isSaving || !hasChanges}
-            >
-              {isSaving ? 'Saving...' : (success ? 'Saved!' : 'Save Changes')}
-            </button>
+            {isSaving && <span className="settings-autosave-status">Saving…</span>}
+            {!isSaving && success && (
+              <span className="settings-autosave-status saved">Saved</span>
+            )}
           </div>
         </div>
       </div>
+
+      {
+        credentialStorageTarget && (
+          <div className="settings-overlay confirmation-overlay" onClick={() => !credentialStorageBusy && setCredentialStorageTarget(null)}>
+            <div className="settings-modal confirmation-modal" onClick={e => e.stopPropagation()}>
+              <div className="settings-header">
+                <h2>Move credentials?</h2>
+              </div>
+              <div className="settings-content confirmation-content" style={{ padding: '20px 24px' }}>
+                <p style={{ marginBottom: '16px' }}>
+                  Move {countStoredCredentials(settings)} stored credential{countStoredCredentials(settings) === 1 ? '' : 's'} from{' '}
+                  <strong>{currentCredentialStorage === 'file' ? 'local file' : 'OS keystore'}</strong> to{' '}
+                  <strong>{credentialStorageTarget === 'file' ? 'local file' : 'OS keystore'}</strong>?
+                </p>
+                <p className="api-key-hint">Existing credentials are removed from the old location after a successful copy.</p>
+              </div>
+              <div className="settings-footer">
+                <div className="footer-actions" style={{ width: '100%', justifyContent: 'flex-end' }}>
+                  <button className="cancel-button" onClick={() => setCredentialStorageTarget(null)} disabled={credentialStorageBusy}>
+                    Cancel
+                  </button>
+                  <button className="action-btn" onClick={confirmCredentialStorageMigration} disabled={credentialStorageBusy}>
+                    {credentialStorageBusy ? 'Moving…' : 'Move credentials'}
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        )
+      }
+
+      {
+        showDisconnectAllConfirm && (
+          <div className="settings-overlay confirmation-overlay" onClick={() => !disconnectAllBusy && setShowDisconnectAllConfirm(false)}>
+            <div className="settings-modal confirmation-modal" onClick={e => e.stopPropagation()}>
+              <div className="settings-header">
+                <h2>Disconnect all providers?</h2>
+              </div>
+              <div className="settings-content confirmation-content" style={{ padding: '20px 24px' }}>
+                <p style={{ marginBottom: '16px' }}>
+                  This removes every stored API key and OAuth login from the credential store.
+                </p>
+                <div className="confirmation-details" style={{ padding: '16px 20px' }}>
+                  <p><strong>This will clear:</strong></p>
+                  <ul style={{ margin: '12px 0', lineHeight: '1.8' }}>
+                    <li>OpenRouter, Groq, OpenCode, and direct provider keys</li>
+                    <li>Search provider keys (Tavily, Brave, Serper, TinyFish)</li>
+                    <li>Subscription OAuth (xAI, ChatGPT, Copilot)</li>
+                    <li>Custom endpoint URL / name</li>
+                    <li>Provider toggles → all disabled</li>
+                  </ul>
+                  <p className="confirmation-safe" style={{ marginTop: '14px' }}>
+                    ✓ Council models, prompts, and other settings are kept
+                  </p>
+                </div>
+              </div>
+              <div className="settings-footer">
+                <div className="footer-actions" style={{ width: '100%', justifyContent: 'flex-end' }}>
+                  <button
+                    className="cancel-button"
+                    onClick={() => setShowDisconnectAllConfirm(false)}
+                    disabled={disconnectAllBusy}
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    className="reset-button"
+                    onClick={confirmDisconnectAllProviders}
+                    disabled={disconnectAllBusy}
+                  >
+                    {disconnectAllBusy ? 'Disconnecting…' : 'Disconnect All'}
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        )
+      }
 
       {
         showResetConfirm && (

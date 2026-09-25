@@ -2,6 +2,8 @@ import { useState, useMemo } from 'react';
 import AdvisorGrid from './AdvisorGrid';
 import MarkdownContent from './MarkdownContent';
 import { getShortModelName } from '../utils/modelHelpers';
+import CostReport from './CostReport';
+import { copyToClipboard } from '../utils/clipboard';
 import './DebateView.css';
 
 const toStr = (v) => (typeof v === 'string' ? v : String(v || ''));
@@ -24,6 +26,7 @@ function RoundSection({ roundIndex, roundData, personas, isLast, isRunning }) {
         {responses.map((resp, idx) => {
           const persona = findPersona(personas, resp.persona_id);
           const hasError = !!resp.error;
+          const hasWarning = !hasError && !!(resp.warning || resp.word_limit_exceeded);
           const displayName = persona?.name || resp.persona_name || resp.persona_id || 'Unknown';
           const displayEmoji = persona?.avatar_emoji || '🤖';
           const displayRole = persona?.role || '';
@@ -55,6 +58,9 @@ function RoundSection({ roundIndex, roundData, personas, isLast, isRunning }) {
                 {hasError && (
                   <span className="debate-view__response-error-badge">Error</span>
                 )}
+                {hasWarning && (
+                  <span className="debate-view__response-warning-badge">Long</span>
+                )}
               </div>
               <div className="debate-view__response-body">
                 {hasError ? (
@@ -68,7 +74,17 @@ function RoundSection({ roundIndex, roundData, personas, isLast, isRunning }) {
                     </div>
                   </div>
                 ) : (
-                  <MarkdownContent>{toStr(resp.content)}</MarkdownContent>
+                  <>
+                    {hasWarning && (
+                      <div className="debate-view__response-warning">
+                        <span>Word guidance exceeded; response kept.</span>
+                        {resp.word_count && resp.word_limit && (
+                          <span>{resp.word_count} / {resp.word_limit} words</span>
+                        )}
+                      </div>
+                    )}
+                    <MarkdownContent>{toStr(resp.content)}</MarkdownContent>
+                  </>
                 )}
               </div>
             </div>
@@ -101,40 +117,63 @@ export default function DebateView({
   currentRound = 1,
   maxRounds = 3,
   isRunning = false,
+  phase = null,
   question = '',
   webSearch = null,
   error = null,
+  costReport = null,
 }) {
   const [verdictCopied, setVerdictCopied] = useState(false);
 
   const activePersonaId = useMemo(() => {
     if (!isRunning) return null;
     const currentRoundData = rounds[currentRound - 1];
-    if (!currentRoundData) return null;
-    const responses = currentRoundData.responses || [];
-    if (responses.length > 0) {
-      const last = responses[responses.length - 1];
-      if (!last.done) return last.persona_id;
-    }
-    return null;
-  }, [isRunning, rounds, currentRound]);
+    const responded = new Set((currentRoundData?.responses || []).map((resp) => resp.persona_id));
+    const order = currentRoundData?.order?.length
+      ? currentRoundData.order
+      : personas.map((persona) => persona.id);
+    return order.find((personaId) => !responded.has(personaId)) || null;
+  }, [isRunning, rounds, currentRound, personas]);
 
   const handleCopyVerdict = async () => {
     if (!verdict?.content) return;
-    try {
-      await navigator.clipboard.writeText(toStr(verdict.content));
+    const copied = await copyToClipboard(toStr(verdict.content));
+    if (copied) {
       setVerdictCopied(true);
       setTimeout(() => setVerdictCopied(false), 2000);
-    } catch (err) {
-      console.error('Failed to copy verdict:', err);
     }
   };
 
   const hasResponses = rounds.some((r) => (r.responses || []).length > 0);
   const showDebateStarting = isRunning && !hasResponses;
+  const currentRoundData = rounds[currentRound - 1] || rounds[rounds.length - 1] || null;
+  const currentResponseCount = currentRoundData?.responses?.length || 0;
+  const expectedResponseCount = currentRoundData?.order?.length || personas.length || 0;
+  const livePhase = phase || (isRunning ? 'round' : 'complete');
+  const liveTitle = (() => {
+    if (livePhase === 'search') return 'Searching the web';
+    if (livePhase === 'tiebreaker') return 'Running tiebreaker';
+    if (livePhase === 'verdict') return 'Building verdict';
+    if (livePhase === 'round_complete') return 'Preparing next step';
+    if (livePhase === 'initializing') return 'Starting advisor debate';
+    return `Round ${currentRound} in progress`;
+  })();
+  const liveDetail = expectedResponseCount > 0
+    ? `${currentResponseCount}/${expectedResponseCount} advisors responded`
+    : 'Preparing advisor panel';
 
   return (
     <div className="debate-view">
+      {isRunning && (
+        <div className="debate-view__live-status" role="status" aria-live="polite">
+          <span className="debate-view__live-dot" aria-hidden="true" />
+          <div className="debate-view__live-copy">
+            <strong>{liveTitle}</strong>
+            <span>{liveDetail}</span>
+          </div>
+        </div>
+      )}
+
       {/* Advisor Grid — always shown at top */}
       <AdvisorGrid
         personas={personas}
@@ -166,6 +205,8 @@ export default function DebateView({
           Debate starting...
         </div>
       )}
+
+      <CostReport report={costReport} title="Advisor Debate Cost" />
 
       {/* Error banner — shown when the debate fails */}
       {error && (

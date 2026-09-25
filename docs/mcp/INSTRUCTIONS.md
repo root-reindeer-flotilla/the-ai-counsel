@@ -1,12 +1,12 @@
 # MCP Server Instructions (for agents)
 
-This file documents the **agent-facing instructions** embedded in the MCP server (`llm_council_mcp/server.py`). If you change routing behavior, update **both** this file and `server.py`, plus the MCP-first section in [`skills/llm-council-api/SKILL.md`](../../skills/llm-council-api/SKILL.md).
+This file documents the **agent-facing instructions** embedded in the MCP server (`the_ai_counsel_mcp/server.py`). If you change routing behavior, update **both** this file and `server.py`, plus the MCP-first section in [`skills/the-ai-counsel-api/SKILL.md`](../../skills/the-ai-counsel-api/SKILL.md).
 
 ---
 
 ## Primary rule
 
-**When LLM Council Plus MCP tools are available in your session, use them.** Do not shell out to `curl` against `/api/*` for operations that have an MCP equivalent.
+**When The AI Counsel MCP tools are available in your session, use them.** Do not shell out to `curl` against `/api/*` for operations that have an MCP equivalent.
 
 The REST API skill exists as a **fallback reference**, not the default path for interactive agents.
 
@@ -27,7 +27,11 @@ The REST API skill exists as a **fallback reference**, not the default path for 
 | `providers` | `list_models`, `health`, `test`, `set_api_key`, `set_search` | `list_models`, `check_health`, `test_provider`, `set_api_key`, `set_search_provider` |
 | `config_backup` | `export`, `import`, `reset` | `export_config`, `import_config`, `reset_config` |
 
-Server names vary by host: `llm-council-plus`, `llm-council`, `user-llm-council-plus`.
+Server names vary by host: `the-ai-counsel`, `ai-counsel`, `user-the-ai-counsel`.
+
+**Model ID prefixes:** `openrouter`, `ollama`, `groq`, `openai`, `anthropic`, `google`, `mistral`, `deepseek`, `nvidia`, `custom`, `opencode-zen`, `opencode-go`. `opencode-zen:*-free` is zero-cost; `opencode-go:*` is paid (subscription; the published per-1M price is shown as an estimate).
+
+**Result shape:** deliberation, debate, advisor, and `model_chat` results all include a top-level `cost_report` object (`total_cost`, `input_tokens`, `output_tokens`, `total_tokens`, `by_model`, `known_cost_calls`, `unknown_cost_calls`, `free_calls`, `has_unknown_costs`, `has_estimates`). Use it to surface spend to the user — do not re-implement bucketing. Provider-reported reasoning tokens are preserved and included in billable output where applicable.
 
 ---
 
@@ -55,6 +59,12 @@ Server names vary by host: `llm-council-plus`, `llm-council`, `user-llm-council-
 
 ---
 
+For simple direct-answer prompts, prefer `model_chat` or `council_deliberate`. Use `advisor_debate` when the user wants named personas to work through a decision, risk review, tradeoff, prioritization, strategy, ethics, or genuine disagreement.
+
+For uploaded or attached files, use optional `documents` on `model_chat`, `council_deliberate`, `run_iterative_debate`, or `advisor_debate`. Prefer `text` when the file is already extracted; use `data_base64` only for source files. The MCP client extracts base64 documents through the backend and sends text context to providers, not raw file bytes.
+
+---
+
 ## Use REST instead of MCP when
 
 - **MCP unavailable** — connection refused, stale SSE session, tool not in list
@@ -70,4 +80,4 @@ Preset CRUD is available via MCP (`council_settings` / `advisor_settings` preset
 
 - Tool parameters: [TOOLS.md](TOOLS.md)
 - Worked examples: [EXAMPLES.md](EXAMPLES.md)
-- REST fallback + full routing table: [skills/llm-council-api/SKILL.md](../../skills/llm-council-api/SKILL.md)
+- REST fallback + full routing table: [skills/the-ai-counsel-api/SKILL.md](../../skills/the-ai-counsel-api/SKILL.md)

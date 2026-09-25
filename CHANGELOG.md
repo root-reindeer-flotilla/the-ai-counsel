@@ -1,14 +1,226 @@
 # Changelog
 
-> [!IMPORTANT]
-> **This project has moved and been rebranded to [The AI Counsel](https://github.com/jacob-bd/the-ai-counsel).** All future development continues there. This changelog will no longer be updated.
-
-All notable changes to LLM Council Plus will be documented in this file.
+All notable changes to The AI Counsel will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.7.0] - 2026-05-30 (Final Release)
+## [Unreleased]
+
+## [0.13.1] - 2026-09-18
+
+### Fixed
+- ChatGPT OAuth now live-fetches models from the Codex backend (same path as relay-ai) and includes **GPT-5.6 Luna**, which requires the Responses-Lite WebSocket transport. Searching for Luna no longer only matches OpenRouter.
+- Codex model listing now sends the required `client_version` query param so Counsel no longer falls back to ChatGPT-web (`-wm`) slugs that fail at inference.
+
+## [0.13.0] - 2026-09-08
+
+### Added
+- Backend and frontend listen ports can be set with `PORT_BACKEND` and `PORT_FRONTEND` in the root `.env`. Defaults stay **8001** and **5173**. `LLM_COUNCIL_BIND_PORT` still overrides the backend port when set. In Docker, leaving `BACKEND_HOST` empty uses the page origin so a runtime `PORT_BACKEND` change does not require rebuilding the image (PR [#26](https://github.com/jacob-bd/the-ai-counsel/pull/26)). Thanks [@nodeGarden](https://github.com/nodeGarden)!
+- Anthropic (and OpenCode) output token limits are configurable via `ANTHROPIC_MAX_TOKENS` / `OPENCODE_MAX_TOKENS`. The Anthropic default is now 32000 so reasoning models have room to think and still write an answer (PR [#27](https://github.com/jacob-bd/the-ai-counsel/pull/27)). Thanks [@nodeGarden](https://github.com/nodeGarden)!
+- Per-provider HTTP timeouts via `LLM_COUNCIL_REQUEST_TIMEOUT` and `{PROVIDER}_REQUEST_TIMEOUT` (default 180s). Timeout failures now name the limit and how to raise it instead of showing "Unknown error" (PR [#28](https://github.com/jacob-bd/the-ai-counsel/pull/28)). Thanks [@nodeGarden](https://github.com/nodeGarden)!
+
+### Fixed
+- Running the test suite no longer deletes saved API keys from the OS keyring or rewrites the developer's `data/settings.json` (PR [#24](https://github.com/jacob-bd/the-ai-counsel/pull/24)). Thanks [@nodeGarden](https://github.com/nodeGarden)!
+- Anthropic reasoning models no longer fail preflight with a bare `'text'` error when a thinking block arrives before the answer (PR [#25](https://github.com/jacob-bd/the-ai-counsel/pull/25)). Thanks [@nodeGarden](https://github.com/nodeGarden)!
+- Anthropic requests no longer exhaust a hardcoded 4096-token budget on thinking and return no visible answer (PR [#27](https://github.com/jacob-bd/the-ai-counsel/pull/27)). Thanks [@nodeGarden](https://github.com/nodeGarden)!
+
+### Thanks
+- Thanks to [@nodeGarden](https://github.com/nodeGarden) for contributing PRs [#24](https://github.com/jacob-bd/the-ai-counsel/pull/24), [#25](https://github.com/jacob-bd/the-ai-counsel/pull/25), [#26](https://github.com/jacob-bd/the-ai-counsel/pull/26), [#27](https://github.com/jacob-bd/the-ai-counsel/pull/27), and [#28](https://github.com/jacob-bd/the-ai-counsel/pull/28).
+
+## [0.12.1] - 2026-09-04
+
+### Fixed
+- OpenCode Go requests now reuse each Counsel conversation's session ID across all inference stages and retries, send the identifying Counsel user agent, and propagate that identity through council, debate, advisor, preflight, title, and search-query calls.
+
+### Deployment
+- Restart the backend when upgrading so OpenCode Go requests begin sending the automatic session identification and Counsel user agent.
+
+## [0.12.0] - 2026-09-01
+
+### Added
+- Custom advisor personas can be created, edited, and deleted from Advisor Setup, with REST endpoints for integrations.
+
+### Fixed
+- Deleting a custom advisor now removes its persona ID and per-persona model assignment from all saved advisor presets.
+
+## [0.11.4] - 2026-08-13
+
+### Fixed
+- Docked the chat composer below the scrollable conversation and corrected its narrow-screen spacing so responses remain readable while typing.
+- Replaced the Stage 3 verdict sheen's layout-triggering animation with compositor-friendly transforms to reduce sustained rendering work.
+
+### Thanks
+- Thanks to [@markc647](https://github.com/markc647) for contributing PRs [#20](https://github.com/jacob-bd/the-ai-counsel/pull/20) and [#21](https://github.com/jacob-bd/the-ai-counsel/pull/21).
+
+## [0.11.3] - 2026-08-06
+
+### Fixed
+- Stopped the landing-page gradient orbs from continuously animating and removed the Settings backdrop blurs, eliminating sustained Chromium GPU-process load on affected Windows systems while preserving the static glow, glass styling, transitions, and hover effects.
+
+## [0.11.2] - 2026-08-02
+
+### Changed
+- Trimmed the MCP server `instructions` block from ~1,130 to ~475 characters. Clients re-send the whole block on every reconnect, and agent harnesses that spawn a fresh CLI process per turn pay that cost on each turn. The removed per-tool roster duplicated the action lists each tool's own description already carries; the cross-cutting facts (`provider:model` prefixes, `documents` handling, REST reference) are kept.
+- Added a release version-consistency check covering backend metadata, MCP runtime metadata, frontend metadata, the sidebar, skill frontmatter, and the changelog release heading.
+- Made the MCP package version resolve from the canonical project metadata instead of maintaining a separate hardcoded value.
+
+### Fixed
+- MCP initialization now advertises The AI Counsel app version (`0.11.2`) instead of the Python MCP SDK version.
+
+### Deployment
+- The shorter MCP `instructions` block only reaches clients after the backend process is restarted. Long-running self-hosted deployments serving `/mcp/sse` keep sending the old block until then — restart them as part of rolling out this release.
+
+## [0.11.1] - 2026-08-01
+
+### Added
+- Accessible font-size preference under Settings → General → Display Preferences. Default uses 110% of the previous baseline and Large uses 150%; the choice applies to all UI text, including existing chats, and saves automatically.
+
+### Changed
+- Removed the oversized xLarge option. Existing saved xLarge preferences safely fall back to Default.
+
+## [0.11.0] - 2026-07-18
+### Added
+- Subscription OAuth providers: xAI SuperGrok (`xai-oauth:`), ChatGPT Plus/Pro (`openai-oauth:`), and GitHub Copilot (`github-copilot:`) via device-code login in Settings.
+- Unified credential storage for API keys and OAuth tokens: text file (`data/credentials.json`) or OS keystore (desktop only; service `the-ai-counsel`), with migrate-on-switch from Settings → LLM API Keys.
+- Opt-in import of credentials discovered from relay-ai’s OS keystore (Settings → General; Claude Code / Antigravity never imported), with green success confirmation and auto-enable of imported providers.
+- Settings → Backup & Reset → **Disconnect All Providers** clears every stored API key / OAuth login and disables provider toggles (keeps council config and prompts).
+- Per-provider **Disconnect** on LLM API Keys and Search providers (same pattern as custom endpoint / OAuth).
+- Cost reporting treats subscription OAuth runs as free with an explanatory note (not catalog USD estimates).
+- User guide [`docs/CREDENTIALS.md`](docs/CREDENTIALS.md) covering storage modes, Disconnect, env overrides, and relay-ai import vs Keychain migration.
+
+### Changed
+- API keys and OAuth secrets are no longer stored inline in `settings.json` after upgrade; admin export includes a `credentials` section; saves always redact secret fields.
+- Credential storage mode (file vs OS keystore) lives under Settings → LLM API Keys, not Backup & Reset.
+- Opt-in relay-ai credential import lives under Settings → General, not Backup & Reset.
+- Ollama Settings match other providers: Connect enables it, Retest when already enabled, Disconnect disables it.
+- Sidebar credit shows GitHub user `jacob-bd` instead of a full legal name.
+- Credential storage UI labels the file option **Local file (data volume)** (not “Encrypted”) — `data/credentials.json` is plaintext JSON with restricted permissions (`0600`), not encryption at rest.
+
+### Fixed
+- GitHub Copilot model picker now filters to models enabled for the signed-in plan (`model_picker_enabled` / policy), so Free/Student users no longer see premium models that fail with `model_not_supported`.
+- Included Copilot models are labeled `· Free` in the model list (via `billing.multiplier == 0` or known included model IDs).
+- Copilot Auto router aliases (`*-auto` / `*-free-auto`) and non-chat models are hidden from the picker — they are not callable via chat/completions.
+- Hide `gpt-5-mini` from the Copilot picker on Free/Student: chat often returns `model_not_supported` even though the catalog lists it (use `gpt-4.1` / `gpt-4o` instead).
+- Detect GitHub Copilot Free vs paid via `GET /copilot_internal/user` (`access_type_sku` / `copilot_plan`); Free/Student use a strict chat allowlist, paid users get the full filtered catalog; Settings shows Free/Paid plan next to Copilot.
+- Disconnect for API keys now clears the credential store and ignores env overrides (e.g. `OPENCODE_API_KEY`) until a new key is saved — fixes Disconnect appearing to do nothing when a key was injected via the environment.
+- Retest for imported/stored API keys now reads from the credential store instead of empty `settings.json` fields — fixes “No API key provided or configured” after relay-ai import.
+- Settings backup/reset tests isolate (and mock) credential wipe so they cannot clear a developer’s real `data/credentials.json`.
+
+## [0.10.5] - 2026-07-09
+### Added
+- Added support for the Greek language in the model response settings.
+
+## [0.10.4] - 2026-06-18
+### Changed
+- Cleaned up backend and MCP test import placement to resolve the affected Ruff violations.
+
+### Fixed
+- `POST /api/ask` now saves every successful one-shot run as a UI-visible conversation, including attachments, search metadata, stage results, and cost data.
+- One-shot REST responses now return `conversation_id`, and MCP quick model chat propagates the same ID.
+
+## [0.10.3] - 2026-06-18
+### Changed
+- Miscellaneous backend improvements and backend test updates.
+
+## [0.10.2] - 2026-06-18
+### Fixed
+- True background heartbeat for MCP SSE streams to prevent 60s client read timeouts during silent inference steps (like Stage 2 and Stage 3).
+
+## [0.10.1] - 2026-06-17
+
+### Fixed
+- **MCP SSE stream timeouts**: Fixed an issue where long-running deliberations over remote MCP SSE connections (e.g., via `alef-agent`) were cancelled after 60 seconds due to client-side read timeouts. A new stream interceptor now emits continuous heartbeat `notifications/progress` messages, allowing full 3-stage deliberations to complete successfully.
+- **OpenCode test assertion**: Fixed an incorrect header assertion in `test_opencode_provider.py` which checked for `Authorization` instead of the expected `x-api-key`.
+
+## [0.10.0] - 2026-06-15
+
+### Added
+- **Text file uploads**: Council, iterative debate, advisor debate, REST, MCP, and UI flows now accept extracted text documents and PDFs. The backend exposes `/api/documents/extract` for multipart UI uploads and `/api/documents/extract-json` for MCP/JSON base64 extraction.
+- **PDF extraction with optional OCR**: PDF text extraction uses `pdfplumber`; OCR is optional and gated by `LLM_COUNCIL_OCR_ENABLED=1` plus OCRmyPDF/Tesseract/Ghostscript/qpdf availability.
+- **Attachment metadata in history**: Stored conversations keep attachment metadata only, not raw files or extracted text.
+
+### Fixed
+- **Claude MCP SSE setup docs**: Claude Code registration examples now use `claude mcp add --transport sse <name> <url>`, matching the installed Claude CLI.
+
+## [0.9.2] - 2026-06-09
+
+### Added
+- **Auto-enable API connectors**: Settings key validation tests for Ollama, OpenRouter, Groq, Custom OpenAI, and Direct connections now automatically toggle on and enable the provider on successful connection tests.
+
+### Fixed
+- **Stray ReferenceError**: Fixed a ReferenceError `activeConversationIdRef is not defined` that dropped council question submissions at the API call stage.
+
+## [0.9.1] - 2026-06-08
+
+### Added
+- **Ruff dev tooling**: Added Ruff to the Python dev dependency group so lint checks run through `uv run ruff`.
+
+### Fixed
+- **Conversation title repair**: New and existing conversations with default/empty titles now derive a readable title from the first user message without overwriting explicit custom titles. Contributed by **@insane66613** ([PR #3](https://github.com/jacob-bd/the-ai-counsel/pull/3)).
+- **Preflight rate-limit resilience**: Transient rate-limit preflight failures are retried and soft-failed so otherwise valid models are not dropped from a council run. Contributed by **@insane66613** ([PR #4](https://github.com/jacob-bd/the-ai-counsel/pull/4)).
+- **Plain 503 preflight handling**: A bare `503 Service Unavailable` remains a hard preflight failure unless the response body indicates rate limiting, quota, throttling, temporary congestion, or a similar transient condition.
+
+## [0.9.0] - 2026-06-03
+
+### Added
+- **Configurable date format**: Conversation timestamps in the sidebar can be set to Auto (browser locale), MM/DD/YYYY, DD/MM/YYYY, or YYYY-MM-DD via Settings → General → Display Preferences. The setting is retroactive — all existing conversations update immediately.
+- **General settings section**: Display preferences (date format) and response language moved out of Backup & Reset into a dedicated General section at the top of Settings.
+- **Response language setting**: Council and advisor model outputs can be pinned to one of 17 languages via Settings → General → Response Language. Title generation and internal search queries stay in English.
+- **Sidebar run summaries**: After a titled council or advisor run completes, the sidebar shows a compact line (rounds, critique mode, auto-converge, advisor personas, consensus, search). Sidebar search matches this line.
+- **Sidebar conversation cost**: Each sidebar card shows a cumulative cost pill (sum of all assistant run costs in the thread, including follow-ups).
+- **Release process documentation**: Added `docs/RELEASE.md` and AGENTS guidance so future maintainers and AI agents create both annotated Git tags and GitHub Releases for public versions.
+
+### Changed
+- **Settings auto-save**: All Settings sections now save automatically (debounced). The Save Changes button was removed; API keys still save on successful test.
+- **Global provider toggles**: `enabled_providers` and `direct_provider_toggles` now apply to **all** model pickers — Council Setup, Advisor Setup, and Settings. Previously they only affected council model pickers in Settings.
+- **Simplified Settings → Council Config**: Removed council member/chairman model selection, "I'm Feeling Lucky" randomizer, "Show free OpenRouter models only" filter, and related validation from Settings. Model composition is now managed exclusively via the welcome-screen Council Setup. Settings retains provider toggles (now global) and all three temperature sliders (Council Heat, Peer Ranking Heat, Chairman Heat).
+- **Provider toggle restructure**: Local (Ollama) is now standalone at the top; all remote providers (OpenRouter, Groq, Custom, Direct Connections) are grouped under a single "Remote APIs" master toggle.
+- **Stage 2 Heat moved**: The Peer Ranking temperature slider moved from Council System Prompts (Stage 2 tab) into the Council Config temperature section alongside the other sliders.
+- **Sidebar timestamps**: Conversation cards show date and time on separate lines (respects your date format setting).
+
+## [0.8.1] - 2026-06-02
+
+### Added
+- **Advisor live-progress and reconnect UX**: Advisor runs now publish active round/order/completion state through `/api/conversations/{id}/progress`, and the frontend can reconstruct in-flight advisor runs when navigating away and back.
+- **Cost token split in the UI and docs**: Run-cost panels now surface total, input, and output token counts separately for council and advisor runs, with reasoning tokens preserved in call details and billed as output where providers report them that way.
+- **Council-vs-Advisors guidance**: User and agent docs now clarify that Council is best for direct answers and synthesis, while Advisors are best for tradeoffs, risk reviews, strategy, ethics, prioritization, and real disagreement.
+
+### Changed
+- **Landing page mode guidance**: The front page now explains when to use Council versus Advisors with concrete examples, reducing accidental advisor debates for simple answer prompts.
+- **Release version alignment**: Backend package metadata, frontend package metadata, lockfile metadata, sidebar version, skill frontmatter, and changelog are aligned for this release.
+
+### Fixed
+- **Provider temperature restrictions**: Direct OpenAI, Anthropic, OpenRouter, and custom OpenAI-compatible calls now omit temperature for models that only accept provider defaults, preventing preflight failures such as unsupported `temperature: 0` or deprecated temperature parameters.
+- **Advisor word-limit handling**: Advisor responses that exceed the word-count guidance are now kept and surfaced with a warning instead of being treated as failed model responses.
+- **Hidden reasoning cleanup**: Council Stage 1, Stage 2, Stage 3, title generation, and search-query generation strip `<think>` blocks from visible/stored content so reasoning markup does not leak into conversation titles or final answers.
+- **Stage 2 detail matrix overflow**: Wide peer-review matrices now use horizontal scrolling with a sticky rater column so larger councils are not visually truncated.
+- **Conversation mode tagging**: Conversation history now normalizes/repairs Council vs Advisor modes so sidebar badges consistently render `CNC` and `ADV` with the intended color coding.
+- **Custom endpoint OpenCode free-detection now requires the official host**: A user who names a custom endpoint "opencode" but points it elsewhere was being silently zero-cost. The free heuristic now matches `opencode.ai` substring inside `endpoint_url` only — never the configured name or model text. (1B from v0.8.0 review.)
+- **OpenCode provider request robustness**: `query()` now sends `stream: False`, asserts the response is `application/json` before parsing, retries 429/timeout/remote-protocol errors with exponential backoff (`MAX_RETRIES=2`, initial delay 1s), and rejects embed/audio/tts model IDs up-front with a clear error (no HTTP call). Matches openrouter/ollama retry behavior. (R2/R3/R4.)
+- **Pricing catalog failure-throttle is now race-free**: `_get_pricing_catalog` resets its failure timestamp on a successful refresh so a transient outage doesn't lock the cache for the full throttle window. The `_catalog_failure_until = 0.0` reset runs inside the catalog lock. (R1.)
+- **Stage 3 chairman errors are now cost-tracked**: The outer `except` branch in `stage3_synthesize_final` now calls `attach_cost`, so chairman failures appear in the run's `cost_report` with `cost_status: "unknown"` instead of vanishing from the spend summary. (R6.)
+- **MCP cost-aggregation is now shape-tolerant**: `the_ai_counsel_mcp.tools.deliberation._combine_cost_report` is now a thin wrapper around the new shared `backend.costs.summarize_buffered_stages` helper. The helper walks the four buffered stage shapes (council stage 1/2/3, iterative debate, advisor debate), `isinstance`-guards lists and dicts at every level, and shares a single bucketing implementation with the backend. (R5 + R7.)
+- **`_summarize_calls` math reuses same canonical path**: Replaces ~70 lines of MCP-side bucketing duplication with a call to the same `costs.summarize_buffered_stages` function used in unit tests.
+- **MCP settings docs and tool signatures are aligned**: `council_settings` now accepts and returns title/query prompts plus search tuning fields (`search_provider`, keyword extraction mode, result count, hybrid search, and full-content fetch count), matching the MCP docs and frontend settings.
+
+## [0.8.0] - 2026-06-01
+
+### Added
+
+- **OpenCode Zen and OpenCode Go as direct providers** — Two new council model sources, addressing [opencode.ai](https://opencode.ai) without going through OpenRouter.
+  - Prefixes: `opencode-zen:` (Zen dispatch) and `opencode-go:` (Go dispatch).
+  - v1 scope: chat/completions only. The provider filters each product's `/v1/models` listing to chat-capable model families and drops non-`/chat/completions` endpoints (GPT Responses, Anthropic Messages, per-model Gemini). Multi-protocol support is a future release.
+  - Single shared API key field. A user with only a Zen subscription, only a Go subscription, or both on the same key is supported. Go users can also use Zen's free models.
+  - Settings → "LLM API Keys" has a new OpenCode subsection with a single "Test & Save" button that validates both products in one call (`POST /api/settings/test-opencode`).
+  - `direct_provider_toggles` now defaults `opencode-zen` and `opencode-go` to `false` (Council-only; Advisor model pickers ignore these toggles, per AGENTS.md).
+  - Cost attribution: hardcoded pricing table in `backend/costs.py` (`_OPENCODE_PRICING`, `_OPENCODE_FREE_MODELS`) reports `pricing_source: "table:opencode"` for paid models and `pricing_source: "free:opencode"` for the four known-free Zen models (big-pickle, deepseek-v4-flash-free, mimo-v2.5-free, nemotron-3-super-free). Go's published per-1M prices are surfaced with a "subscription" note and `cost_status: "estimated"`.
+  - Council grid uses a new `opencode.svg` icon and a dedicated `#211E1E` (OpenCode brand grey) accent. Prefix detection is ordered before generic `gpt`/`claude` substring fallbacks in `councilGridUtils.js`.
+
+- **Run cost reporting**: Council, iterative debate, advisor debate, REST, and MCP responses now include per-call usage/cost metadata plus a summarized `cost_report` by model and stage. The UI shows a compact run-cost panel with token totals, call counts, pricing confidence, and model breakdowns.
+- **Pricing catalog integration**: Added cached pricing lookups from `ai-model-pricing.com` with LiteLLM pricing as fallback. Known-free Ollama, NVIDIA, OpenRouter `:free`, and OpenCode custom endpoints report `$0`.
+
+## [0.7.0] - 2026-05-30
 
 ### Added
 
@@ -70,13 +282,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 - **MCP tool consolidation (breaking)**: Replaced 25 single-purpose MCP tools with **9 action-based tools** — `council_deliberate`, `model_chat`, `advisor_debate`, `council_settings`, `advisor_settings`, `personas`, `conversations`, `providers`, `config_backup`. Legacy names (`run_deliberation`, `get_council_config`, `check_health`, etc.) removed.
-- **MCP-first agent routing**: Skill and MCP server instructions tell agents to prefer MCP tools over curl when both are available; REST documented as fallback (`skills/llm-council-api/SKILL.md`, `llm_council_mcp/server.py`, `docs/mcp/INSTRUCTIONS.md`, `docs/mcp/TOOLS.md`).
+- **MCP-first agent routing**: Skill and MCP server instructions tell agents to prefer MCP tools over curl when both are available; REST documented as fallback (`skills/the-ai-counsel-api/SKILL.md`, `the_ai_counsel_mcp/server.py`, `docs/mcp/INSTRUCTIONS.md`, `docs/mcp/TOOLS.md`).
 - **Advisor model sources decoupled from Council toggles**: Advisor Setup model pickers list all **configured** providers (API keys, Ollama URL, custom endpoint). Settings → Council Config `enabled_providers` toggles apply to **LLM Council only**.
 - **Council Config copy**: Clarifies provider toggles are council-only; advisors always use configured providers from LLM API Keys.
 - **New Council navigation**: Sidebar **+ New Council** from advisors mode now switches to council mode (previously stayed on advisor UI).
 - **Chairman validation**: Chairman required only for **Full Deliberation**; Chat Only and Chat + Ranking no longer block send without a chairman.
 - **Stream API**: Frontend sends `council_models` / `chairman_model` on message stream so the run matches the on-screen lineup.
-- **MCP docs sync**: All docs and `skills/llm-council-api/SKILL.md` updated for **9-tool** MCP catalog; `/api/health` reports `tools: 9`.
+- **MCP docs sync**: All docs and `skills/the-ai-counsel-api/SKILL.md` updated for **9-tool** MCP catalog; `/api/health` reports `tools: 9`.
 
 ### Fixed
 - **Stage 2 peer ranking parsing**: Hardened text parser to validate that parsed rankings only include labels actually presented in the prompt, preventing models from hallucinating non-existent labels.
@@ -126,9 +338,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **CouncilGrid provider detection**: NVIDIA prefix (`nvidia:`) added to provider icon lookup chain
 - **Settings UI**: NVIDIA API key section added to Provider Settings with test/save flow
 - **`ChatInterface`**: Extended to support both council and advisor question submission flows
-- **`llm-council-api` skill updated to v0.5.0**: Documents advisor endpoints, persona API, NVIDIA provider, and dual-mode architecture
+- **`the-ai-counsel-api` skill updated to v0.5.0**: Documents advisor endpoints, persona API, NVIDIA provider, and dual-mode architecture
 - **Main README expanded**: Updated MCP Server details to cover dual-mode capability (Council + Advisors) and all 25 tools
-- **Skill Reference expanded** (`skills/llm-council-api/SKILL.md`): Added extensive examples for custom OpenAI endpoint configuration (OpenCode Zen), hybrid local/cloud council setups, and per-persona model assignment walkthroughs
+- **Skill Reference expanded** (`skills/the-ai-counsel-api/SKILL.md`): Added extensive examples for custom OpenAI endpoint configuration (OpenCode Zen), hybrid local/cloud council setups, and per-persona model assignment walkthroughs
 
 ### Removed
 - **Outdated binary assets**: Cleaned up stale PNG screenshots (`header.png`, `landing_page.png`, `debate_page.png`) from repository root
@@ -170,7 +382,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **MCP `run_deliberation` uses per-request overrides**: Passes `council_models` in stream body instead of mutating settings with try/finally restore.
 - **MCP client `ask()` method added**: `CouncilClient.ask()` wraps `POST /api/ask` for one-shot queries.
 - **MCP client `stream_message` accepts overrides**: `council_models` and `chairman_model` params added to avoid settings mutation.
-- **`llm-council-api` skill updated to v0.4.1**: Documents `/api/ask`, per-request overrides, sync endpoint, multi-turn conversations, SSE event table, and "Choosing the Right Endpoint" decision matrix.
+- **`the-ai-counsel-api` skill updated to v0.4.1**: Documents `/api/ask`, per-request overrides, sync endpoint, multi-turn conversations, SSE event table, and "Choosing the Right Endpoint" decision matrix.
 - **`DEFAULT_EXECUTION_MODE` constant**: Extracted shared default (`'full'`) to `api.js` — eliminates magic string duplication across `App.jsx`, `Settings.jsx`, `CouncilConfig.jsx`.
 - **`.subsection--disabled` CSS class**: Replaces inline opacity/pointer-events with reusable class (consistent with `.source-disabled`).
 - **Chairman `SearchableModelSelect` respects disabled state**: `isDisabled` prop wired so keyboard users cannot change chairman when irrelevant.
@@ -185,21 +397,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **18 new tests**: backend export/import/reset endpoint tests, MCP tool tests for all new tools, and client method tests (108 total, up from 90)
 
 ### Changed
-- **`llm-council-api` skill updated to v0.4.0**: documents system prompt fields, `enabled_providers`/`direct_provider_toggles` dict formats, all API key field names, and backup/restore endpoints
+- **`the-ai-counsel-api` skill updated to v0.4.0**: documents system prompt fields, `enabled_providers`/`direct_provider_toggles` dict formats, all API key field names, and backup/restore endpoints
 - **`import_settings` endpoint simplified**: uses Pydantic body parsing (`Settings` model) instead of manual JSON parsing — FastAPI now returns field-level 422 validation errors instead of generic 400s
 - **`export_settings` endpoint**: uses `model_dump_json()` (single-pass) instead of `model_dump()` + `json.dumps()` (two-pass)
 
 ## [0.3.0] - 2026-05-10
 
 ### Added
-- **MCP server** (`llm_council_mcp/`): Expose LLM Council Plus as a Model Context Protocol server, letting Claude Code, Gemini CLI, and other MCP clients send questions to the council and retrieve deliberation results programmatically
+- **MCP server** (`the_ai_counsel_mcp/`): Expose The AI Counsel as a Model Context Protocol server, letting Claude Code, Gemini CLI, and other MCP clients send questions to the council and retrieve deliberation results programmatically
 - **13 MCP tools**: `list_models`, `get_council_config`, `configure_council`, `set_search_provider`, `run_stage1`, `run_stage2`, `run_stage3`, `run_deliberation`, `quick_chat`, `list_conversations`, `get_conversation`, `check_health`, `test_provider`
 - **stdio transport** (default): MCP server runs as a local process; AI tools communicate via stdin/stdout with outbound HTTP to the Council backend (local or remote)
 - **SSE transport**: MCP server runs as an HTTP server on port 8002; AI tools connect via URL with no local installation required
 - **TinyFish search provider**: 5th web search option using TinyFish's free-tier Fetch API (5 req/min); requires free API key from agent.tinyfish.ai
 - **90 tests**: backend TinyFish provider tests, MCP integration tests covering all 13 tools and both transport modes
 - **`docs/mcp/`**: Comprehensive MCP documentation including transport selection guide, step-by-step setup for stdio and SSE, full tools reference, and real-world usage examples
-- **`llm-council-api` Claude Code skill** (`skills/llm-council-api/SKILL.md`, v0.3.0): Installable skill for interacting with the Council via REST API without MCP — covers all endpoints, SSE parsing, error handling, and troubleshooting
+- **`the-ai-counsel-api` Claude Code skill** (`skills/the-ai-counsel-api/SKILL.md`, v0.3.0): Installable skill for interacting with the Council via REST API without MCP — covers all endpoints, SSE parsing, error handling, and troubleshooting
 
 ## [0.2.3] - 2026-05-04
 

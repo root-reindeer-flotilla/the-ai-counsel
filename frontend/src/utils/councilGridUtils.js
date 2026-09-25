@@ -8,6 +8,7 @@ import groqLogo from '../assets/icons/groq.svg';
 import openrouterLogo from '../assets/icons/openrouter.svg';
 import nvidiaLogo from '../assets/icons/nvidia.svg';
 import customLogo from '../assets/icons/openai-compatible.svg';
+import opencodeLogo from '../assets/icons/opencode.svg';
 
 export const PROVIDER_CONFIG = {
   openai: { color: '#10a37f', label: 'OpenAI', logo: openaiLogo },
@@ -20,10 +21,20 @@ export const PROVIDER_CONFIG = {
   nvidia: { color: '#76b900', label: 'NVIDIA', logo: nvidiaLogo },
   openrouter: { color: '#7f5af0', label: 'OpenRouter', logo: openrouterLogo },
   custom: { color: '#06b6d4', label: 'Custom', logo: customLogo },
+  'opencode-zen': { color: '#211E1E', label: 'OpenCode Zen', logo: opencodeLogo },
+  'opencode-go': { color: '#211E1E', label: 'OpenCode Go', logo: opencodeLogo },
+  'xai-oauth': { color: '#ffffff', label: 'xAI SuperGrok', logo: null, icon: '𝕏' },
+  'openai-oauth': { color: '#10a37f', label: 'ChatGPT', logo: openaiLogo },
+  'github-copilot': { color: '#24292f', label: 'GitHub Copilot', logo: null, icon: '🐙' },
   default: { color: '#888888', label: 'Model', logo: null, icon: '🤖' },
 };
 
 const PROVIDER_PREFIXES = [
+  ['github-copilot:', 'github-copilot'],
+  ['openai-oauth:', 'openai-oauth'],
+  ['xai-oauth:', 'xai-oauth'],
+  ['opencode-zen:', 'opencode-zen'],
+  ['opencode-go:', 'opencode-go'],
   ['custom:', 'custom'],
   ['ollama:', 'ollama'],
   ['groq:', 'groq'],

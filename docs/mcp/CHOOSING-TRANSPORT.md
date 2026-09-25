@@ -1,6 +1,6 @@
 # Choosing a Transport: stdio vs SSE
 
-The MCP server supports two transport modes. Picking the right one depends on where your LLM Council Plus backend is running and whether you want to install anything locally.
+The MCP server supports two transport modes. Picking the right one depends on where your The AI Counsel backend is running and whether you want to install anything locally.
 
 ---
 

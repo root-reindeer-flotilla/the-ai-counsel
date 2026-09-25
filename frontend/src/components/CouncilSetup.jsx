@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react'
 import { api } from '../api';
 import CouncilGrid from './CouncilGrid';
 import EditableCouncilGrid, { NEW_MEMBER_INDEX } from './EditableCouncilGrid';
+import { filterOAuthModels, OAUTH_PROVIDERS } from '../constants/oauthProviders';
 import './CouncilSetup.css';
 
 const MAX_MEMBERS = 8;
@@ -15,18 +16,33 @@ const DIRECT_PROVIDER_KEY_FLAGS = {
   deepseek: 'deepseek_api_key_set',
   groq: 'groq_api_key_set',
   nvidia: 'nvidia_api_key_set',
+  'opencode-zen': 'opencode_api_key_set',
+  'opencode-go': 'opencode_api_key_set',
+  // Backend returns capitalized labels with a space; allow both forms.
+  'opencode zen': 'opencode_api_key_set',
+  'opencode go': 'opencode_api_key_set',
 };
 
 function filterDirectModels(directModels, settings) {
+  const ep = settings.enabled_providers || {};
+  const dt = settings.direct_provider_toggles || {};
   return directModels.filter((model) => {
-    if (model.provider === 'Groq') return settings.groq_api_key_set;
-    const providerKey = (model.provider || '').toLowerCase();
+    if (model.id?.startsWith('xai-oauth:') || model.id?.startsWith('openai-oauth:') || model.id?.startsWith('github-copilot:')) {
+      return false;
+    }
+    if (model.provider === 'Groq') {
+      return settings.groq_api_key_set && (ep.groq !== false);
+    }
+    if (!ep.direct) return false;
+    const providerKey = (model.provider || '').toLowerCase().replace(/\s+/g, '-');
+    if (dt[providerKey] === false) return false;
     const flag = DIRECT_PROVIDER_KEY_FLAGS[providerKey];
     return flag ? settings[flag] : false;
   });
 }
 
 function getConfiguredModelSources(settings) {
+  const ep = settings.enabled_providers || {};
   const hasDirect = !!(
     settings.openai_api_key_set
     || settings.anthropic_api_key_set
@@ -35,12 +51,17 @@ function getConfiguredModelSources(settings) {
     || settings.deepseek_api_key_set
     || settings.groq_api_key_set
     || settings.nvidia_api_key_set
+    || settings.opencode_api_key_set
+  );
+  const hasOAuth = OAUTH_PROVIDERS.some(
+    (p) => settings[p.connectedKey] && ep[p.id] !== false
   );
   return {
-    openrouter: !!settings.openrouter_api_key_set,
-    ollama: !!settings.ollama_base_url,
-    direct: hasDirect,
-    custom: !!settings.custom_endpoint_url,
+    openrouter: !!settings.openrouter_api_key_set && (ep.openrouter !== false),
+    ollama: !!settings.ollama_base_url && (ep.ollama !== false),
+    direct: hasDirect && (ep.direct !== false),
+    custom: !!settings.custom_endpoint_url && (ep.custom !== false),
+    oauth: hasOAuth,
   };
 }
 
@@ -96,7 +117,7 @@ export default function CouncilSetup({
   onCouncilChangeRef.current = onCouncilChange;
 
   const members = useMemo(() => filterMembers(councilModels), [councilModels]);
-  const showChairman = executionMode === 'full';
+  const showChairman = editable || executionMode === 'full';
 
   const currentSnapshot = useMemo(
     () => buildSnapshot(members, chairmanModel),
@@ -132,7 +153,7 @@ export default function CouncilSetup({
         const loadSources = getConfiguredModelSources(settings);
         const ollamaUrl = settings.ollama_base_url || 'http://localhost:11434';
 
-        const [orModels, ollamaModels, directModels, customModels] = await Promise.all([
+        const [orModels, ollamaModels, directModels, customModels, oauthModels] = await Promise.all([
           loadSources.openrouter
             ? api.getModels().then((d) => d.models || []).catch(() => [])
             : [],
@@ -152,11 +173,16 @@ export default function CouncilSetup({
           loadSources.custom
             ? api.getCustomEndpointModels().then((d) => d.models || []).catch(() => [])
             : [],
+          loadSources.oauth
+            ? api.getDirectModels()
+              .then((d) => filterOAuthModels(Array.isArray(d) ? d : (d.models || []), settings))
+              .catch(() => [])
+            : [],
         ]);
 
         if (cancelled) return;
 
-        const combined = [...orModels, ...ollamaModels, ...directModels, ...customModels];
+        const combined = [...orModels, ...ollamaModels, ...directModels, ...customModels, ...oauthModels];
         const unique = new Map();
         combined.forEach((m) => unique.set(m.id, m));
         setModels(Array.from(unique.values()).sort((a, b) => (a.name || '').localeCompare(b.name || '')));
@@ -166,16 +192,19 @@ export default function CouncilSetup({
 
         if (!initialLoadDone.current && editable) {
           initialLoadDone.current = true;
-          const defaultPreset = loadedPresets.find((p) => p.is_default) || null;
-          if (defaultPreset) {
-            const presetMembers = filterMembers(defaultPreset.council_models);
-            const presetChairman = defaultPreset.chairman_model || '';
-            await onCouncilChangeRef.current?.({
-              councilModels: presetMembers,
-              chairmanModel: presetChairman,
-            });
-            setActivePresetId(defaultPreset.id);
-            loadedSnapshotRef.current = buildSnapshot(presetMembers, presetChairman);
+          const currentMembers = filterMembers(councilModels);
+          if (currentMembers.length === 0) {
+            const defaultPreset = loadedPresets.find((p) => p.is_default) || null;
+            if (defaultPreset) {
+              const presetMembers = filterMembers(defaultPreset.council_models);
+              const presetChairman = defaultPreset.chairman_model || '';
+              await onCouncilChangeRef.current?.({
+                councilModels: presetMembers,
+                chairmanModel: presetChairman,
+              });
+              setActivePresetId(defaultPreset.id);
+              loadedSnapshotRef.current = buildSnapshot(presetMembers, presetChairman);
+            }
           }
         }
       } catch (err) {
@@ -293,15 +322,12 @@ export default function CouncilSetup({
     setPresetPopoverOpen(false);
   };
 
-  const handleUpdateExistingChange = (checked) => {
-    if (checked) {
-      const presetName = activePreset?.name || 'this preset';
-      const confirmed = window.confirm(
-        `Overwrite "${presetName}"?\n\nThis will replace the saved council lineup with your current members and chairman. This cannot be undone.`
-      );
-      if (!confirmed) return;
-    }
-    setSaveForm((f) => ({ ...f, updateExisting: checked }));
+  const handleNewCouncil = async () => {
+    setActivePresetId(null);
+    loadedSnapshotRef.current = null;
+    setActiveEditor(null);
+    setAddingMember(false);
+    await persistCouncil([], '');
   };
 
   const closeSavePresetModal = () => {
@@ -472,6 +498,14 @@ export default function CouncilSetup({
             </div>
           )}
         </div>
+        <button
+          type="button"
+          className="council-setup__new-council-btn"
+          onClick={handleNewCouncil}
+          title="Clear all current members and chairman to start fresh"
+        >
+          + New Council · Clear Current
+        </button>
         {(isPresetDirty || !activePresetId) && (
           <button
             type="button"
@@ -546,7 +580,7 @@ export default function CouncilSetup({
                   <input
                     type="checkbox"
                     checked={saveForm.updateExisting}
-                    onChange={(e) => handleUpdateExistingChange(e.target.checked)}
+                    onChange={(e) => setSaveForm((f) => ({ ...f, updateExisting: e.target.checked }))}
                   />
                   Overwrite existing preset
                 </label>

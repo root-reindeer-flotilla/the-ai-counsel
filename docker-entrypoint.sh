@@ -15,9 +15,19 @@ API_URL="${BACKEND_HOST:-}"
 API_URL_JSON=$(python3 -c 'import json, sys; print(json.dumps(sys.argv[1]))' "$API_URL")
 
 cat > "$CONFIG_FILE" <<EOF
-window.__LLM_COUNCIL_CONFIG__ = {
+window.__AI_COUNSEL_CONFIG__ = {
   apiUrl: ${API_URL_JSON},
 };
 EOF
+
+# Append the configured backend port to the uvicorn command. CMD omits --port so
+# that PORT_BACKEND (from .env or the compose environment) can drive it at runtime.
+case "$*" in
+  *uvicorn*)
+    if [ "${*#*--port}" = "$*" ]; then
+      set -- "$@" --port "${PORT_BACKEND:-8001}"
+    fi
+    ;;
+esac
 
 exec gosu appuser "$@"

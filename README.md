@@ -1,19 +1,9 @@
-# LLM Council Plus
+# The AI Counsel
 
-> [!CAUTION]
-> ## This repository has been deprecated.
+> ☕ **If you find The AI Counsel useful, consider [buying me a coffee](https://buymeacoffee.com/jacobbd).**
+> It's free and built in my spare time — but testing every provider runs up a real AI bill. A coffee helps me cover it and keep shipping. Thank you! 🙏
 >
-> **LLM Council Plus has been rebranded and moved to a new home:**
->
-> ### **[The AI Counsel](https://github.com/jacob-bd/the-ai-counsel)**
->
-> **No further updates, bug fixes, or pull requests will be merged here.**
->
-> Everyone is encouraged to migrate to the new repository. It includes a full **[Migration Guide](https://github.com/jacob-bd/the-ai-counsel/blob/main/docs/MIGRATION.md)** with step-by-step instructions for Docker, local dev, MCP server, and skill symlink upgrades. Your existing data and configs carry over without any changes.
->
-> **v0.7.0 is the final release on this repository.**
-
----
+> <a href="https://buymeacoffee.com/jacobbd"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy Me A Coffee" height="42"></a>
 
 > **Collective AI Intelligence** — Convene a council of AI models that deliberate, peer-review, and synthesize the best answer — or assemble a panel of named advisor personas that debate your question and deliver a structured verdict.
 
@@ -21,51 +11,56 @@
 [![React](https://img.shields.io/badge/React-19-61DAFB.svg)](https://reactjs.org/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.115+-009688.svg)](https://fastapi.tiangolo.com/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Buy Me a Coffee](https://img.shields.io/badge/Buy%20Me%20a%20Coffee-FFDD00?style=flat-square&logo=buy-me-a-coffee&logoColor=black)](https://buymeacoffee.com/jacobbd)
 
 
 <p align="center">
-  <img src="assets/landing_page.png" alt="LLM Council Plus Dual-Mode Entry Screen" width="75%">
+  <img src="assets/landing_page.png" alt="The AI Counsel Dual-Mode Entry Screen" width="75%">
 </p>
 
 ---
 
-## What is LLM Council Plus?
+<p align="center">
+  <strong>📺 Video Overview & Demo</strong>
+  <br>
+  <em>Click below to watch the video demonstration of The AI Counsel:</em>
+</p>
 
-LLM Council Plus is a **dual-mode multi-model AI deliberation system**. Instead of relying on a single LLM for answers, it orchestrates multiple models working together — either through anonymous peer review or persona-driven debate.
+<p align="center">
+  <a href="https://youtu.be/OQV92Y_4Wo4" target="_blank">
+    <img src="https://img.youtube.com/vi/OQV92Y_4Wo4/maxresdefault.jpg" alt="The AI Counsel Video Overview & Demo" width="75%">
+  </a>
+</p>
+
+---
+
+## What is The AI Counsel?
+
+The AI Counsel is a **dual-mode multi-model AI deliberation system**. Instead of relying on a single LLM for answers, it orchestrates multiple models working together — either through anonymous peer review or persona-driven debate.
 
 **Choose your experience:**
 
 - **🏛️ LLM Council** — Multiple AI models independently answer your question, anonymously peer-review each other's responses, and a chairman model synthesizes the collective wisdom into a final answer.
 - **🎭 LLM Advisors** — Named advisor personas (The Skeptic, The Strategist, The Ethicist, etc.) debate your question across configurable rounds, reaching consensus or voting to deliver a structured verdict with an action plan.
 
-<p align="center">
-  <div align="center">
-    <a href="https://www.youtube.com/watch?v=HOdyIyccOCE" target="_blank">
-      <img src="https://img.youtube.com/vi/HOdyIyccOCE/hqdefault.jpg" alt="LLM Council Plus Long Demo" width="48%">
-    </a>
-    <a href="https://www.youtube.com/watch?v=NUmQFGAwD3g" target="_blank">
-      <img src="https://img.youtube.com/vi/NUmQFGAwD3g/hqdefault.jpg" alt="LLM Council Plus Short Demo" width="48%">
-    </a>
-  </div>
-</p>
+**Choosing the right mode:** use **Council** for direct answers, creative prompts, factual questions, and "give me the best response" synthesis. Use **Advisors** when the question has real tradeoffs, disagreement, risk, strategy, ethics, prioritization, or a decision to make. Simple prompts such as "give me one amazing animal fact" are usually Council prompts; advisor personas will naturally turn them into a debate over criteria.
 
 ---
 
 ## Installation
 
-```bash
-# Clone and install
-git clone https://github.com/jacob-bd/llm-council-plus.git
-cd llm-council-plus
-uv sync                        # Backend dependencies
-npm install --prefix frontend  # Frontend dependencies
+You can clone, install dependencies, and start the application in one shot:
 
-# Run (from project root)
+```bash
+git clone https://github.com/jacob-bd/the-ai-counsel.git && \
+cd the-ai-counsel && \
+uv sync && \
+npm install --prefix frontend && \
 ./start.sh
 ```
 
-Then open **http://localhost:5173** and configure your API keys in Settings.
+*(Note: `uv sync` installs the backend dependencies, `npm install --prefix frontend` installs the frontend dependencies, and `./start.sh` spins up both servers together).*
+
+Then open **http://localhost:5173** and configure your API keys (or subscription OAuth logins) in Settings.
 
 > **Prerequisites:** Python 3.10+, Node.js 18+, [uv](https://docs.astral.sh/uv/)
 
@@ -78,7 +73,7 @@ Then open **http://localhost:5173** and configure your API keys in Settings.
 The original three-stage pipeline where raw model diversity produces vetted answers:
 
 ```
-YOUR QUESTION (+ optional web search)
+YOUR QUESTION (+ optional web search / file uploads)
          │
          ▼
   ┌─────────────────────────────────┐
@@ -108,9 +103,45 @@ YOUR QUESTION (+ optional web search)
 | **Chat + Ranking** | Stages 1 & 2 | Peer review without synthesis |
 | **Full Deliberation** | All 3 stages | Complete council synthesis (default) |
 
+#### Multi-Round Iterative Debate (v0.7.0)
+
+Council mode also supports **multi-round iterative debate** — models refine their answers across multiple rounds based on peer critiques, with convergence detection and early stopping:
+
+```
+  ┌─────────────────────────────────┐
+  │   ROUND 1: Initial Responses    │
+  │   + Peer Critique               │
+  └──────────────┬──────────────────┘
+                 ▼
+  ┌─────────────────────────────────┐
+  │   ROUNDS 2–5: Refinement        │
+  │   Cross-pollination of top      │
+  │   claims + targeted critique    │
+  │   (auto-stops on convergence)   │
+  └──────────────┬──────────────────┘
+                 ▼
+  ┌─────────────────────────────────┐
+  │   STAGE 4: CORRECTED DRAFT      │
+  │   Chairman synthesizes final    │
+  │   draft with [REVISED]/[NEW]    │
+  └─────────────────────────────────┘
+```
+
+**Three critique modes** control how models evaluate each other:
+
+| Mode | How It Works |
+|------|-------------|
+| **Free-form** | Open-ended feedback on the full response |
+| **Paragraph-level** | Structured per-paragraph evaluation with stable `[Para N]` markers |
+| **Claim-level** | Chairman extracts falsifiable claims; peers verdict each claim (strong/weak/flawed) |
+
+Configure rounds (1–5), critique mode, and convergence threshold in **Settings > Council Debate**, or via the `run_iterative_debate` MCP tool. See [docs/COUNCIL-DEBATE-CONFIG.md](docs/COUNCIL-DEBATE-CONFIG.md) for a full walkthrough.
+
 ### 🎭 LLM Advisors — Persona-Driven Debate
 
 A fundamentally different approach: named personas with distinct thinking styles argue your question in structured rounds.
+
+Advisor mode works best when there is something meaningful to debate: a strategic choice, a product decision, a risk review, an ethical question, or competing options. For simple answer generation, use Council mode instead.
 
 ```
 YOUR QUESTION (+ optional web search)
@@ -136,7 +167,7 @@ YOUR QUESTION (+ optional web search)
   └─────────────────────────────────┘
 ```
 
-**10 built-in advisor personas:**
+**12 built-in advisor personas:**
 
 | Persona | Role | Style |
 |---------|------|-------|
@@ -150,8 +181,10 @@ YOUR QUESTION (+ optional web search)
 | ♟️ **The Strategist** | Big-Picture Thinker | Thinks long-term about positioning and leverage |
 | 🤝 **The Humanist** | People-First Advocate | Centers the human experience and well-being |
 | 🛡️ **The Risk Assessor** | Risk Analyst | Identifies worst-case scenarios and mitigations |
+| 🎤 **The Comedian** | Humorist Critic | Uses wit to expose absurdity and weak framing |
+| 📈 **The Economist** | Incentives Analyst | Analyzes incentives, scarcity, and unintended consequences |
 
-All personas are **fully customizable** — edit name, role, description, system prompt, and emoji. Changes persist across sessions with per-persona reset to defaults.
+All personas are **fully customizable** — edit name, role, description, system prompt, and emoji. Use **+ Add Advisor** in Advisor Setup to create additional custom personas. Changes persist across sessions; built-ins can be reset to defaults, while custom personas can be deleted. Deleting a custom persona also removes it from saved advisor presets.
 
 ---
 
@@ -159,7 +192,7 @@ All personas are **fully customizable** — edit name, role, description, system
 
 ### Multi-Provider Support
 
-Mix and match models from 10 different provider types:
+Mix and match models from 12 different provider types:
 
 | Provider | Type | Description |
 |----------|------|-------------|
@@ -167,6 +200,8 @@ Mix and match models from 10 different provider types:
 | **Ollama** | Local | Run open-source models locally (Llama, Mistral, Phi, etc.) |
 | **Groq** | Cloud | Ultra-fast inference for Llama and Mixtral models |
 | **NVIDIA NIM** | Cloud | NVIDIA Build models via `integrate.api.nvidia.com` |
+| **OpenCode Zen** | Cloud | Direct connection to [opencode.ai/zen](https://opencode.ai) (chat/completions only, v1) |
+| **OpenCode Go** | Cloud | Direct connection to OpenCode Go (subscription, chat/completions only, v1) |
 | **OpenAI Direct** | Cloud | Direct connection to OpenAI API |
 | **Anthropic Direct** | Cloud | Direct connection to Anthropic API |
 | **Google Direct** | Cloud | Direct connection to Google AI API |
@@ -192,25 +227,41 @@ Ground your council's or advisors' responses in real-time information:
 
 Fine-tune creativity vs consistency per stage:
 
-- **Council Heat**: Stage 1 response creativity (default: 0.5)
-- **Chairman Heat**: Final synthesis creativity (default: 0.4)
-- **Stage 2 Heat**: Peer ranking consistency (default: 0.3)
+- **Council Heat** (Stage 1): Individual response creativity (default: 0.5)
+- **Peer Ranking Heat** (Stage 2): Ranking consistency (default: 0.3)
+- **Chairman Heat** (Stage 3): Final synthesis creativity (default: 0.4)
+
+Some provider/model combinations only accept their default temperature. The app automatically omits temperature for those models so preflight and runs do not fail on provider-specific temperature restrictions.
 
 ### Additional Features
 
-- **Live Progress Tracking** — See each model or advisor respond in real-time with streaming
+- **Live Progress Tracking** — See each model or advisor respond in real-time with streaming; reconnect to active runs via `GET /api/conversations/{id}/progress`
 - **Multi-turn Conversations** — Follow-up questions carry full context automatically
-- **Council Sizing** — Adjust council from 1 to 8 models; advisors from 2 to 4 personas
-- **Advisor Presets** — Save and load named advisor lineups (personas, model mode, optional rounds/web search) from Advisor Setup
+- **Docked Chat Composer** — The input stays below the scrollable conversation so responses remain readable while you type
+- **Text File Uploads** — Attach PDFs and text/code/config files in Council or Advisor mode; extracted text is sent as normalized prompt context across all providers while conversation history stores attachment metadata only
+- **Council Sizing** — Adjust council from 1 to 8 models; advisors from 2 to 4 personas (select from 12 built-ins or custom personas)
+- **Advisor Presets** — Save and load named advisor lineups (built-in/custom personas, model mode, optional rounds/web search) from Advisor Setup
 - **Abort Anytime** — Cancel in-progress requests
-- **Conversation History** — All conversations saved locally with search
+- **Conversation History** — All conversations saved locally with search; sidebar cards show stacked date/time, compact run summaries (rounds, critique mode, personas, search), and cumulative cost per thread
+- **Accessible Typography** — Settings → General offers Default (110%) and Large (150%) text sizes across the UI, including existing chats
 - **Customizable System Prompts** — Edit Stage 1, 2, and 3 prompts for Council mode
+- **Run Cost Reporting** — See total cost, input/output token split, call count, pricing confidence, and per-model breakdowns for council and advisor runs
 - **Rate Limit Warnings** — Alerts when your config may hit API limits
 - **"I'm Feeling Lucky"** — Randomize your council composition
-- **Import & Export** — Backup and share your settings, API keys, and prompts
+- **Import & Export** — Backup and share your settings and prompts (admin export can include the credential store; see [`docs/CREDENTIALS.md`](docs/CREDENTIALS.md))
 - **Per-request Model Overrides** — Use different models for individual requests without changing global config
-- **One-shot API** — `POST /api/ask` for scripts and MCP agents (no conversation state)
-- **Docker Deployment** — Single-container production deployment via `docker compose`
+- **One-shot API** — `POST /api/ask` for scripts and MCP agents; each completed run is saved to the UI and returns a `conversation_id`
+- **Docker Deployment** — Single-container production deployment; pull the prebuilt image from GHCR or build from source with `docker compose`
+
+---
+
+### File Uploads
+
+Attach PDFs and text-like files from the Council input or Advisor setup. The backend extracts text once before model calls, so uploads work the same way across OpenRouter, Ollama, Groq, direct providers, custom endpoints, and MCP.
+
+Supported v1 formats include `.pdf`, `.txt`, `.md`, `.csv`, `.json`, `.yaml`, `.xml`, `.html`, logs, code files, and common config files. Conversation history stores file name/type/size metadata only; it does not store raw file bytes or extracted text.
+
+PDFs use embedded text extraction by default. OCR for scanned or image-only PDFs is optional: set `LLM_COUNCIL_OCR_ENABLED=1` and install OCRmyPDF, Tesseract, Ghostscript, and qpdf in the backend runtime. If OCR is unavailable, the run continues with extracted text and warnings.
 
 ---
 
@@ -247,12 +298,14 @@ Then open **http://localhost:5173** in your browser.
 ### Docker / VPS Deployment
 
 ```bash
-docker compose up -d --build
+docker run -d --restart unless-stopped -p 8001:8001 -v ./data:/app/data ghcr.io/jacob-bd/the-ai-counsel:latest
 ```
 
 Then open **http://YOUR_SERVER_IP:8001**. Conversations and settings persist to `./data` automatically.
 
-For Ollama integration, reverse proxy setup, environment variables, and upgrade instructions, see **[docs/DOCKER.md](docs/DOCKER.md)**.
+Building from source (e.g. for local changes) is still supported via `docker compose up -d --build`. For Ollama integration, reverse proxy setup, environment variables, and upgrade instructions, see **[docs/DOCKER.md](docs/DOCKER.md)**.
+
+> **Coming from LLM Council Plus?** See the **[Migration Guide](docs/MIGRATION.md)** for step-by-step upgrade instructions. Copy your `data/` directory; secrets migrate into `credentials.json` on first launch (see [`docs/CREDENTIALS.md`](docs/CREDENTIALS.md)).
 
 ### Network Access
 
@@ -280,17 +333,18 @@ Remote admin endpoints (`/api/settings/export`, `/api/settings/import`, `/api/se
 
 On first launch, configure at least one LLM provider in Settings:
 
-1. **LLM API Keys** — Enter API keys for your chosen providers (and Ollama URL / custom endpoint if used)
-2. **Council Config** (Settings) or **welcome-screen Council Setup** — add members and chairman; both edit the same saved lineup
-3. **Save Changes** (Settings only — welcome screen auto-saves)
+1. **LLM API Keys** — Enter API keys, connect Ollama, or sign in with subscription OAuth; optionally import from [relay-ai](https://github.com/jacob-bd/relay-ai) under **Settings → General**
+2. **Council Config** (Settings) or **welcome-screen Council Setup** — add members and chairman; both edit the same saved lineup (auto-saves)
 
-API keys **auto-save** when you click "Test" and the connection succeeds.
+Settings changes save automatically (~1 second after you stop editing). API keys **auto-save** when you click "Test" / "Connect" and the connection succeeds. See [`docs/CREDENTIALS.md`](docs/CREDENTIALS.md) for where secrets are stored, Disconnect, and relay-ai import.
 
-**Provider toggles vs Advisors:** Settings → Council Config **Remote/Local toggles** filter which sources appear in **council** model pickers only. **LLM Advisors** use every configured provider (saved API keys + Ollama URL + custom endpoint) regardless of those toggles.
+**Provider toggles are global:** Settings → Council Config **provider toggles** control which sources appear in **all** model pickers — Council Setup and Advisor Setup alike. A provider must be both configured (API key) and enabled (toggle on) to show its models.
 
-**Advisor presets:** In Advisor Setup, save named lineups (personas, models, optional rounds/web search) from the Model Assignment section. Presets persist in `settings.json` as `advisor_presets` (max 20; one default).
+**Advisor presets:** In Advisor Setup, save named lineups (built-in/custom personas, models, optional rounds/web search) from the Model Assignment section. Presets persist in `settings.json` as `advisor_presets` (max 20; one default). Deleting a custom persona removes it from every saved preset so stale persona IDs cannot break a future debate.
 
 ### LLM API Keys
+
+At the top of this section you can choose **where secrets are stored**: local file (`data/credentials.json`, plaintext with restricted permissions) or the OS keystore (desktop only; unavailable in Docker).
 
 | Provider | Get API Key |
 |----------|-------------|
@@ -325,7 +379,7 @@ Connect to any OpenAI-compatible API:
 
 ## MCP Server
 
-LLM Council Plus exposes a powerful Model Context Protocol (MCP) server that lets AI tools like Claude Code and Gemini CLI interact directly with your local or remote instance.
+The AI Counsel exposes a powerful Model Context Protocol (MCP) server that lets AI tools like Claude Code and Gemini CLI interact directly with your local or remote instance.
 
 The server exposes **10 action-based tools** grouped by domain:
 1. **Deliberation**: `council_deliberate` (stage1/stage2/stage3/full), `model_chat` (quick/multi_turn), `advisor_debate`, `run_iterative_debate`
@@ -334,17 +388,19 @@ The server exposes **10 action-based tools** grouped by domain:
 
 Legacy 25-tool names were removed in v0.5.2. `run_iterative_debate` was added in v0.7.0. See [docs/mcp/TOOLS.md](docs/mcp/TOOLS.md) for the action parameter on each tool.
 
+Deliberation tools also accept optional document inputs. Base64 files are extracted by the backend before model calls, so raw file bytes are not sent to providers.
+
 **Quick registration for Claude Code:**
 
 * **Option A: Local stdio (Standard for local development)**
   ```bash
   pip install -e .
-  claude mcp add llm-council python -m llm_council_mcp
+  claude mcp add the-ai-counsel python -m the_ai_counsel_mcp
   ```
 
 * **Option B: Remote SSE (Zero-install for containers/servers)**
   ```bash
-  claude mcp add llm-council --url http://yourserver.com:8001/mcp/sse
+  claude mcp add --transport sse the-ai-counsel http://yourserver.com:8001/mcp/sse
   ```
 
 Then ask Claude: "check the council health" to verify the connection (`providers` → action `health`; expect 10 tools in `/api/health`).
@@ -355,15 +411,15 @@ See **[docs/mcp/](docs/mcp/)** for full setup guides, including stdio/SSE transp
 
 ## Claude Code Skill (REST fallback)
 
-When MCP isn't available or you need preset CRUD / raw SSE, install the **`llm-council-api` skill**. When **both** skill and MCP are present, agents should **use MCP tools first** — the skill documents REST as fallback.
+When MCP isn't available or you need preset CRUD / raw SSE, install the **`the-ai-counsel-api` skill**. When **both** skill and MCP are present, agents should **use MCP tools first** — the skill documents REST as fallback.
 
 ```bash
 # Symlink from your cloned repo
 mkdir -p ~/.claude/skills
-ln -s "$(pwd)/skills/llm-council-api" ~/.claude/skills/llm-council-api
+ln -s "$(pwd)/skills/the-ai-counsel-api" ~/.claude/skills/the-ai-counsel-api
 ```
 
-The skill covers all API endpoints, SSE stream parsing, advisor endpoints, and troubleshooting. See [`skills/llm-council-api/SKILL.md`](skills/llm-council-api/SKILL.md) for the full reference.
+The skill covers all API endpoints, SSE stream parsing, advisor endpoints, and troubleshooting. See [`skills/the-ai-counsel-api/SKILL.md`](skills/the-ai-counsel-api/SKILL.md) for the full reference.
 
 Contributors: keep REST API, MCP tools, skill, and user docs in sync — see [`docs/DOC-SYNC.md`](docs/DOC-SYNC.md).
 
@@ -387,21 +443,25 @@ All data is stored locally in the `data/` directory:
 
 ```
 data/
-├── settings.json              # Configuration (includes API keys)
+├── settings.json              # Non-secret configuration (council, prompts, toggles)
+├── credentials.json           # API keys & OAuth tokens (file storage mode; mode 0600)
 ├── persona_overrides.json     # Advisor persona customizations
+├── custom_personas.json       # User-created advisor personas
 └── conversations/             # Conversation history
     ├── {uuid}.json
     └── ...
 ```
 
-**Privacy**: No data is sent to external servers except API calls to your configured LLM providers.
+**Privacy**: Prompts and responses are sent only to your configured LLM/search providers. Cost reporting also fetches public model-pricing catalogs; it does not send prompt text, responses, or API keys.
 
-> **⚠️ Security Warning: API Keys Stored in Plain Text**
+Full details: [`docs/CREDENTIALS.md`](docs/CREDENTIALS.md).
+
+> **⚠️ Security Warning: Secrets on Disk**
 >
-> API keys are stored in clear text in `data/settings.json`. The `data/` folder is included in `.gitignore` by default.
+> In file storage mode, API keys and OAuth tokens live in clear text in `data/credentials.json` (not `settings.json`). The `data/` folder is in `.gitignore` by default.
 >
 > - **Do NOT remove `data/` from `.gitignore`**
-> - Never commit `data/settings.json` to version control
+> - Never commit `data/credentials.json` or `data/settings.json`
 > - If you accidentally expose your keys, rotate them immediately
 
 ---
@@ -412,9 +472,8 @@ data/
 - Backend might still be starting up — the app retries automatically
 
 **Models not appearing in dropdown**
-- **Council (Settings → Council Config):** Ensure the provider toggle is enabled for that source
-- **Advisors (Advisor Setup):** Toggles do not apply — configure API keys / Ollama URL / custom endpoint under **LLM API Keys** instead
-- Check that API key is configured and tested successfully
+- Ensure the provider toggle is enabled in **Settings → Council Config** (toggles are global — apply to both Council and Advisor pickers)
+- Check that the API key is configured and tested successfully
 - For Ollama, verify connection is active
 
 **Jina Reader returns 451 errors**
@@ -439,9 +498,9 @@ data/
 
 ## Credits & Acknowledgements
 
-This project is a fork and enhancement of the original **[llm-council](https://github.com/karpathy/llm-council)** by **[Andrej Karpathy](https://github.com/karpathy)**.
+This project builds upon the original **[llm-council](https://github.com/karpathy/llm-council)** by **[Andrej Karpathy](https://github.com/karpathy)**.
 
-**LLM Council Plus** builds upon the original foundation with dual-mode deliberation (Council + Advisors), 10 provider integrations (including NVIDIA NIM), web search, persona-driven debates, customizable prompts, an MCP server, Docker deployment, and much more.
+**The AI Counsel** extends that foundation with dual-mode deliberation (Council + Advisors), 12 provider integrations (including NVIDIA NIM and OpenCode Zen/Go), web search, persona-driven debates, customizable prompts, an MCP server, Docker deployment, and much more.
 
 We gratefully acknowledge Andrej Karpathy for the original inspiration and codebase.
 

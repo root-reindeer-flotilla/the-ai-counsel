@@ -56,20 +56,10 @@ async def query_model(
 
                 response.raise_for_status()
                 data = response.json()
-                prompt_eval_count = data.get("prompt_eval_count")
-                eval_count = data.get("eval_count")
-                total_tokens = None
-                if isinstance(prompt_eval_count, int) or isinstance(eval_count, int):
-                    total_tokens = int(prompt_eval_count or 0) + int(eval_count or 0)
                 
                 return {
                     'content': data.get('message', {}).get('content', ''),
-                    'usage': {
-                        "prompt_tokens": prompt_eval_count,
-                        "completion_tokens": eval_count,
-                        "total_tokens": total_tokens,
-                    },
-                    'total_tokens': total_tokens,
+                    'usage': data,
                     'error': None
                 }
 

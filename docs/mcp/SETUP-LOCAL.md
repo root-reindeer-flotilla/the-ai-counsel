@@ -9,7 +9,7 @@ If you want zero local installation, you can connect directly to the remote serv
 ## Prerequisites
 
 - **Python 3.10+** — check with `python --version` or `python3 --version`
-- **LLM Council Plus backend running** — local at `http://localhost:8001`, or accessible at a remote URL
+- **The AI Counsel backend running** — local at `http://localhost:8001`, or accessible at a remote URL
 
 ---
 
@@ -25,12 +25,12 @@ pip install -e .
 uv tool install .
 ```
 
-This installs `llm_council_mcp` as both a Python package and a runnable module (`python -m llm_council_mcp`).
+This installs `the_ai_counsel_mcp` as both a Python package and a runnable module (`python -m the_ai_counsel_mcp`).
 
 After install, verify the module is importable:
 
 ```bash
-python -m llm_council_mcp --help
+python -m the_ai_counsel_mcp --help
 ```
 
 ---
@@ -39,12 +39,12 @@ python -m llm_council_mcp --help
 
 **Local backend (default):**
 ```bash
-claude mcp add llm-council python -m llm_council_mcp
+claude mcp add the-ai-counsel python -m the_ai_counsel_mcp
 ```
 
 **Remote backend:**
 ```bash
-claude mcp add llm-council python -m llm_council_mcp --base-url https://yourserver.com:8001
+claude mcp add the-ai-counsel python -m the_ai_counsel_mcp --base-url https://yourserver.com:8001
 ```
 
 Verify it was registered:
@@ -52,7 +52,7 @@ Verify it was registered:
 claude mcp list
 ```
 
-You should see `llm-council` in the output.
+You should see `the-ai-counsel` in the output.
 
 ---
 
@@ -60,12 +60,12 @@ You should see `llm-council` in the output.
 
 **Local backend:**
 ```bash
-gemini mcp add llm-council --command "python -m llm_council_mcp"
+gemini mcp add the-ai-counsel --command "python -m the_ai_counsel_mcp"
 ```
 
 **Remote backend:**
 ```bash
-gemini mcp add llm-council --command "python -m llm_council_mcp --base-url https://yourserver.com:8001"
+gemini mcp add the-ai-counsel --command "python -m the_ai_counsel_mcp --base-url https://yourserver.com:8001"
 ```
 
 ---
@@ -87,7 +87,7 @@ The AI will call `providers` with action `health`. A successful response looks l
 }
 ```
 
-Confirm the backend advertises 9 MCP tools: `GET /api/health` → `"mcp": {"tools": 9}`.
+Confirm the backend advertises 10 MCP tools: `GET /api/health` → `"mcp": {"tools": 10}`.
 
 ---
 
@@ -100,7 +100,7 @@ When the backend is on a remote server, the MCP server runs locally on your mach
 pip install -e .
 
 # Register with remote URL
-claude mcp add llm-council python -m llm_council_mcp \
+claude mcp add the-ai-counsel python -m the_ai_counsel_mcp \
   --base-url https://yourserver.com:8001
 ```
 
@@ -120,8 +120,8 @@ The `--base-url` flag tells the MCP server where to find the Council API. It rep
 - If using uv: `uv tool install --force .`
 
 **Claude Code says the tool is unavailable**
-- Run `claude mcp list` to confirm `llm-council` is registered
-- Try removing and re-adding: `claude mcp remove llm-council` then the add command above
+- Run `claude mcp list` to confirm `the-ai-counsel` is registered
+- Try removing and re-adding: `claude mcp remove the-ai-counsel` then the add command above
 - Restart Claude Code after registration changes
 
 **"Connection refused" for remote backend**

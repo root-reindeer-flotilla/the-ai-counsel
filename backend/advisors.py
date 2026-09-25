@@ -6,6 +6,7 @@ import re
 from typing import List, Dict, Any, Optional
 
 from .council import query_model
+from .costs import build_advisor_cost_report
 from .model_preflight import build_preflight_error_message, preflight_models
 from .personas import get_personas_by_ids, Persona
 from .settings import get_settings
@@ -17,6 +18,7 @@ from .advisor_prompts import (
     ADVISOR_TIEBREAKER_PROMPT,
     CONSENSUS_TAG_INSTRUCTION,
 )
+from .prompts import apply_response_language
 
 logger = logging.getLogger(__name__)
 
@@ -152,6 +154,7 @@ async def _query_advisor(
     model_assignments: Optional[Dict[str, str]],
     default_model: str,
     temperature: float,
+    conversation_id: Optional[str] = None,
 ) -> tuple:
     persona = personas_map[pid]
     model = _resolve_model(pid, model_assignments, default_model)
@@ -160,23 +163,58 @@ async def _query_advisor(
         {"role": "user", "content": prompt},
     ]
     try:
-        result = await query_model(model, messages, temperature=temperature)
+        result = await query_model(
+            model,
+            messages,
+            temperature=temperature,
+            conversation_id=conversation_id,
+        )
         if result.get("error"):
-            return pid, model, None, result.get("error_message", "Model error")
-        return pid, model, result.get("content", ""), None
+            return pid, model, None, result.get("error_message", "Model error"), result.get("usage"), result.get("cost")
+        return pid, model, result.get("content", ""), None, result.get("usage"), result.get("cost")
     except Exception as e:
-        return pid, model, None, str(e)
+        return pid, model, None, str(e), None, None
 
 
-async def _query_neutral(model: str, prompt: str, temperature: float = 0.3) -> Dict[str, Any]:
+def _unpack_advisor_result(result: tuple) -> tuple:
+    """Accept old four-field test doubles while using six fields in production."""
+    if len(result) == 4:
+        pid, model, content, error = result
+        return pid, model, content, error, None, None
+    return result
+
+
+async def _query_neutral(
+    model: str,
+    prompt: str,
+    temperature: float = 0.3,
+    conversation_id: Optional[str] = None,
+) -> Dict[str, Any]:
     """Call a neutral (non-persona) model and return a normalized result dict."""
     try:
-        response = await query_model(model, [{"role": "user", "content": prompt}], temperature=temperature)
+        response = await query_model(
+            model,
+            [{"role": "user", "content": prompt}],
+            temperature=temperature,
+            conversation_id=conversation_id,
+        )
         if response.get("error"):
-            return {"model": model, "content": None, "error": response.get("error_message")}
-        return {"model": model, "content": response.get("content", ""), "error": None}
+            return {
+                "model": model,
+                "content": None,
+                "error": response.get("error_message"),
+                "usage": response.get("usage"),
+                "cost": response.get("cost"),
+            }
+        return {
+            "model": model,
+            "content": response.get("content", ""),
+            "error": None,
+            "usage": response.get("usage"),
+            "cost": response.get("cost"),
+        }
     except Exception as e:
-        return {"model": model, "content": None, "error": str(e)}
+        return {"model": model, "content": None, "error": str(e), "usage": None, "cost": None}
 
 
 async def run_debate(
@@ -190,6 +228,7 @@ async def run_debate(
     search_context: str = "",
     request: Any = None,
     preflight: bool = False,
+    conversation_id: Optional[str] = None,
 ):
     """
     Run a multi-round advisor debate.
@@ -234,7 +273,10 @@ async def run_debate(
     if preflight:
         models_to_check = [p["model"] for p in personas_serialized]
         models_to_check.append(verdict_model)
-        preflight_result = await preflight_models(models_to_check)
+        preflight_result = await preflight_models(
+            models_to_check,
+            conversation_id=conversation_id,
+        )
         if not preflight_result.ok:
             yield {
                 "type": "advisor_error",
@@ -263,6 +305,7 @@ async def run_debate(
     safe_question = question.replace("{", "{{").replace("}", "}}")
 
     all_rounds: List[Dict[str, Any]] = []
+    cost_rounds: List[Dict[str, Any]] = []
     round_extracts: List[Dict[str, Any]] = []
     consensus_reached = False
     consensus_round: Optional[int] = None
@@ -313,8 +356,19 @@ async def run_debate(
                 consensus_tag=CONSENSUS_TAG_INSTRUCTION,
             )
 
+        localized_prompt = apply_response_language(prompt_template, settings.response_language)
+
+        advisor_kwargs = {}
+        if conversation_id is not None:
+            advisor_kwargs["conversation_id"] = conversation_id
         tasks = [asyncio.create_task(_query_advisor(
-            pid, prompt_template, personas_map, model_assignments, default_model, temperature
+            pid,
+            localized_prompt,
+            personas_map,
+            model_assignments,
+            default_model,
+            temperature,
+            **advisor_kwargs,
         )) for pid in order]
 
         pending = set(tasks)
@@ -331,7 +385,7 @@ async def run_debate(
                 )
 
                 for task in done:
-                    pid, model, content, error = await task
+                    pid, model, content, error, usage, cost = _unpack_advisor_result(await task)
                     completed_count += 1
 
                     if error:
@@ -343,6 +397,8 @@ async def run_debate(
                             "error": error,
                             "consensus": False,
                             "consensus_score": None,
+                            "usage": usage,
+                            "cost": cost,
                         }
                     else:
                         consensus_score = parse_consensus_tag(content)
@@ -350,28 +406,30 @@ async def run_debate(
                         word_count = _count_words(clean_content)
                         exceeds_word_limit = word_count > word_limit
                         has_consensus = (
-                            not exceeds_word_limit
-                            and consensus_score is not None
+                            consensus_score is not None
                             and consensus_score >= 4
                         )
-                        response_error = (
-                            f"Advisor response exceeded {word_limit} word limit."
+                        response_warning = (
+                            f"Advisor response exceeded the {word_limit} word guidance and was kept."
                             if exceeds_word_limit
                             else None
                         )
-                        if not exceeds_word_limit:
-                            consensus_votes[pid] = has_consensus
-                            consensus_scores[pid] = consensus_score
+                        consensus_votes[pid] = has_consensus
+                        consensus_scores[pid] = consensus_score
                         resp_data = {
                             "persona_id": pid,
                             "persona_name": personas_map[pid].name,
                             "model": model,
                             "content": clean_content,
-                            "error": response_error,
+                            "error": None,
+                            "warning": response_warning,
                             "consensus": has_consensus,
-                            "consensus_score": None if exceeds_word_limit else consensus_score,
+                            "consensus_score": consensus_score,
                             "word_count": word_count,
                             "word_limit": word_limit,
+                            "word_limit_exceeded": exceeds_word_limit,
+                            "usage": usage,
+                            "cost": cost,
                         }
 
                     round_responses.append(resp_data)
@@ -398,9 +456,17 @@ async def run_debate(
             "responses": [
                 {"persona_id": r["persona_id"], "persona_name": r["persona_name"],
                  "model": r["model"], "content": r["content"],
-                 "consensus": r["consensus"], "consensus_score": r["consensus_score"]}
+                 "consensus": r["consensus"], "consensus_score": r["consensus_score"],
+                 "warning": r.get("warning"),
+                 "word_count": r.get("word_count"), "word_limit": r.get("word_limit"),
+                 "word_limit_exceeded": r.get("word_limit_exceeded"),
+                 "usage": r.get("usage"), "cost": r.get("cost")}
                 for r in successful_responses
             ],
+        })
+        cost_rounds.append({
+            "round_number": round_num,
+            "responses": round_responses,
         })
 
         all_agree = (
@@ -441,7 +507,12 @@ async def run_debate(
                 round_number=round_num,
                 round_transcript=round_transcript,
             )
-            extract_result = await _query_neutral(extract_model, extract_prompt, temperature=0.2)
+            extract_result = await _query_neutral(
+                extract_model,
+                apply_response_language(extract_prompt, settings.response_language),
+                temperature=0.2,
+                conversation_id=conversation_id,
+            )
             if extract_result.get("error") or not extract_result.get("content"):
                 yield {
                     "type": "advisor_error",
@@ -456,6 +527,8 @@ async def run_debate(
                 "model": extract_result.get("model"),
                 "content": extract_result.get("content") or "",
                 "error": extract_result.get("error"),
+                "usage": extract_result.get("usage"),
+                "cost": extract_result.get("cost"),
             })
 
     transcript_text = _format_transcript(all_rounds, personas_map)
@@ -470,7 +543,11 @@ async def run_debate(
             question=safe_question,
             transcript=transcript_text,
         )
-        tiebreaker_result = await _query_neutral(verdict_model, tiebreaker_prompt)
+        tiebreaker_result = await _query_neutral(
+            verdict_model,
+            apply_response_language(tiebreaker_prompt, settings.response_language),
+            conversation_id=conversation_id,
+        )
 
         yield {"type": "advisor_tiebreaker", "data": tiebreaker_result}
 
@@ -494,7 +571,11 @@ async def run_debate(
     if tiebreaker_result and tiebreaker_result.get("content"):
         verdict_prompt += f"\n\nTiebreaker ruling:\n{tiebreaker_result['content']}"
 
-    verdict_data = await _query_neutral(verdict_model, verdict_prompt)
+    verdict_data = await _query_neutral(
+        verdict_model,
+        apply_response_language(verdict_prompt, settings.response_language),
+        conversation_id=conversation_id,
+    )
 
     yield {"type": "advisor_verdict", "data": verdict_data}
 
@@ -508,5 +589,11 @@ async def run_debate(
             "tiebreaker": tiebreaker_result,
             "verdict": verdict_data,
             "personas": personas_serialized,
+            "cost_report": build_advisor_cost_report(
+                cost_rounds,
+                verdict_data,
+                tiebreaker_result,
+                round_extracts,
+            ),
         },
     }

@@ -1,3 +1,3 @@
-window.__LLM_COUNCIL_CONFIG__ = {
+window.__AI_COUNSEL_CONFIG__ = {
   apiUrl: undefined,
 };

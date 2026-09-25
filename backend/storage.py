@@ -6,9 +6,52 @@ from datetime import datetime, timezone
 from typing import List, Dict, Any, Optional
 from pathlib import Path
 from .config import DATA_DIR
+from .metadata_utils import metadata_used_search
 
 
 INDEX_FILE_NAME = "conversations_index.json"
+VALID_CONVERSATION_MODES = {"council", "advisors"}
+DEFAULT_CONVERSATION_TITLE = "New Conversation"
+
+def is_default_conversation_title(title: Optional[str]) -> bool:
+    """Check if the title is a default, placeholder, or empty title."""
+    return not title or title in (DEFAULT_CONVERSATION_TITLE, "Untitled Conversation", "")
+
+def derive_conversation_title(content: str) -> str:
+    """Derive a short title from the first message content."""
+    if not content or not isinstance(content, str):
+        return "Untitled Conversation"
+    # Normalize whitespace/newlines
+    title = " ".join(content.split())
+    if not title:
+        return "Untitled Conversation"
+    # Strip quotes
+    title = title.strip('"\'')
+    if len(title) > 50:
+        title = title[:47].rstrip() + "..."
+    return title
+
+def maybe_repair_conversation_title(conversation: Dict[str, Any]) -> bool:
+    """Repair conversation title if it is default/placeholder and has user messages."""
+    current_title = conversation.get("title", DEFAULT_CONVERSATION_TITLE)
+    if is_default_conversation_title(current_title):
+        first_user_content = None
+        for msg in conversation.get("messages", []):
+            if msg.get("role") == "user" and msg.get("content"):
+                first_user_content = msg["content"]
+                break
+        if first_user_content:
+            conversation["title"] = derive_conversation_title(first_user_content)
+            return True
+    return False
+
+
+# Keep in sync with frontend/src/constants/critiqueMode.js
+CRITIQUE_MODE_LABELS = {
+    "freeform": "Freeform",
+    "paragraph": "Paragraph",
+    "claim": "Claim-by-Claim",
+}
 
 
 def ensure_data_dir():
@@ -46,6 +89,187 @@ def _save_index(index: List[Dict[str, Any]]):
         json.dump(index, f, indent=2)
 
 
+def _normalize_conversation_mode(mode: Any) -> str:
+    """Return a valid conversation mode, defaulting to council."""
+    if isinstance(mode, str) and mode in VALID_CONVERSATION_MODES:
+        return mode
+    return "council"
+
+
+def _message_is_advisor_debate(message: Dict[str, Any]) -> bool:
+    """Detect advisor debate messages, including older records missing mode."""
+    if message.get("mode") == "advisors" or message.get("type") == "advisor_debate":
+        return True
+
+    metadata = message.get("metadata") or {}
+    has_advisor_metadata = any(
+        key in metadata
+        for key in ("persona_ids", "default_model", "tiebreaker_model", "model_assignments")
+    )
+    has_advisor_payload = (
+        isinstance(message.get("rounds"), list)
+        and (
+            "verdict" in message
+            or "tiebreaker" in message
+            or "personas" in message
+            or has_advisor_metadata
+        )
+    )
+    return has_advisor_payload
+
+
+def infer_conversation_mode(conversation: Dict[str, Any]) -> str:
+    """Infer the conversation mode from explicit metadata and saved messages."""
+    if any(_message_is_advisor_debate(msg) for msg in conversation.get("messages", [])):
+        return "advisors"
+    return _normalize_conversation_mode(conversation.get("mode"))
+
+
+def _is_conversation_record(data: Any) -> bool:
+    """Return whether a JSON object looks like a stored conversation."""
+    return (
+        isinstance(data, dict)
+        and isinstance(data.get("id"), str)
+        and isinstance(data.get("created_at"), str)
+        and isinstance(data.get("messages"), list)
+    )
+
+
+def derive_run_summary(conversation: Dict[str, Any]) -> Optional[str]:
+    """Build a compact sidebar summary from the latest assistant message."""
+    if conversation.get("title", DEFAULT_CONVERSATION_TITLE) == DEFAULT_CONVERSATION_TITLE:
+        return None
+
+    message = None
+    for msg in reversed(conversation.get("messages", [])):
+        if msg.get("role") == "assistant" and not msg.get("error"):
+            message = msg
+            break
+    if message is None:
+        return None
+
+    metadata = message.get("metadata") or {}
+    parts: List[str] = []
+
+    if _message_is_advisor_debate(message):
+        persona_ids = metadata.get("persona_ids") or [
+            persona.get("id")
+            for persona in (message.get("personas") or [])
+            if isinstance(persona, dict) and persona.get("id")
+        ]
+        if persona_ids:
+            parts.append(f"{len(persona_ids)} advisors")
+
+        rounds_executed = metadata.get("rounds_executed")
+        if rounds_executed is None:
+            rounds_executed = len(message.get("rounds") or [])
+        max_rounds = metadata.get("max_rounds")
+        if rounds_executed and max_rounds:
+            parts.append(f"{rounds_executed}/{max_rounds} rnd")
+        elif rounds_executed:
+            parts.append(f"{rounds_executed} rnd")
+
+        if metadata.get("consensus_reached"):
+            parts.append("Consensus")
+    else:
+        execution_mode = metadata.get("execution_mode")
+        critique_mode = metadata.get("critique_mode", "freeform")
+
+        if execution_mode == "chat_only":
+            parts.append("Chat Only")
+        elif execution_mode == "chat_ranking":
+            parts.append("Chat + Ranking")
+        elif execution_mode == "full":
+            rounds = (
+                metadata.get("debate_rounds_executed")
+                or metadata.get("debate_rounds_configured")
+                or 1
+            )
+            parts.append(f"{rounds} rnd")
+            parts.append(CRITIQUE_MODE_LABELS.get(critique_mode, critique_mode))
+            if rounds > 1 and metadata.get("auto_converge"):
+                parts.append("Auto-converge")
+            if metadata.get("converged"):
+                parts.append("Converged early")
+
+    if metadata_used_search(metadata):
+        parts.append("Search")
+
+    return " · ".join(parts) if parts else None
+
+
+def derive_conversation_cost(conversation: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Sum cost_report totals across all assistant messages for sidebar display."""
+    total_cost = 0.0
+    has_any_cost = False
+    has_unknown_costs = False
+    has_estimates = False
+    total_calls = 0
+
+    for msg in conversation.get("messages", []):
+        if msg.get("role") != "assistant" or msg.get("error"):
+            continue
+        report = (msg.get("metadata") or {}).get("cost_report")
+        if not isinstance(report, dict):
+            continue
+
+        has_any_cost = True
+        if report.get("has_unknown_costs"):
+            has_unknown_costs = True
+        if report.get("has_estimates"):
+            has_estimates = True
+
+        report_total = report.get("total_cost")
+        if isinstance(report_total, (int, float)) and not isinstance(report_total, bool):
+            total_cost += float(report_total)
+
+        report_calls = report.get("total_calls")
+        if isinstance(report_calls, int):
+            total_calls += report_calls
+
+    if not has_any_cost:
+        return None
+
+    if has_unknown_costs:
+        cost_status = "partial"
+    elif has_estimates:
+        cost_status = "estimated"
+    elif total_cost == 0:
+        cost_status = "free"
+    else:
+        cost_status = "known"
+
+    return {
+        "total_cost": round(total_cost, 6),
+        "cost_status": cost_status,
+        "total_calls": total_calls,
+    }
+
+
+def _build_index_entry(
+    conversation: Dict[str, Any],
+    *,
+    mode: Optional[str] = None,
+) -> Dict[str, Any]:
+    maybe_repair_conversation_title(conversation)
+    entry = {
+        "id": conversation["id"],
+        "created_at": conversation["created_at"],
+        "title": conversation.get("title", DEFAULT_CONVERSATION_TITLE),
+        "mode": mode if mode is not None else infer_conversation_mode(conversation),
+        "message_count": len(conversation["messages"]),
+    }
+    run_summary = derive_run_summary(conversation)
+    if run_summary:
+        entry["run_summary"] = run_summary
+    cost = derive_conversation_cost(conversation)
+    if cost:
+        entry["total_cost"] = cost["total_cost"]
+        entry["cost_status"] = cost["cost_status"]
+        entry["total_calls"] = cost["total_calls"]
+    return entry
+
+
 def rebuild_index() -> List[Dict[str, Any]]:
     """
     Rebuild the conversation index from actual conversation files.
@@ -60,13 +284,9 @@ def rebuild_index() -> List[Dict[str, Any]]:
             try:
                 with open(path, 'r') as f:
                     data = json.load(f)
-                    index.append({
-                        "id": data["id"],
-                        "created_at": data["created_at"],
-                        "title": data.get("title", "New Conversation"),
-                        "mode": data.get("mode", "council"),
-                        "message_count": len(data["messages"])
-                    })
+                    if not _is_conversation_record(data):
+                        continue
+                    index.append(_build_index_entry(data))
             except (json.JSONDecodeError, OSError):
                 continue
 
@@ -76,22 +296,14 @@ def rebuild_index() -> List[Dict[str, Any]]:
     return index
 
 
-def _update_index_entry(conversation: Dict[str, Any]):
+def _update_index_entry(conversation: Dict[str, Any], *, mode: Optional[str] = None):
     """Update or add a single entry in the index."""
     index = _load_index()
     if index is None:
         index = rebuild_index()
         return  # rebuild already includes the current state if file was saved
 
-    # Create metadata entry
-    entry = {
-        "id": conversation["id"],
-        "created_at": conversation["created_at"],
-        "title": conversation.get("title", "New Conversation"),
-        "mode": conversation.get("mode", "council"),
-        "message_count": len(conversation["messages"])
-    }
-
+    entry = _build_index_entry(conversation, mode=mode)
     # Remove existing entry if present
     index = [item for item in index if item["id"] != conversation["id"]]
     
@@ -133,7 +345,7 @@ def create_conversation(conversation_id: str, mode: str = "council") -> Dict[str
         "id": conversation_id,
         "created_at": datetime.now(timezone.utc).isoformat(),
         "title": "New Conversation",
-        "mode": mode,
+        "mode": _normalize_conversation_mode(mode),
         "messages": []
     }
 
@@ -143,7 +355,7 @@ def create_conversation(conversation_id: str, mode: str = "council") -> Dict[str
         json.dump(conversation, f, indent=2)
 
     # Update index
-    _update_index_entry(conversation)
+    _update_index_entry(conversation, mode=conversation["mode"])
 
     return conversation
 
@@ -164,7 +376,12 @@ def get_conversation(conversation_id: str) -> Optional[Dict[str, Any]]:
         return None
 
     with open(path, 'r') as f:
-        return json.load(f)
+        conversation = json.load(f)
+    if maybe_repair_conversation_title(conversation):
+        # Save to persist the repaired title
+        save_conversation(conversation)
+    conversation["mode"] = infer_conversation_mode(conversation)
+    return conversation
 
 
 def save_conversation(conversation: Dict[str, Any]):
@@ -175,13 +392,15 @@ def save_conversation(conversation: Dict[str, Any]):
         conversation: Conversation dict to save
     """
     ensure_data_dir()
+    conversation["mode"] = infer_conversation_mode(conversation)
+    maybe_repair_conversation_title(conversation)
 
     path = get_conversation_path(conversation['id'])
     with open(path, 'w') as f:
         json.dump(conversation, f, indent=2)
 
     # Update index
-    _update_index_entry(conversation)
+    _update_index_entry(conversation, mode=conversation["mode"])
 
 
 def list_conversations() -> List[Dict[str, Any]]:
@@ -204,13 +423,19 @@ def list_conversations() -> List[Dict[str, Any]]:
     return index
 
 
-def add_user_message(conversation_id: str, content: str, conversation: Optional[Dict[str, Any]] = None):
+def add_user_message(
+    conversation_id: str,
+    content: str,
+    conversation: Optional[Dict[str, Any]] = None,
+    attachments: Optional[List[Dict[str, Any]]] = None,
+):
     """Add a user message to a conversation.
 
     Args:
         conversation_id: Conversation identifier
         content: User message content
         conversation: Pre-loaded conversation dict (avoids redundant disk read)
+        attachments: Optional attachment metadata to store with the message
     """
     if conversation is None:
         conversation = get_conversation(conversation_id)
@@ -221,10 +446,14 @@ def add_user_message(conversation_id: str, content: str, conversation: Optional[
     if len(conversation["messages"]) == 0:
         conversation["created_at"] = datetime.now(timezone.utc).isoformat()
 
-    conversation["messages"].append({
+    message = {
         "role": "user",
         "content": content
-    })
+    }
+    if attachments:
+        message["attachments"] = attachments
+
+    conversation["messages"].append(message)
 
     save_conversation(conversation)
 
@@ -307,6 +536,7 @@ def add_advisor_message(
     if metadata:
         message["metadata"] = metadata
 
+    conversation["mode"] = "advisors"
     conversation["messages"].append(message)
     save_conversation(conversation)
 

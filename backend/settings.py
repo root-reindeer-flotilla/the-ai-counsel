@@ -2,7 +2,6 @@
 
 import json
 import logging
-import os
 from pathlib import Path
 from typing import Optional, List, Dict, Any
 from pydantic import BaseModel, Field
@@ -41,6 +40,8 @@ SETTINGS_FILE = Path(__file__).parent.parent / "data" / "settings.json"
 # Default models (matches original llm-council defaults)
 DEFAULT_COUNCIL_MODELS = ["", ""]
 DEFAULT_CHAIRMAN_MODEL = ""
+FONT_SIZE_DEFAULT = "default"
+VALID_FONT_SIZES = ("default", "large")
 
 # Default enabled providers
 DEFAULT_ENABLED_PROVIDERS = {
@@ -49,7 +50,10 @@ DEFAULT_ENABLED_PROVIDERS = {
     "ollama": False,
     "groq": False,
     "direct": False,  # Master toggle for all direct connections
-    "custom": False   # Custom OpenAI-compatible endpoint
+    "custom": False,  # Custom OpenAI-compatible endpoint
+    "xai-oauth": False,
+    "openai-oauth": False,
+    "github-copilot": False,
 }
 
 # Default direct provider toggles (individual)
@@ -61,6 +65,8 @@ DEFAULT_DIRECT_PROVIDER_TOGGLES = {
     "deepseek": False,
     "groq": False,
     "nvidia": False,
+    "opencode-zen": False,
+    "opencode-go": False,
 }
 
 
@@ -96,7 +102,9 @@ from .prompts import (
     STAGE3_PROMPT_DEFAULT,
     TITLE_PROMPT_DEFAULT,
     QUERY_PROMPT_DEFAULT,
-    STAGE4_CORRECTED_DRAFT_PROMPT
+    STAGE4_CORRECTED_DRAFT_PROMPT,
+    RESPONSE_LANGUAGE_DEFAULT,
+    VALID_RESPONSE_LANGUAGES,
 )
 from .advisor_prompts import (
     ADVISOR_ROUND1_PROMPT,
@@ -127,6 +135,7 @@ class Settings(BaseModel):
     deepseek_api_key: Optional[str] = None
     groq_api_key: Optional[str] = None
     nvidia_api_key: Optional[str] = None
+    opencode_api_key: Optional[str] = None
 
     # Ollama Settings
     ollama_base_url: str = "http://localhost:11434"
@@ -167,6 +176,11 @@ class Settings(BaseModel):
     title_prompt: str = TITLE_PROMPT_DEFAULT
     query_prompt: str = QUERY_PROMPT_DEFAULT
     
+    # Display Preferences
+    date_format: str = "auto"  # "auto", "MM/DD/YYYY", "DD/MM/YYYY", "YYYY-MM-DD"
+    response_language: str = RESPONSE_LANGUAGE_DEFAULT
+    font_size: str = FONT_SIZE_DEFAULT
+
     # Execution Mode
     execution_mode: str = "full"  # Default execution mode: 'chat_only', 'chat_ranking', 'full'
 
@@ -188,6 +202,13 @@ class Settings(BaseModel):
     advisor_tiebreaker_prompt: str = ADVISOR_TIEBREAKER_PROMPT
     advisor_presets: List[AdvisorPreset] = Field(default_factory=list)
     council_presets: List[CouncilPreset] = Field(default_factory=list)
+
+    # Credential storage preference (secrets live in credentials.json or OS keyring)
+    credential_storage: str = "file"  # "file" | "keyring"
+    credentials_migrated: bool = False
+    relay_ai_import_dismissed: bool = False
+    # Secret IDs ignored even if present in env (Disconnect from Settings).
+    disabled_secret_ids: List[str] = Field(default_factory=list)
 
 
 PROMPT_DEFAULTS = {
@@ -338,9 +359,24 @@ def _normalize_council_presets(raw_presets: Any) -> List[Dict[str, Any]]:
     return normalized
 
 
+VALID_DATE_FORMATS = ("auto", "MM/DD/YYYY", "DD/MM/YYYY", "YYYY-MM-DD")
+
+
+def _normalize_display_preferences(data: dict) -> dict:
+    """Coerce invalid display preference values to safe defaults."""
+    normalized = dict(data)
+    if normalized.get("response_language") not in VALID_RESPONSE_LANGUAGES:
+        normalized["response_language"] = RESPONSE_LANGUAGE_DEFAULT
+    if normalized.get("date_format") not in VALID_DATE_FORMATS:
+        normalized["date_format"] = "auto"
+    if normalized.get("font_size") not in VALID_FONT_SIZES:
+        normalized["font_size"] = FONT_SIZE_DEFAULT
+    return normalized
+
+
 def _normalize_prompt_defaults(data: dict) -> dict:
     """Backfill defaults for older settings files that persisted invalid values."""
-    normalized = dict(data)
+    normalized = _normalize_display_preferences(dict(data))
     for key, default in PROMPT_DEFAULTS.items():
         value = normalized.get(key)
         if not isinstance(value, str) or not value.strip():
@@ -382,16 +418,32 @@ def get_settings() -> Settings:
     return Settings()
 
 
+def _redact_secret_fields(data: Dict[str, Any]) -> Dict[str, Any]:
+    """Keep API keys out of settings.json (credential store is source of truth)."""
+    from .credentials.ids import SETTINGS_FIELD_TO_SECRET_ID
+
+    redacted = dict(data)
+    for field in SETTINGS_FIELD_TO_SECRET_ID:
+        redacted[field] = None
+    return redacted
+
+
 def save_settings(settings: Settings) -> None:
-    """Save settings to file and update cache."""
+    """Save settings to file and update cache.
+
+    Secret fields are always written as null — imports and Retest use the
+    credential store (data/credentials.json or OS keystore), not settings.json.
+    """
     global _settings_cache, _settings_mtime
 
     SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
 
+    payload = _redact_secret_fields(settings.model_dump())
     with open(SETTINGS_FILE, "w") as f:
-        json.dump(settings.model_dump(), f, indent=2)
+        json.dump(payload, f, indent=2)
 
-    _settings_cache = settings
+    # Cache the redacted model so in-memory reads match on-disk settings.json.
+    _settings_cache = Settings(**payload)
     _settings_mtime = SETTINGS_FILE.stat().st_mtime
 
 
@@ -400,7 +452,51 @@ def update_settings(**kwargs) -> Settings:
     current = get_settings()
     updated_data = current.model_dump()
     updated_data.update(kwargs)
+    # Never persist secrets via kwargs (route through credential store instead).
+    updated_data = _redact_secret_fields(updated_data)
     updated_data = _normalize_prompt_defaults(updated_data)
     updated = Settings(**updated_data)
     save_settings(updated)
     return updated
+
+
+def remove_persona_from_advisor_presets(persona_id: str) -> bool:
+    """Remove a deleted persona from saved presets and model assignments.
+
+    Presets are retained so users can repair a panel that no longer has two
+    advisors, but they must not keep references to a persona that no longer
+    exists.
+    """
+    persona_id = persona_id.strip()
+    if not persona_id:
+        return False
+
+    current = get_settings()
+    cleaned_presets = []
+    changed = False
+
+    for preset in current.advisor_presets:
+        persona_ids = [pid for pid in preset.persona_ids if pid != persona_id]
+        model_assignments = preset.model_assignments
+        if model_assignments is not None:
+            model_assignments = {
+                pid: model
+                for pid, model in model_assignments.items()
+                if pid != persona_id
+            }
+
+        if persona_ids != preset.persona_ids or model_assignments != preset.model_assignments:
+            changed = True
+
+        cleaned_presets.append(preset.model_copy(update={
+            "persona_ids": persona_ids,
+            "model_assignments": model_assignments,
+        }))
+
+    if not changed:
+        return False
+
+    update_settings(
+        advisor_presets=[preset.model_dump() for preset in cleaned_presets]
+    )
+    return True

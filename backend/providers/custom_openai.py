@@ -1,8 +1,11 @@
 """Custom OpenAI-compatible endpoint provider."""
 
 import httpx
+
+from .errors import describe_exception
 from typing import List, Dict, Any
 from .base import LLMProvider
+from .temperature import add_temperature_if_supported
 from ..settings import get_settings
 
 
@@ -14,7 +17,8 @@ class CustomOpenAIProvider(LLMProvider):
         settings = get_settings()
         name = settings.custom_endpoint_name or "Custom"
         url = settings.custom_endpoint_url or ""
-        api_key = settings.custom_endpoint_api_key or ""
+        from ..credentials import get_api_key
+        api_key = get_api_key("custom_endpoint")
         return name, url, api_key
 
     async def query(self, model_id: str, messages: List[Dict[str, str]], timeout: float = 120.0, temperature: float = 0.7) -> Dict[str, Any]:
@@ -36,14 +40,19 @@ class CustomOpenAIProvider(LLMProvider):
                 headers["Authorization"] = f"Bearer {api_key}"
 
             async with httpx.AsyncClient(timeout=timeout) as client:
+                payload = add_temperature_if_supported(
+                    {
+                        "model": model,
+                        "messages": messages,
+                    },
+                    model,
+                    "custom",
+                    temperature,
+                )
                 response = await client.post(
                     f"{base_url}/chat/completions",
                     headers=headers,
-                    json={
-                        "model": model,
-                        "messages": messages,
-                        "temperature": temperature
-                    }
+                    json=payload
                 )
 
                 if response.status_code != 200:
@@ -54,21 +63,14 @@ class CustomOpenAIProvider(LLMProvider):
 
                 data = response.json()
                 content = data["choices"][0]["message"]["content"]
-                usage = data.get("usage") or {}
-                return {
-                    "content": content,
-                    "usage": usage,
-                    "response_id": data.get("id"),
-                    "total_tokens": usage.get("total_tokens"),
-                    "error": False
-                }
+                return {"content": content, "usage": data.get("usage"), "error": False}
 
         except httpx.TimeoutException:
             return {"error": True, "error_message": f"Request timed out after {int(timeout)}s — {name} did not respond"}
         except httpx.ConnectError:
             return {"error": True, "error_message": f"Connection failed — check the {name} endpoint URL"}
         except Exception as e:
-            return {"error": True, "error_message": str(e) or repr(e)}
+            return {"error": True, "error_message": describe_exception(e, timeout)}
 
     async def get_models(self) -> List[Dict[str, Any]]:
         name, base_url, api_key = self._get_config()

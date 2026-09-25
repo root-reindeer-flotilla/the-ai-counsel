@@ -497,7 +497,7 @@ async def test_run_debate_aborts_when_cross_pollination_extract_fails():
 
 
 @pytest.mark.asyncio
-async def test_run_debate_marks_over_word_limit_response_as_error():
+async def test_run_debate_keeps_over_word_limit_response_with_warning():
     long_response = " ".join(["word"] * 151) + "\nCONSENSUS_SCORE: 5"
     responses = {
         "skeptic": (long_response, None),
@@ -516,9 +516,12 @@ async def test_run_debate_marks_over_word_limit_response_as_error():
 
     first_round = next(e for e in events if e["type"] == "advisor_round_complete")
     skeptic_resp = next(r for r in first_round["data"]["responses"] if r["persona_id"] == "skeptic")
-    assert skeptic_resp["error"] == "Advisor response exceeded 150 word limit."
+    assert skeptic_resp["error"] is None
+    assert skeptic_resp["warning"] == "Advisor response exceeded the 150 word guidance and was kept."
+    assert skeptic_resp["word_limit_exceeded"] is True
+    assert skeptic_resp["consensus_score"] == 5
     assert skeptic_resp["word_count"] == 151
-    assert first_round["data"]["consensus_reached"] is False
+    assert first_round["data"]["consensus_reached"] is True
 
 
 @pytest.mark.asyncio
@@ -551,6 +554,34 @@ async def test_run_debate_verdict_prompt_includes_debate_arc_and_final_consensus
     assert "Round 1 summary" in verdict_prompt
     assert "Final round summary" in verdict_prompt
     assert "Final consensus score: 3" in verdict_prompt
+
+
+@pytest.mark.asyncio
+async def test_run_debate_propagates_conversation_id_to_advisors_and_neutral_calls():
+    async def advisor(pid, prompt, personas_map, model_assignments, default_model, temperature, conversation_id=None):
+        return pid, default_model, f"{pid} position.\nCONSENSUS_SCORE: 2", None
+
+    with patch("backend.advisors._query_advisor", side_effect=advisor) as mock_advisor:
+        with patch("backend.advisors._query_neutral", new_callable=AsyncMock) as mock_neutral:
+            mock_neutral.return_value = _neutral_response("Extract or verdict")
+            await _collect_events(run_debate(
+                question="What should we do?",
+                persona_ids=["skeptic", "pragmatist", "innovator"],
+                default_model=DEFAULT_MODEL,
+                max_rounds=3,
+                conversation_id="conversation-advisor",
+            ))
+
+    assert mock_advisor.await_args_list
+    assert all(
+        call.kwargs["conversation_id"] == "conversation-advisor"
+        for call in mock_advisor.await_args_list
+    )
+    assert mock_neutral.await_args_list
+    assert all(
+        call.kwargs["conversation_id"] == "conversation-advisor"
+        for call in mock_neutral.await_args_list
+    )
 
 
 @pytest.mark.asyncio

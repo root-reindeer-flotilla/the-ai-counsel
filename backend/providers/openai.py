@@ -1,8 +1,11 @@
 """OpenAI provider implementation."""
 
 import httpx
+
+from .errors import describe_exception
 from typing import List, Dict, Any
 from .base import LLMProvider
+from .temperature import add_temperature_if_supported
 from ..settings import get_settings
 
 class OpenAIProvider(LLMProvider):
@@ -11,8 +14,9 @@ class OpenAIProvider(LLMProvider):
     BASE_URL = "https://api.openai.com/v1"
     
     def _get_api_key(self) -> str:
-        settings = get_settings()
-        return settings.openai_api_key or ""
+        from ..credentials import get_api_key
+        return get_api_key("openai")
+
 
     async def query(self, model_id: str, messages: List[Dict[str, str]], timeout: float = 120.0, temperature: float = 0.7) -> Dict[str, Any]:
         api_key = self._get_api_key()
@@ -24,17 +28,22 @@ class OpenAIProvider(LLMProvider):
         
         try:
             async with httpx.AsyncClient(timeout=timeout) as client:
+                payload = add_temperature_if_supported(
+                    {
+                        "model": model,
+                        "messages": messages,
+                    },
+                    model,
+                    "openai",
+                    temperature,
+                )
                 response = await client.post(
                     f"{self.BASE_URL}/chat/completions",
                     headers={
                         "Authorization": f"Bearer {api_key}",
                         "Content-Type": "application/json"
                     },
-                    json={
-                        "model": model,
-                        "messages": messages,
-                        "temperature": 1.0 if any(x in model for x in ["gpt-5.1", "o1-", "o3-"]) else temperature
-                    }
+                    json=payload
                 )
                 
                 if response.status_code != 200:
@@ -45,17 +54,10 @@ class OpenAIProvider(LLMProvider):
                     
                 data = response.json()
                 content = data["choices"][0]["message"]["content"]
-                usage = data.get("usage") or {}
-                return {
-                    "content": content,
-                    "usage": usage,
-                    "response_id": data.get("id"),
-                    "total_tokens": usage.get("total_tokens"),
-                    "error": False
-                }
+                return {"content": content, "usage": data.get("usage"), "error": False}
                 
         except Exception as e:
-            return {"error": True, "error_message": str(e)}
+            return {"error": True, "error_message": describe_exception(e, timeout)}
 
     async def get_models(self) -> List[Dict[str, Any]]:
         api_key = self._get_api_key()

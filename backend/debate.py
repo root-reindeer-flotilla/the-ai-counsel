@@ -6,6 +6,7 @@ import logging
 from typing import Any, AsyncGenerator, Dict, List, Optional
 
 from .settings import get_settings
+from .prompts import apply_response_language
 from .config import get_council_models, get_chairman_model
 from .council import (
     stage1_collect_responses,
@@ -14,6 +15,7 @@ from .council import (
     calculate_aggregate_rankings,
     build_stage_texts,
 )
+from .costs import build_iterative_debate_cost_report
 
 logger = logging.getLogger(__name__)
 
@@ -84,6 +86,8 @@ def format_numbered_paragraphs(response_text: str) -> str:
 async def extract_canonical_claims(
     responses_text: str,
     chairman_model: Optional[str] = None,
+    *,
+    conversation_id: Optional[str] = None,
 ) -> Optional[Dict[str, List[Dict[str, str]]]]:
     """Extract canonical claims via single LLM call using the chairman model.
 
@@ -95,13 +99,22 @@ async def extract_canonical_claims(
     from .council import query_model
     from .json_repair import extract_json_block
 
-    prompt = CLAIM_EXTRACTION_PROMPT.format(responses_text=responses_text)
+    settings = get_settings()
+    prompt = apply_response_language(
+        CLAIM_EXTRACTION_PROMPT.format(responses_text=responses_text),
+        settings.response_language,
+    )
     messages = [{"role": "user", "content": prompt}]
 
     extractor = chairman_model or get_chairman_model()
     try:
         response = await asyncio.wait_for(
-            query_model(extractor, messages, temperature=0.2),
+            query_model(
+                extractor,
+                messages,
+                temperature=0.2,
+                conversation_id=conversation_id,
+            ),
             timeout=90.0,
         )
     except asyncio.TimeoutError:
@@ -360,6 +373,8 @@ async def run_iterative_debate(
     chairman_override: Optional[str] = None,
     history: Optional[List[Dict[str, str]]] = None,
     debate_rounds: Optional[int] = None,
+    *,
+    conversation_id: Optional[str] = None,
 ) -> AsyncGenerator[Dict[str, Any], None]:
     """
     Orchestrate multi-round debate. Yields SSE-ready event dicts.
@@ -444,7 +459,10 @@ async def run_iterative_debate(
                         own_claims_with_critiques=own_critiques,
                         top_claims_from_others=top_text,
                     )
-                    per_model_messages[model] = [{"role": "user", "content": prompt}]
+                    per_model_messages[model] = [{
+                        "role": "user",
+                        "content": apply_response_language(prompt, settings.response_language),
+                    }]
 
             elif effective_mode == "paragraph" and previous_rankings:
                 # Per-model personalized prompts for paragraph mode
@@ -466,7 +484,10 @@ async def run_iterative_debate(
                         own_paragraphs_with_critiques=own_paras,
                         top_paragraphs_from_others=top_paras,
                     )
-                    per_model_messages[model] = [{"role": "user", "content": prompt}]
+                    per_model_messages[model] = [{
+                        "role": "user",
+                        "content": apply_response_language(prompt, settings.response_language),
+                    }]
 
             elif execution_mode == "full" and previous_synthesis:
                 # Freeform mode (or fallback)
@@ -477,7 +498,10 @@ async def run_iterative_debate(
                     previous_synthesis=truncate_text(previous_synthesis, MAX_SYNTHESIS_CHARS),
                     previous_rankings_summary=_build_rankings_summary(previous_rankings or []),
                 )
-                messages_override = [{"role": "user", "content": round_prompt}]
+                messages_override = [{
+                    "role": "user",
+                    "content": apply_response_language(round_prompt, settings.response_language),
+                }]
             else:
                 # chat_ranking mode: feedback from rankings only
                 round_prompt = STAGE1_ROUND_N_CHAT_RANKING_PROMPT.format(
@@ -489,7 +513,10 @@ async def run_iterative_debate(
                     total_models=len(previous_rankings or []),
                     rank_feedback="Improve your response based on peer feedback.",
                 )
-                messages_override = [{"role": "user", "content": round_prompt}]
+                messages_override = [{
+                    "role": "user",
+                    "content": apply_response_language(round_prompt, settings.response_language),
+                }]
 
         # --- Stage 1 ---
         yield {"type": "stage1_start", "round": round_num}
@@ -506,6 +533,7 @@ async def run_iterative_debate(
             history=history if round_num == 1 else None,
             messages_override=messages_override,
             per_model_messages=per_model_messages,
+            conversation_id=conversation_id,
         ):
             if isinstance(item, int):
                 total_models = item
@@ -575,7 +603,9 @@ async def run_iterative_debate(
                 ])
 
                 canonical_claims = await extract_canonical_claims(
-                    responses_text_for_extraction, chairman_override
+                    responses_text_for_extraction,
+                    chairman_override,
+                    conversation_id=conversation_id,
                 )
 
                 if canonical_claims is None:
@@ -612,6 +642,7 @@ async def run_iterative_debate(
             async for item in stage2_collect_rankings(
                 user_query, stage1_results, search_context, request,
                 prompt_override=stage2_prompt_override,
+                conversation_id=conversation_id,
             ):
                 if isinstance(item, dict) and not item.get("model"):
                     label_to_model = item
@@ -733,6 +764,7 @@ async def run_iterative_debate(
                 user_query, stage1_results, stage2_results, search_context,
                 chairman_override=chairman_override,
                 prompt_override=prompt_override,
+                conversation_id=conversation_id,
             )
             yield {"type": "stage3_complete", "data": stage3_result, "round": round_num}
 
@@ -800,6 +832,7 @@ async def run_iterative_debate(
             user_query, [], [], "",
             chairman_override=chairman_override,
             prompt_override=stage4_prompt,
+            conversation_id=conversation_id,
         )
         yield {"type": "stage4_complete", "data": stage4_result}
 
@@ -811,4 +844,5 @@ async def run_iterative_debate(
         "critique_mode": critique_mode,
         "stage4": stage4_result,
         "rounds": all_rounds_data,
+        "cost_report": build_iterative_debate_cost_report(all_rounds_data, stage4_result),
     }

@@ -1,5 +1,13 @@
 import React, { useState } from 'react';
+import { formatDatePart, formatTimePart } from '../utils/dateFormat';
+import { formatSidebarCost, sidebarCostTooltip } from '../utils/formatCost';
 import './Sidebar.css';
+
+const getConversationMode = (conversation) => (
+  conversation?.mode === 'advisors' ? 'advisors' : 'council'
+);
+
+const getConversationTitle = (conv) => conv.title || 'New Conversation';
 
 export default function Sidebar({
   conversations,
@@ -14,15 +22,19 @@ export default function Sidebar({
   isOpen,
   onClose,
   onGoHome,
+  dateFormat = 'auto',
 }) {
   const [confirmingDelete, setConfirmingDelete] = useState(null);
   const [searchQuery, setSearchQuery] = useState('');
 
-  // Filter conversations by title
   const filteredConversations = conversations.filter(conv => {
     if (!searchQuery.trim()) return true;
-    const title = conv.title || 'New Conversation';
-    return title.toLowerCase().includes(searchQuery.toLowerCase());
+    const query = searchQuery.toLowerCase();
+    const haystack = [
+      getConversationTitle(conv),
+      conv.run_summary || '',
+    ].join(' ').toLowerCase();
+    return haystack.includes(query);
   });
 
   const handleAbortClick = (e) => {
@@ -59,9 +71,9 @@ export default function Sidebar({
         
         <div className="sidebar-header">
         <div className="sidebar-title-wrapper">
-          <div className="sidebar-title">LLM Council <span className="title-plus">Plus</span></div>
-          <div className="sidebar-subtitle">Created by: <a href="https://github.com/jacob-bd" target="_blank" rel="noopener noreferrer" style={{ color: 'inherit', textDecoration: 'none', borderBottom: '1px dotted rgba(255,255,255,0.3)', paddingBottom: '1px', transition: 'border-color 0.2s' }} onMouseEnter={e => e.target.style.borderBottomColor = 'rgba(255,255,255,0.7)'} onMouseLeave={e => e.target.style.borderBottomColor = 'rgba(255,255,255,0.3)'}>Jacob Ben-David</a></div>
-          <div className="sidebar-version">v0.7.0</div>
+          <div className="sidebar-title">The AI <span className="title-plus">Counsel</span></div>
+          <div className="sidebar-subtitle">Created by: <a href="https://github.com/jacob-bd" target="_blank" rel="noopener noreferrer" style={{ color: 'inherit', textDecoration: 'none', borderBottom: '1px dotted rgba(255,255,255,0.3)', paddingBottom: '1px', transition: 'border-color 0.2s' }} onMouseEnter={e => e.target.style.borderBottomColor = 'rgba(255,255,255,0.7)'} onMouseLeave={e => e.target.style.borderBottomColor = 'rgba(255,255,255,0.3)'}>jacob-bd</a></div>
+          <div className="sidebar-version">v0.13.1</div>
         </div>
         <button
           className="icon-button"
@@ -124,53 +136,79 @@ export default function Sidebar({
             {searchQuery ? 'No matching conversations' : 'No history'}
           </div>
         ) : (
-          filteredConversations.map((conv) => (
-            <div
-              key={conv.id}
-              className={`conversation-item ${conv.id === currentConversationId ? 'active' : ''}`}
-              onClick={() => onSelectConversation(conv.id)}
-            >
-              <div className="conversation-title">
-                <span className={`conv-mode-tag conv-mode-tag--${conv.mode === 'advisors' ? 'advisors' : 'council'}`}>
-                  {conv.mode === 'advisors' ? 'ADV' : 'CNC'}
-                </span>
-                {conv.title || 'New Conversation'}
-              </div>
-              <div className="conversation-meta">
-                <span>{new Date(conv.created_at).toLocaleDateString()}</span>
-                {isLoading && conv.id === currentConversationId ? (
-                  <button className="stop-generation-btn small" onClick={handleAbortClick}>
-                    Stop
-                  </button>
-                ) : confirmingDelete === conv.id ? (
-                  <div className="delete-confirm">
-                    <button
-                      className="confirm-yes-btn"
-                      onClick={(e) => handleConfirmDelete(e, conv.id)}
-                      title="Confirm delete"
-                    >
-                      ✓
-                    </button>
-                    <button
-                      className="confirm-no-btn"
-                      onClick={handleCancelDelete}
-                      title="Cancel"
-                    >
-                      ✕
-                    </button>
+          filteredConversations.map((conv) => {
+            const mode = getConversationMode(conv);
+            const displayTitle = getConversationTitle(conv);
+            return (
+              <div
+                key={conv.id}
+                className={`conversation-item conversation-item--${mode} ${conv.id === currentConversationId ? 'active' : ''}`}
+                onClick={() => onSelectConversation(conv.id)}
+              >
+                <div className="conversation-title" title={displayTitle}>
+                  <span className={`conv-mode-tag conv-mode-tag--${mode}`}>
+                    {mode === 'advisors' ? 'ADV' : 'CNC'}
+                  </span>
+                  <span className="conversation-title-text conversation-item-clamp">{displayTitle}</span>
+                </div>
+                {conv.run_summary && (
+                  <div className="conversation-run-summary conversation-item-clamp" title={conv.run_summary}>
+                    {conv.run_summary}
                   </div>
-                ) : (
-                  <button
-                    className="delete-btn"
-                    onClick={(e) => handleDeleteClick(e, conv.id)}
-                    title="Delete conversation"
-                  >
-                    🗑️
-                  </button>
                 )}
+                <div className="conversation-meta">
+                  <div className="conversation-meta__left">
+                    {conv.total_cost != null && (
+                      <span
+                        className="conversation-cost-pill"
+                        title={sidebarCostTooltip(conv.total_cost, conv.cost_status, conv.total_calls)}
+                      >
+                        {formatSidebarCost(conv.total_cost, conv.cost_status)}
+                      </span>
+                    )}
+                    <span className="conversation-timestamp">
+                      <span className="conversation-timestamp__date">
+                        {formatDatePart(conv.created_at, dateFormat)}
+                      </span>
+                      <span className="conversation-timestamp__time">
+                        {formatTimePart(conv.created_at, dateFormat)}
+                      </span>
+                    </span>
+                  </div>
+                  {isLoading && conv.id === currentConversationId ? (
+                    <button className="stop-generation-btn small" onClick={handleAbortClick}>
+                      Stop
+                    </button>
+                  ) : confirmingDelete === conv.id ? (
+                    <div className="delete-confirm">
+                      <button
+                        className="confirm-yes-btn"
+                        onClick={(e) => handleConfirmDelete(e, conv.id)}
+                        title="Confirm delete"
+                      >
+                        ✓
+                      </button>
+                      <button
+                        className="confirm-no-btn"
+                        onClick={handleCancelDelete}
+                        title="Cancel"
+                      >
+                        ✕
+                      </button>
+                    </div>
+                  ) : (
+                    <button
+                      className="delete-btn"
+                      onClick={(e) => handleDeleteClick(e, conv.id)}
+                      title="Delete conversation"
+                    >
+                      🗑️
+                    </button>
+                  )}
+                </div>
               </div>
-            </div>
-          ))
+            );
+          })
         )}
       </div>
     </div>

@@ -1,6 +1,8 @@
 """Google Gemini provider implementation."""
 
 import httpx
+
+from .errors import describe_exception
 from typing import List, Dict, Any
 from .base import LLMProvider
 from ..settings import get_settings
@@ -11,8 +13,9 @@ class GoogleProvider(LLMProvider):
     BASE_URL = "https://generativelanguage.googleapis.com/v1beta/models"
     
     def _get_api_key(self) -> str:
-        settings = get_settings()
-        return settings.google_api_key or ""
+        from ..credentials import get_api_key
+        return get_api_key("google")
+
 
     async def query(self, model_id: str, messages: List[Dict[str, str]], timeout: float = 120.0, temperature: float = 0.7) -> Dict[str, Any]:
         api_key = self._get_api_key()
@@ -20,7 +23,7 @@ class GoogleProvider(LLMProvider):
             return {"error": True, "error_message": "Google API key not configured"}
             
         model = model_id.removeprefix("google:")
-
+        
         # Convert messages to Gemini format
         contents = []
         system_instruction = None
@@ -60,23 +63,12 @@ class GoogleProvider(LLMProvider):
                 data = response.json()
                 try:
                     content = data["candidates"][0]["content"]["parts"][0]["text"]
-                    usage = data.get("usageMetadata") or {}
-                    total_tokens = usage.get("totalTokenCount")
-                    return {
-                        "content": content,
-                        "usage": {
-                            "prompt_tokens": usage.get("promptTokenCount"),
-                            "completion_tokens": usage.get("candidatesTokenCount"),
-                            "total_tokens": total_tokens,
-                        },
-                        "total_tokens": total_tokens,
-                        "error": False
-                    }
+                    return {"content": content, "usage": data.get("usageMetadata"), "error": False}
                 except (KeyError, IndexError):
                     return {"error": True, "error_message": "Unexpected response format from Google API"}
                 
         except Exception as e:
-            return {"error": True, "error_message": str(e)}
+            return {"error": True, "error_message": describe_exception(e, timeout)}
 
     async def get_models(self) -> List[Dict[str, Any]]:
         api_key = self._get_api_key()

@@ -10,7 +10,7 @@ If you want to run the MCP server locally and point it at a remote backend, see 
 
 ## Prerequisites
 
-- LLM Council Plus running in a container (see [docs/DOCKER.md](../DOCKER.md))
+- The AI Counsel running in a container (see [docs/DOCKER.md](../DOCKER.md))
 - Port `8001` accessible from your client machine (or via VPN/reverse proxy)
 
 ---
@@ -20,14 +20,14 @@ If you want to run the MCP server locally and point it at a remote backend, see 
 Because the SSE server is hosted directly under `/mcp`, you can register it with a single command pointing to your server's main port (`8001`):
 
 ```bash
-claude mcp add llm-council --url http://yourserver.com:8001/mcp/sse
+claude mcp add --transport sse the-ai-counsel http://yourserver.com:8001/mcp/sse
 ```
 
 Replace `yourserver.com` with your server's IP address or domain.
 
 For Gemini CLI:
 ```bash
-gemini mcp add llm-council --url http://yourserver.com:8001/mcp/sse
+gemini mcp add the-ai-counsel --url http://yourserver.com:8001/mcp/sse
 ```
 
 ---
@@ -74,14 +74,14 @@ A successful response confirms the MCP server reached the backend (via `provider
 }
 ```
 
-Confirm `"mcp": {"tools": 9}` in `GET /api/health`.
+Confirm `"mcp": {"tools": 10}` in `GET /api/health`.
 
 ---
 
 ## Troubleshooting
 
 **"Connection refused" on port 8001**
-- Confirm the LLM Council Plus container is running: `docker ps`
+- Confirm the The AI Counsel container is running: `docker ps`
 - Verify firewall rules allow inbound traffic on `8001`.
 
 **Tools return errors but health check passes**

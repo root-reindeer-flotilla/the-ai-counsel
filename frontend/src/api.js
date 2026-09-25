@@ -1,18 +1,28 @@
 /**
- * API client for the LLM Council backend.
+ * API client for The AI Counsel backend.
  */
 
 // Dynamically determine API base URL based on current hostname
 // This allows the app to work on both localhost and network IPs
+// In Vite dev, the backend port comes from PORT_BACKEND (see vite.config.js).
+// In Docker/production the backend serves the UI, so an empty apiUrl means
+// "same origin" and follows whatever port the container is actually on.
+const BACKEND_PORT = typeof __BACKEND_PORT__ !== 'undefined' ? __BACKEND_PORT__ : '8001';
+
 const getApiBase = () => {
-  if (window.__LLM_COUNCIL_CONFIG__?.apiUrl !== undefined) {
-    return window.__LLM_COUNCIL_CONFIG__.apiUrl;
+  if (window.__AI_COUNSEL_CONFIG__?.apiUrl) {
+    return window.__AI_COUNSEL_CONFIG__.apiUrl;
   }
   if (import.meta.env.VITE_API_URL) {
     return import.meta.env.VITE_API_URL;
   }
-  const hostname = window.location.hostname;
-  return `http://${hostname}:8001`;
+  if (import.meta.env.DEV) {
+    return `http://${window.location.hostname}:${BACKEND_PORT}`;
+  }
+  if (window.__AI_COUNSEL_CONFIG__) {
+    return window.location.origin;
+  }
+  return `http://${window.location.hostname}:${BACKEND_PORT}`;
 };
 
 const API_BASE = getApiBase();
@@ -261,6 +271,24 @@ export const api = {
   },
 
   /**
+   * Test the OpenCode API key (against Zen and/or Go).
+   * Pass product='zen' or 'go' to test a single product; omit to test both.
+   */
+  async testOpencodeKey(apiKey, product = null) {
+    const response = await fetch(`${API_BASE}/api/settings/test-opencode`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ api_key: apiKey, product }),
+    });
+    if (!response.ok) {
+      throw new Error('Failed to test OpenCode key');
+    }
+    return response.json();
+  },
+
+  /**
    * Test Ollama connection.
    */
   async testOllamaConnection(baseUrl) {
@@ -394,6 +422,38 @@ export const api = {
     return response.json();
   },
 
+  async createPersona(fields) {
+    const response = await fetch(`${API_BASE}/api/personas`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(fields),
+    });
+    if (!response.ok) throw new Error('Failed to create advisor');
+    return response.json();
+  },
+
+  async deletePersona(personaId) {
+    const response = await fetch(`${API_BASE}/api/personas/${personaId}`, {
+      method: 'DELETE',
+    });
+    if (!response.ok) throw new Error('Failed to delete advisor');
+    return response.json();
+  },
+
+  async extractDocuments(files) {
+    const formData = new FormData();
+    files.forEach((file) => formData.append('files', file));
+    const response = await fetch(`${API_BASE}/api/documents/extract`, {
+      method: 'POST',
+      body: formData,
+    });
+    if (!response.ok) {
+      const data = await response.json().catch(() => ({}));
+      throw new Error(data.detail || 'Failed to extract documents');
+    }
+    return response.json();
+  },
+
   async sendDebateStream(conversationId, options, onEvent, signal) {
     const body = {
       question: options.question,
@@ -404,6 +464,9 @@ export const api = {
       max_rounds: options.maxRounds || 3,
       search_provider: options.searchProvider || null,
     };
+    if (options.documents && options.documents.length > 0) {
+      body.documents = options.documents;
+    }
 
     const response = await fetch(
       `${API_BASE}/api/conversations/${conversationId}/debate/stream?_t=${Date.now()}`,
@@ -444,6 +507,7 @@ export const api = {
       executionMode = 'full',
       councilModels = null,
       chairmanModel = null,
+      documents = null,
     } = options;
     const body = {
       content,
@@ -455,6 +519,9 @@ export const api = {
     }
     if (chairmanModel) {
       body.chairman_model = chairmanModel;
+    }
+    if (documents && documents.length > 0) {
+      body.documents = documents;
     }
     const response = await fetch(
       `${API_BASE}/api/conversations/${conversationId}/message/stream?_t=${Date.now()}`,
@@ -488,6 +555,7 @@ export const api = {
       councilModels = null,
       chairmanModel = null,
       debateRounds = null,
+      documents = null,
     } = options;
     const body = {
       content,
@@ -500,6 +568,9 @@ export const api = {
     }
     if (chairmanModel) {
       body.chairman_model = chairmanModel;
+    }
+    if (documents && documents.length > 0) {
+      body.documents = documents;
     }
     const response = await fetch(
       `${API_BASE}/api/conversations/${conversationId}/message/debate?_t=${Date.now()}`,
@@ -520,5 +591,95 @@ export const api = {
     }
 
     await _consumeSSEStream(response.body, onEvent);
+  },
+
+  async startOAuth(providerId) {
+    const response = await fetch(`${API_BASE}/api/oauth/${encodeURIComponent(providerId)}/start`, {
+      method: 'POST',
+    });
+    if (!response.ok) {
+      const data = await response.json().catch(() => ({}));
+      throw new Error(data.detail || 'Failed to start OAuth');
+    }
+    return response.json();
+  },
+
+  async oauthStatus(providerId, sessionId) {
+    const params = new URLSearchParams({ session_id: sessionId });
+    const response = await fetch(
+      `${API_BASE}/api/oauth/${encodeURIComponent(providerId)}/status?${params}`
+    );
+    if (!response.ok) {
+      throw new Error('Failed to get OAuth status');
+    }
+    return response.json();
+  },
+
+  async disconnectOAuth(providerId) {
+    const response = await fetch(`${API_BASE}/api/oauth/${encodeURIComponent(providerId)}`, {
+      method: 'DELETE',
+    });
+    if (!response.ok) {
+      const data = await response.json().catch(() => ({}));
+      throw new Error(data.detail || 'Failed to disconnect OAuth');
+    }
+    return response.json();
+  },
+
+  async disconnectAllProviders() {
+    const response = await fetch(`${API_BASE}/api/settings/disconnect-all-providers`, {
+      method: 'POST',
+    });
+    if (!response.ok) {
+      const data = await response.json().catch(() => ({}));
+      throw new Error(data.detail || 'Failed to disconnect all providers');
+    }
+    return response.json();
+  },
+
+  async setCredentialStorage(mode) {
+    const response = await fetch(`${API_BASE}/api/settings/credential-storage`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ mode }),
+    });
+    if (!response.ok) {
+      const data = await response.json().catch(() => ({}));
+      throw new Error(data.detail || 'Failed to change credential storage');
+    }
+    return response.json();
+  },
+
+  async discoverRelayAi() {
+    const response = await fetch(`${API_BASE}/api/credentials/import/relay-ai/discover`);
+    if (!response.ok) {
+      throw new Error('Failed to discover relay-ai credentials');
+    }
+    return response.json();
+  },
+
+  async importRelayAi(ids, replaceExisting = false) {
+    const response = await fetch(`${API_BASE}/api/credentials/import/relay-ai`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ids, replace_existing: replaceExisting }),
+    });
+    if (!response.ok) {
+      const data = await response.json().catch(() => ({}));
+      throw new Error(data.detail || 'Failed to import relay-ai credentials');
+    }
+    return response.json();
+  },
+
+  async dismissRelayImport() {
+    const response = await fetch(`${API_BASE}/api/settings/relay-ai-import-dismissed`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
+    });
+    if (!response.ok) {
+      throw new Error('Failed to dismiss relay-ai import');
+    }
+    return response.json();
   },
 };
