@@ -51,6 +51,15 @@ The Global Constraints and the "never" rules (no skipped tests, no history rewri
 
 ---
 
+## Parallel Step A attempt (added 2026-09-25, during execution)
+
+A second session, started from a stale shallow clone, did its own Step A merge before it saw this plan's progress. That merge is not used, because it re-applied fork features inside the merge commit, kept a typed Stage 2 first yield (against D3) and kept `bun.lock` (against D9). It is kept locally as `backup/local-step-a-8d67949` for reference only. These pieces of it were judged better than, or missing from, this plan, and are folded into the tasks below:
+
+- **Task 8:** `prompt_override` forces canonical order even when `balanced_order` is left at its default, because a caller-built prompt already fixes the label order.
+- **Task 10:** `RunManager` carries upstream's per-request options (`council_models`, `chairman_model`, `search_provider`, multi-turn history), runs model preflight like `/message/stream`, and awaits the now-async `generate_search_query`. The progress entry carries `run_id` and `event_count` so the UI can re-attach with `from_event`.
+- **Task 10:** `_build_chat_history` strips thinking blocks (via `strip_thinking_tags`) before prior turns are reused as context.
+- **Task 12:** the frontend event-handler, re-attach and Stop/navigate split, and the 12-slot council grid layout from that branch are reference implementations (`git show backup/local-step-a-8d67949:<path>`), adapted to v0.13.1 components.
+
 ### Task 1: Prepare workspace, remotes, and backups
 
 **Files:** none in the repo (git refs and an off-repo bundle only).
@@ -899,6 +908,8 @@ Found after the Step B merge (`$SCRATCH/stepB-fork-failures.txt`). These fork te
 
   In `backend/debate.py`, in the `stage2_collect_rankings(` call near line 642, add `balanced_order=False,` after `conversation_id=conversation_id,`.
 
+  Also make `prompt_override` imply canonical order inside `stage2_collect_rankings` (`if prompt_override: orders = {m: candidates for m in successful_models}`), so any caller that pre-builds the prompt gets one label space even without `balanced_order=False`. Add to `test_stage2_contract.py`: with `prompt_override="PREBUILT"` and the default `balanced_order`, every evaluator receives exactly `"PREBUILT"` and every `stage2_label_map` equals the first yield.
+
 - [ ] **Step 7: Run the Stage 2, debate, and MCP suites.**
 
   ```bash
@@ -1156,6 +1167,12 @@ Found after the Step B merge (`$SCRATCH/stepB-fork-failures.txt`). These fork te
   - Aggregate: `run.aggregate_rankings, run.ranking_diagnostics = calculate_aggregate_rankings(run.stage2_results, run.label_to_model, return_diagnostics=True)` (Task 8 Step 5b keeps `return_diagnostics`).
   - Progress: when a run starts, write `_active_runs[conversation_id]` through the helper upstream uses at `main.py:80`/`main.py:93`. Update `"stage"` and `progress` at the same points upstream's `/message/stream` does, and pop it in `finally`. So that `runs.py` doesn't import `main.py`, put the three small helpers (`_start_progress`, `_set_stage`, `_finish_progress`) in `backend/runs.py` and have `main.py` pass its `_active_runs` dict into `RunManager(progress=_active_runs)`.
   - Storage: save assistant messages through the upstream `storage` function that `/message/stream` uses (`grep -n "storage\.add_assistant_message" backend/main.py`), with the same keyword arguments, so `run_summary`/cost fields are derived the same way.
+  - Request options: `start_run` also takes `search_provider`, `council_models`, `chairman_model` (all optional, from upstream's `SendMessageRequest`) and `history` (default: built from the conversation before the new user message). Pass `models_override`/`history` to Stage 1 and `chairman_override` to Stage 3. `web_search` is true when either `web_search` or `search_provider` is set; resolve the provider and its env keys the same way upstream's `_apply_search_env` does.
+  - Preflight: before Stage 1, run `preflight_models` on the council (plus the chairman in `full` mode). On failure, record it with `storage.add_error_message`, emit `{"type": "error", "message": …}`, and end the run as `failed`.
+  - Search query: `generate_search_query` is async upstream; await it, and only when `search_keyword_extraction == "llm"` and the provider is not DuckDuckGo (upstream's rule).
+  - Progress entry: add `run_id` and `event_count` to the run's `_active_runs` entry and to `/progress`'s response, so the UI can re-attach with `streamRun(run_id, …, from_event)`.
+  - Chat history: make `main._build_chat_history` (and the run's history) prefer `response_prompt_safe` and pass content through `strip_thinking_tags`, so thinking blocks are not sent back as context.
+  - Extra tests in `test_runs_resume.py`: preflight failure fails the run and stores the error; `council_models` and prior turns reach Stage 1 as `models_override`/`history` with thinking stripped; `/progress` reports the background run with `run_id`.
 
 - [ ] **Step 4: Add the routes to `backend/main.py`.**
 
@@ -1329,6 +1346,7 @@ Found after the Step B merge (`$SCRATCH/stepB-fork-failures.txt`). These fork te
   - `App.jsx`: for council modes (`chat_only`, `chat_ranking`, `full`) call `api.startRun` then `api.streamRun`, feeding events into the handler upstream's `sendMessageStream` uses. Debate keeps `sendMessageStream`/debate endpoints. On selecting a conversation, call `api.getActiveRun(id)`. On success, `streamRun(run.run_id, handler, signal, 0)`. On 404, clear the loading state.
   - Requesty UI: mirror the NVIDIA entries in `councilGridUtils.js` (`requesty: { color: '#6d5dfc', label: 'Requesty', logo: requestyLogo }` and `['requesty:', 'requesty']`), `CouncilSetup.jsx` (`requesty: 'requesty_api_key_set'` and the `||` availability check), `CouncilConfig.jsx`, `AdvisorSetup.jsx`, and `Settings.jsx`. In `ProviderSettings.jsx`, add a Requesty section cloned from the OpenRouter one (key field, Test button → `api.testRequestyKey`, enable toggle bound to `enabled_providers.requesty`).
   - `modelHelpers.js`: add back only the functions `modelHelpers.test.js` imports that upstream lacks (`git show pre-integration-2026-09-25:frontend/src/utils/modelHelpers.js`).
+  - Reference from the parallel attempt (`backup/local-step-a-8d67949`): `App.jsx` `createCouncilEventHandler`/`attachToRun` (Stop calls `cancelRun`; switching conversation or unmount only aborts the stream; lost stream keeps partial results with a "reload to resume" error), `api.js` `sendMessageRun`/`streamRun(runId, onEvent, signal, fromEvent)`, and the 12-slot layout in `EditableCouncilGrid.jsx`/`councilGridUtils.js`. Adapt to v0.13.1's components; do not copy wholesale.
 
 - [ ] **Step 4: Run all frontend checks.**
 
