@@ -1,6 +1,6 @@
 """OpenRouter provider wrapper."""
 
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from .base import LLMProvider
 from .. import openrouter
 from ..credentials import get_api_key
@@ -8,13 +8,13 @@ from ..credentials import get_api_key
 class OpenRouterProvider(LLMProvider):
     """OpenRouter API provider."""
     
-    async def query(self, model_id: str, messages: List[Dict[str, str]], timeout: float = 120.0, temperature: float = 0.7) -> Dict[str, Any]:
+    async def query(self, model_id: str, messages: List[Dict[str, str]], timeout: float = 120.0, temperature: float = 0.7, transforms: Optional[List[str]] = None) -> Dict[str, Any]:
         # Strip internal prefix if present
         if model_id.startswith("openrouter:"):
             model_id = model_id.replace("openrouter:", "", 1)
             
         # OpenRouter module handles key retrieval internally
-        return await openrouter.query_model(model_id, messages, timeout, temperature)
+        return await openrouter.query_model(model_id, messages, timeout, temperature, transforms=transforms)
 
     async def get_models(self) -> List[Dict[str, Any]]:
         # We can reuse the existing endpoint logic or implement a direct fetch here

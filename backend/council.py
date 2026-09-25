@@ -78,11 +78,13 @@ async def query_model(
     temperature: float = 0.7,
     *,
     conversation_id: Optional[str] = None,
+    transforms: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """Dispatch query to appropriate provider.
 
     `timeout=None` resolves the configured per-provider timeout. Callers that
     pass an explicit value keep it -- preflight deliberately uses a short one.
+    `transforms` (e.g. ["middle-out"]) is forwarded to OpenRouter only.
     """
     temperature = resolve_temperature(model, temperature)
     provider = get_provider_for_model(model)
@@ -96,6 +98,8 @@ async def query_model(
             temperature,
             session_id=conversation_id,
         )
+    elif transforms and isinstance(provider, OpenRouterProvider):
+        response = await provider.query(model, messages, timeout, temperature, transforms=transforms)
     else:
         response = await provider.query(model, messages, timeout, temperature)
     if isinstance(response, dict):

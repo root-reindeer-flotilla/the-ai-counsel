@@ -2558,6 +2558,17 @@ async def get_openrouter_models():
         return {"models": [], "error": str(e)}
 
 
+@app.get("/api/openrouter/generation")
+async def get_openrouter_generation(id: str):
+    """Fetch OpenRouter generation usage/cost metadata by generation ID."""
+    from . import openrouter as openrouter_client
+
+    result = await openrouter_client.fetch_generation(id)
+    if result.get("error"):
+        return {"success": False, "error": result.get("error_message", "Unknown error")}
+    return {"success": True, "data": result.get("data")}
+
+
 @app.post("/api/settings/test-openrouter")
 async def test_openrouter_api(request: TestOpenRouterRequest):
     """Test OpenRouter API key with a simple request."""
