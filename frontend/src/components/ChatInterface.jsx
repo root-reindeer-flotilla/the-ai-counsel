@@ -1,14 +1,70 @@
 import StageTimer from './StageTimer';
-import { useState, useEffect, useRef } from 'react';
-import ReactMarkdown from 'react-markdown';
+import { useState, useEffect, useLayoutEffect, useRef } from 'react';
 import SearchContext from './SearchContext';
 import Stage1, { Stage1Skeleton } from './Stage1';
 import Stage2, { Stage2Skeleton } from './Stage2';
 import Stage3, { Stage3Skeleton } from './Stage3';
 import CouncilGrid from './CouncilGrid';
+import CouncilSetup from './CouncilSetup';
 import ExecutionModeToggle from './ExecutionModeToggle';
-import { api } from '../api';
+import DebateView from './DebateView';
+import AdvisorSetup from './AdvisorSetup';
+import MarkdownContent from './MarkdownContent';
+import Stage4, { Stage4Skeleton } from './Stage4';
+import RoundNavigator from './RoundNavigator';
 import './ChatInterface.css';
+
+function hasStage1Results(msg) {
+    return Array.isArray(msg.stage1) && msg.stage1.length > 0;
+}
+
+function hasStage2Results(msg) {
+    return Array.isArray(msg.stage2) && msg.stage2.length > 0;
+}
+
+function hasStage2Started(msg) {
+    return Boolean(msg.loading?.stage2 || hasStage2Results(msg));
+}
+
+function shouldShowStage1CouncilGrid(msg) {
+    return msg.loading?.stage1 || (hasStage1Results(msg) && !hasStage2Started(msg));
+}
+
+function shouldShowStage1Results(msg) {
+    return msg.loading?.stage1 || hasStage1Results(msg);
+}
+
+function getDeliberationScrollPhase(msg) {
+    if (!msg || msg.role !== 'assistant') return 'idle';
+    if (msg.loading?.stage3 || msg.stage3) return 'stage3';
+    if (hasStage2Started(msg)) return 'stage2';
+    if (msg.loading?.stage1 || hasStage1Results(msg)) return 'stage1';
+    if (msg.loading?.search) return 'search';
+    return 'idle';
+}
+
+function renderStage1Content(msg) {
+    if (!shouldShowStage1Results(msg)) return null;
+    if (msg.loading?.stage1 && !hasStage1Results(msg)) return <Stage1Skeleton />;
+    if (!hasStage1Results(msg)) return null;
+    return (
+        <Stage1
+            responses={msg.stage1}
+            startTime={msg.timers?.stage1Start}
+            endTime={msg.timers?.stage1End}
+        />
+    );
+}
+
+function isCouncilTurnPending(msg, isActiveTurn, isLoading) {
+    if (!isActiveTurn || !isLoading || msg.error || msg.aborted) return false;
+    if (msg.loading?.search || msg.loading?.stage1 || msg.loading?.stage2 || msg.loading?.stage3) {
+        return false;
+    }
+    if (hasStage1Results(msg) || hasStage2Results(msg) || msg.stage3) return false;
+    if (msg.metadata?.search_context) return false;
+    return true;
+}
 
 export default function ChatInterface({
     conversation,
@@ -22,96 +78,65 @@ export default function ChatInterface({
     executionMode,
     onExecutionModeChange,
     searchProvider = 'duckduckgo',
+    availableSearchProviders = [{ id: 'duckduckgo', name: 'DuckDuckGo' }],
+    mode = 'council',
+    onStartDebate,
+    onNewConversation,
+    onCouncilChange,
 }) {
     const [input, setInput] = useState('');
-    const [webSearch, setWebSearch] = useState(false);
-    const [stage1ExpandedByMessage, setStage1ExpandedByMessage] = useState({});
+    const [activeSearchProvider, setActiveSearchProvider] = useState(null);
+    const [searchPopoverOpen, setSearchPopoverOpen] = useState(false);
+    const searchPopoverRef = useRef(null);
     const messagesEndRef = useRef(null);
     const messagesContainerRef = useRef(null);
-    const stageProgressByMessageRef = useRef({});
+    const stage2AnchorRef = useRef(null);
+    const stage3AnchorRef = useRef(null);
+    const prevScrollPhaseRef = useRef(null);
 
-    const scrollToBottom = () => {
-        messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-    };
-
-    // Only auto-scroll if user is already near the bottom
-    // This prevents interrupting reading when new content arrives
-    useEffect(() => {
-        if (!messagesContainerRef.current) return;
+    useLayoutEffect(() => {
+        if (!messagesContainerRef.current || !conversation?.messages?.length) return;
 
         const container = messagesContainerRef.current;
+        const lastMsg = conversation.messages[conversation.messages.length - 1];
+        const phase = getDeliberationScrollPhase(lastMsg);
+        const prevPhase = prevScrollPhaseRef.current;
+        prevScrollPhaseRef.current = phase;
+
+        const scrollAnchors = {
+            'stage1->stage2': stage2AnchorRef,
+            'stage2->stage3': stage3AnchorRef,
+        };
+        const anchorRef = scrollAnchors[`${prevPhase}->${phase}`];
+        if (anchorRef) {
+            requestAnimationFrame(() => {
+                anchorRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+            });
+            return;
+        }
+
         const isNearBottom =
             container.scrollHeight - container.scrollTop - container.clientHeight < 150;
 
-        // Auto-scroll only if user is already at/near bottom
         if (isNearBottom) {
-            scrollToBottom();
+            messagesEndRef.current?.scrollIntoView({ behavior: isLoading ? 'auto' : 'smooth' });
         }
     }, [conversation]);
 
-    // Reset per-message Stage 1 toggle state when switching conversations.
     useEffect(() => {
-        setStage1ExpandedByMessage({});
-        stageProgressByMessageRef.current = {};
-    }, [conversation?.id]);
-
-    // Default Stage 1 visibility by message and auto-collapse when Stage 2/3 starts.
-    useEffect(() => {
-        if (!conversation?.messages) return;
-
-        setStage1ExpandedByMessage((prev) => {
-            const next = { ...prev };
-            const activeKeys = new Set();
-            let changed = false;
-
-            conversation.messages.forEach((msg, index) => {
-                if (msg.role !== 'assistant') return;
-
-                const msgKey = `${conversation.id}-msg-${index}`;
-                activeKeys.add(msgKey);
-
-                const hasStage1 = Boolean(msg.loading?.stage1 || (Array.isArray(msg.stage1) && msg.stage1.length > 0));
-                if (!hasStage1) return;
-
-                const hasStage2Or3 = Boolean(msg.loading?.stage2 || msg.loading?.stage3 || msg.stage2 || msg.stage3);
-                const prevHasStage2Or3 = Boolean(stageProgressByMessageRef.current[msgKey]);
-
-                // Initialize defaults: expanded in chat_only flow, collapsed when later stages exist.
-                if (next[msgKey] === undefined) {
-                    next[msgKey] = !hasStage2Or3;
-                    changed = true;
-                }
-
-                // Auto-collapse exactly when a message transitions into Stage 2/3.
-                if (hasStage2Or3 && !prevHasStage2Or3 && next[msgKey] !== false) {
-                    next[msgKey] = false;
-                    changed = true;
-                }
-
-                stageProgressByMessageRef.current[msgKey] = hasStage2Or3;
-            });
-
-            // Prune stale keys from previous renders.
-            Object.keys(next).forEach((key) => {
-                if (!activeKeys.has(key)) {
-                    delete next[key];
-                    changed = true;
-                }
-            });
-            Object.keys(stageProgressByMessageRef.current).forEach((key) => {
-                if (!activeKeys.has(key)) {
-                    delete stageProgressByMessageRef.current[key];
-                }
-            });
-
-            return changed ? next : prev;
-        });
-    }, [conversation]);
+        const handleClickOutside = (e) => {
+            if (searchPopoverRef.current && !searchPopoverRef.current.contains(e.target)) {
+                setSearchPopoverOpen(false);
+            }
+        };
+        if (searchPopoverOpen) document.addEventListener('mousedown', handleClickOutside);
+        return () => document.removeEventListener('mousedown', handleClickOutside);
+    }, [searchPopoverOpen]);
 
     const handleSubmit = (e) => {
         e.preventDefault();
         if (input.trim() && !isLoading) {
-            onSendMessage(input, webSearch);
+            onSendMessage(input, activeSearchProvider);
             setInput('');
         }
     };
@@ -125,19 +150,41 @@ export default function ChatInterface({
     };
 
     if (!conversation) {
+        if (mode === 'advisors') {
+            return (
+                <div className="chat-interface advisor-mode">
+                    <div className="advisor-setup-scroll">
+                        <AdvisorSetup
+                            onStartDebate={onStartDebate}
+                            isLoading={isLoading}
+                        />
+                    </div>
+                </div>
+            );
+        }
         return (
             <div className="chat-interface">
                 <div className="empty-state">
                     <h1>Welcome to LLM Council <span className="plus-text">Plus</span></h1>
                     <p className="hero-message">
-                        The Council is ready to deliberate. <button className="config-link" onClick={() => onOpenSettings('council')}>Configure it</button>
+                        Configure your council below, then start a session or ask your question.
                     </p>
-
-                    {/* Council Preview Grid */}
                     <div className="welcome-grid-container">
-                        <CouncilGrid models={councilModels} chairman={chairmanModel} status="idle" />
+                        <CouncilSetup
+                            councilModels={councilModels}
+                            chairmanModel={chairmanModel}
+                            executionMode={executionMode}
+                            editable
+                            onCouncilChange={onCouncilChange}
+                            onOpenSettings={onOpenSettings}
+                        />
                     </div>
-
+                    <button className="start-session-btn start-session-btn--secondary" onClick={onNewConversation}>
+                        <span className="btn-content">
+                            <span className="btn-icon">✨</span>
+                            Start a New Council Session
+                        </span>
+                    </button>
                 </div>
             </div>
         );
@@ -147,196 +194,165 @@ export default function ChatInterface({
         <div className="chat-interface">
             {/* Messages Area */}
             <div className="messages-area" ref={messagesContainerRef}>
-                {(!conversation || conversation.messages.length === 0) ? (
+                {mode === 'advisors' && conversation.messages.length === 0 ? (
+                    <div className="advisor-setup-scroll">
+                        <AdvisorSetup
+                            onStartDebate={onStartDebate}
+                            isLoading={isLoading}
+                        />
+                    </div>
+                ) : (conversation.messages.length === 0) ? (
                     <div className="hero-container">
                         <div className="hero-content">
                             <h1>Welcome to LLM Council <span className="text-gradient">Plus</span></h1>
                             <p className="hero-subtitle">
-                                The Council is ready to deliberate. <button className="config-link" onClick={() => onOpenSettings('council')}>Configure it</button>
+                                Configure your council below, then ask your question.
                             </p>
                             <div className="welcome-grid-container">
-                                <CouncilGrid models={councilModels} chairman={chairmanModel} status="idle" />
+                                <CouncilSetup
+                                    councilModels={councilModels}
+                                    chairmanModel={chairmanModel}
+                                    executionMode={executionMode}
+                                    editable
+                                    onCouncilChange={onCouncilChange}
+                                    onOpenSettings={onOpenSettings}
+                                />
                             </div>
                         </div>
                     </div>
                 ) : (
-                    conversation.messages.map((msg, index) => (
+                    conversation.messages.map((msg, index) => {
+                        const isActiveCouncilTurn = msg.role === 'assistant'
+                            && index === conversation.messages.length - 1
+                            && isLoading;
+
+                        return (
                         <div key={`${conversation.id}-msg-${index}`} className={`message ${msg.role}`}>
-                            <div className="message-role">
-                                {msg.role === 'user' ? 'Your Question to the Council' : 'LLM Council'}
+                            <div className="message-role" style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+                                <span>
+                                    {msg.role === 'user'
+                                        ? (mode === 'advisors' ? 'Your Question' : 'Your Question to the Council')
+                                        : (mode === 'advisors' ? 'Advisor Panel' : 'LLM Council')}
+                                </span>
+                                {msg.role === 'assistant' && msg.type !== 'advisor_debate' && (() => {
+                                    const knownMode = msg.metadata?.execution_mode
+                                        || (index === conversation.messages.length - 1 ? executionMode : null);
+                                    if (!knownMode) return null;
+
+                                    const rounds = msg.metadata?.rounds?.length || msg.metadata?.debate_rounds_configured || 1;
+                                    const critique = msg.metadata?.critique_mode || 'freeform';
+                                    let label;
+                                    if (knownMode === 'chat_only') label = '💬 Chat Only';
+                                    else if (knownMode === 'chat_ranking') label = '⚖️ Chat + Ranking';
+                                    else if (knownMode === 'full') {
+                                        if (rounds > 1) {
+                                            const capitalizedCritique = critique.charAt(0).toUpperCase() + critique.slice(1);
+                                            label = `🏛️ Full Debate (${rounds} Rds • ${capitalizedCritique})`;
+                                        } else {
+                                            label = '🏛️ Full Deliberation';
+                                        }
+                                    } else {
+                                        label = '🏛️ Deliberation';
+                                    }
+                                    return <span className="debate-mode-pill">{label}</span>;
+                                })()}
                             </div>
 
                             <div className="message-content">
                                 {msg.role === 'user' ? (
-                                    <div className="markdown-content">
-                                        <ReactMarkdown>{msg.content}</ReactMarkdown>
-                                    </div>
+                                    <MarkdownContent>{msg.content}</MarkdownContent>
+                                ) : (msg.mode === 'advisors' || msg.type === 'advisor_debate') ? (
+                                    <DebateView
+                                        personas={msg.personas || []}
+                                        rounds={msg.rounds || []}
+                                        verdict={msg.verdict || null}
+                                        tiebreaker={msg.tiebreaker || null}
+                                        currentRound={msg.currentRound || msg.rounds?.length || 1}
+                                        maxRounds={msg.maxRounds || msg.metadata?.max_rounds || 3}
+                                        isRunning={msg.isRunning || false}
+                                        question={msg.question || ''}
+                                        webSearch={msg.webSearch}
+                                        error={msg.error || null}
+                                    />
                                 ) : (
-                                    <>
-                                        {(() => {
-                                            const msgKey = `${conversation.id}-msg-${index}`;
-                                            const hasStage1 = Boolean(msg.loading?.stage1 || (Array.isArray(msg.stage1) && msg.stage1.length > 0));
-                                            const hasStage2Or3 = Boolean(msg.loading?.stage2 || msg.loading?.stage3 || msg.stage2 || msg.stage3);
-                                            const isStage1Expanded = stage1ExpandedByMessage[msgKey] ?? !hasStage2Or3;
-                                            const showStage1 = Boolean(msg.loading?.stage1 || (hasStage1 && isStage1Expanded));
-                                            const showStage1Toggle = Boolean(hasStage1 && hasStage2Or3 && !msg.loading?.stage1);
-
-                                            return (
-                                                <>
-                                        {/* Search Loading */}
-                                        {msg.loading?.search && (
-                                            <div className="stage-loading">
-                                                <div className="spinner"></div>
-                                                <span>
-                                                    🔍 Searching the web with {
-                                                        searchProvider === 'duckduckgo' ? 'DuckDuckGo' :
-                                                            searchProvider === 'tavily' ? 'Tavily' :
-                                                                searchProvider === 'brave' ? 'Brave' :
-                                                                    'Provider'
-                                                    }...
-                                                </span>
-                                            </div>
-                                        )}
-
-                                        {/* Search Context */}
-                                        {msg.metadata?.search_context && (
-                                            <SearchContext
-                                                searchQuery={msg.metadata?.search_query}
-                                                extractedQuery={msg.metadata?.extracted_query}
-                                                searchContext={msg.metadata?.search_context}
-                                            />
-                                        )}
-
-                                        {/* Stage 1: Council Grid Visualization */}
-                                        {showStage1 && (
-                                            <div className="stage-container">
-                                                <div className="stage-header">
-                                                    <h3>Stage 1: Council Deliberation</h3>
-                                                    {msg.timers?.stage1Start && (
-                                                        <StageTimer
-                                                            startTime={msg.timers.stage1Start}
-                                                            endTime={msg.timers.stage1End}
-                                                        />
-                                                    )}
-                                                </div>
-                                                <CouncilGrid
-                                                    models={councilModels} // Use the same models list
-                                                    chairman={chairmanModel}
-                                                    status={msg.loading?.stage1 ? 'thinking' : 'complete'}
-                                                    progress={{
-                                                        currentModel: msg.progress?.stage1?.currentModel,
-                                                        completed: msg.stage1?.map(r => r.model) || []
-                                                    }}
-                                                />
-                                            </div>
-                                        )}
-
-                                        {/* Stage 1 Results (Accordion/List - kept for detail view) */}
-                                        {showStage1 ? (
-                                            msg.loading?.stage1 && !msg.stage1 ? (
-                                                <Stage1Skeleton />
-                                            ) : msg.stage1 && (
-                                                <Stage1
-                                                    responses={msg.stage1}
-                                                    startTime={msg.timers?.stage1Start}
-                                                    endTime={msg.timers?.stage1End}
-                                                />
-                                            )
-                                        ) : null}
-
-                                        {showStage1Toggle && (
-                                            <div className="stage1-toggle-container">
-                                                <button
-                                                    type="button"
-                                                    className="stage1-toggle-button"
-                                                    onClick={() => {
-                                                        setStage1ExpandedByMessage((prev) => ({
-                                                            ...prev,
-                                                            [msgKey]: !(prev[msgKey] ?? !hasStage2Or3),
-                                                        }));
-                                                    }}
-                                                >
-                                                    {isStage1Expanded ? 'Hide Stage 1 Responses' : 'Show Stage 1 Responses'}
-                                                </button>
-                                            </div>
-                                        )}
-
-                                        {/* Stage 2 */}
-                                        {msg.loading?.stage2 && (
-                                            <Stage2Skeleton />
-                                        )}
-                                        {msg.stage2 && (
-                                            <Stage2
-                                                rankings={msg.stage2}
-                                                labelToModel={msg.metadata?.label_to_model}
-                                                stage2LabelMapsByEvaluator={msg.metadata?.stage2_label_maps_by_evaluator}
-                                                aggregateRankings={msg.metadata?.aggregate_rankings}
-                                                startTime={msg.timers?.stage2Start}
-                                                endTime={msg.timers?.stage2End}
-                                            />
-                                        )}
-
-                                        {/* Stage 3 */}
-                                        {msg.loading?.stage3 && (
-                                            <Stage3Skeleton />
-                                        )}
-                                        {msg.stage3 && (
-                                            <Stage3
-                                                finalResponse={msg.stage3}
-                                                startTime={msg.timers?.stage3Start}
-                                                endTime={msg.timers?.stage3End}
-                                            />
-                                        )}
-
-                                        {/* Aborted Indicator */}
-                                        {msg.aborted && (
-                                            <div className="aborted-indicator">
-                                                <span className="aborted-icon">⏹</span>
-                                                <span className="aborted-text">
-                                                    Generation stopped by user.
-                                                    {msg.stage1 && !msg.stage3 && ' Partial results shown above.'}
-                                                </span>
-                                            </div>
-                                        )}
-                                                </>
-                                            );
-                                        })()}
-                                    </>
+                                    <CouncilMessageRenderer
+                                        msg={msg}
+                                        isActiveCouncilTurn={isActiveCouncilTurn}
+                                        councilModels={councilModels}
+                                        chairmanModel={chairmanModel}
+                                        executionMode={executionMode}
+                                        availableSearchProviders={availableSearchProviders}
+                                        searchProvider={searchProvider}
+                                        activeSearchProvider={activeSearchProvider}
+                                        isLoading={isLoading}
+                                        stage2AnchorRef={stage2AnchorRef}
+                                        stage3AnchorRef={stage3AnchorRef}
+                                    />
                                 )}
                             </div>
                         </div>
-                    ))
+                        );
+                    })
                 )}
 
                 {/* Bottom Spacer for floating input */}
                 <div ref={messagesEndRef} style={{ height: '20px' }} />
             </div>
 
-            {/* Floating Command Capsule */}
-            <div className="input-area">
+            {/* Floating Command Capsule — hidden for advisor debates */}
+            {mode !== 'advisors' && <div className="input-area">
                 {!councilConfigured ? (
                     <div className="input-container config-required">
                         <span className="config-message">
-                            ⚠️ Council not ready.
+                            ⚠️ Council not ready — add at least one member
+                            {executionMode === 'full' ? ' and a chairman' : ''}.
                             <button className="config-link" onClick={() => onOpenSettings('llm_keys')}>Configure API Keys</button>
-                            <span className="config-separator">or</span>
-                            <button className="config-link" onClick={() => onOpenSettings('council')}>Configure Council</button>
                         </span>
                     </div>
                 ) : (
                     <form className="input-container" onSubmit={handleSubmit}>
                         <div className="input-row-top">
-                            <label className={`search-toggle ${webSearch ? 'active' : ''}`} title="Toggle Web Search">
-                                <input
-                                    type="checkbox"
-                                    className="search-checkbox"
-                                    checked={webSearch}
-                                    onChange={() => setWebSearch(!webSearch)}
+                            <div className="search-provider-picker" ref={searchPopoverRef}>
+                                <button
+                                    type="button"
+                                    className={`search-toggle ${activeSearchProvider ? 'active' : ''}`}
+                                    onClick={() => !isLoading && setSearchPopoverOpen((v) => !v)}
                                     disabled={isLoading}
-                                />
-                                <span className="search-icon">🌐</span>
-                                {webSearch && <span className="search-label">Search On</span>}
-                            </label>
+                                    title={activeSearchProvider ? `Search: ${availableSearchProviders.find(p => p.id === activeSearchProvider)?.name || activeSearchProvider}` : 'Web Search Off'}
+                                    aria-haspopup="listbox"
+                                    aria-expanded={searchPopoverOpen}
+                                >
+                                    <span className="search-icon">🌐</span>
+                                    {activeSearchProvider && (
+                                        <span className="search-label">
+                                            {availableSearchProviders.find(p => p.id === activeSearchProvider)?.name || activeSearchProvider}
+                                        </span>
+                                    )}
+                                </button>
+                                {searchPopoverOpen && (
+                                    <div className="search-popover" role="listbox">
+                                        <button
+                                            type="button"
+                                            className={`search-popover-option ${!activeSearchProvider ? 'search-popover-option--selected' : ''}`}
+                                            onClick={() => { setActiveSearchProvider(null); setSearchPopoverOpen(false); }}
+                                        >
+                                            <span className="search-popover-option-icon">✕</span>
+                                            Off
+                                        </button>
+                                        {availableSearchProviders.map((p) => (
+                                            <button
+                                                key={p.id}
+                                                type="button"
+                                                className={`search-popover-option ${activeSearchProvider === p.id ? 'search-popover-option--selected' : ''}`}
+                                                onClick={() => { setActiveSearchProvider(p.id); setSearchPopoverOpen(false); }}
+                                            >
+                                                <span className="search-popover-option-icon">🌐</span>
+                                                {p.name}
+                                            </button>
+                                        ))}
+                                    </div>
+                                )}
+                            </div>
 
                             <textarea
                                 className="message-input"
@@ -369,7 +385,203 @@ export default function ChatInterface({
                         </div>
                     </form>
                 )}
-            </div>
+            </div>}
         </div>
+    );
+}
+
+function CouncilMessageRenderer({
+    msg,
+    isActiveCouncilTurn,
+    councilModels,
+    chairmanModel,
+    executionMode,
+    availableSearchProviders,
+    searchProvider,
+    activeSearchProvider,
+    isLoading,
+    stage2AnchorRef,
+    stage3AnchorRef,
+}) {
+    const [selectedRound, setSelectedRound] = useState(null);
+
+    const hasRounds = Array.isArray(msg.metadata?.rounds) && msg.metadata.rounds.length > 0;
+    const totalRounds = hasRounds 
+        ? msg.metadata.rounds.length 
+        : (msg.metadata?.debate_rounds_configured || 1);
+    const currentActiveRound = msg.metadata?.current_round || 1;
+
+    useEffect(() => {
+        if (!hasRounds) {
+            setSelectedRound(null);
+        }
+    }, [hasRounds]);
+
+    const activeRoundNum = selectedRound !== null 
+        ? selectedRound 
+        : (hasRounds ? msg.metadata.rounds.length : currentActiveRound);
+
+    let displayStage1 = msg.stage1;
+    let displayStage2 = msg.stage2;
+    let displayStage3 = msg.stage3;
+    let displayMetadata = msg.metadata || {};
+
+    if (hasRounds && msg.metadata.rounds[activeRoundNum - 1]) {
+        const roundData = msg.metadata.rounds[activeRoundNum - 1];
+        displayStage1 = roundData.stage1;
+        displayStage2 = roundData.stage2;
+        displayStage3 = roundData.stage3;
+        displayMetadata = { ...msg.metadata, ...(roundData.metadata || {}) };
+    }
+
+    const showStage1 = msg.loading?.stage1 || (Array.isArray(displayStage1) && displayStage1.length > 0);
+    const showStage2 = msg.loading?.stage2 || (Array.isArray(displayStage2) && displayStage2.length > 0);
+    const showStage3 = msg.loading?.stage3 || displayStage3;
+    const showStage4 = msg.loading?.stage4 || displayMetadata.stage4;
+
+    return (
+        <>
+            {msg.error && (
+                <div className="council-error">
+                    <span className="council-error-icon">⚠️</span>
+                    <span className="council-error-text">{msg.error}</span>
+                </div>
+            )}
+
+            {isCouncilTurnPending(msg, isActiveCouncilTurn, isLoading) && (
+                <div className="stage-loading">
+                    <div className="spinner"></div>
+                    <span>Consulting the council…</span>
+                </div>
+            )}
+
+            {/* Search Loading */}
+            {msg.loading?.search && (
+                <div className="stage-loading">
+                    <div className="spinner"></div>
+                    <span>
+                        🔍 Searching the web with {availableSearchProviders.find(p => p.id === (activeSearchProvider || searchProvider))?.name || 'Web'}...
+                    </span>
+                </div>
+            )}
+
+            {/* Search Context */}
+            {displayMetadata.search_context && (
+                <SearchContext
+                    searchQuery={displayMetadata.search_query}
+                    extractedQuery={displayMetadata.extracted_query}
+                    searchContext={displayMetadata.search_context}
+                />
+            )}
+
+            {/* Round Navigator */}
+            {totalRounds > 1 && (
+                <RoundNavigator
+                    currentRound={activeRoundNum}
+                    totalRounds={totalRounds}
+                    converged={displayMetadata.converged}
+                    onSelectRound={hasRounds ? setSelectedRound : null}
+                />
+            )}
+
+            {/* Stage 1: Council Grid (during active round deliberation only) */}
+            {shouldShowStage1CouncilGrid(msg) && (
+                <div className="stage-container">
+                    <div className="stage-header">
+                        <h3>Stage 1: Council Deliberation {totalRounds > 1 && `(Round ${activeRoundNum})`}</h3>
+                        {msg.timers?.stage1Start && (
+                            <StageTimer
+                                startTime={msg.timers.stage1Start}
+                                endTime={msg.timers.stage1End}
+                            />
+                        )}
+                    </div>
+                    <CouncilGrid
+                        models={councilModels}
+                        chairman={chairmanModel}
+                        status={msg.loading?.stage1 ? 'thinking' : 'complete'}
+                        progress={{
+                            currentModel: msg.progress?.stage1?.currentModel,
+                            completed: displayStage1?.map(r => r.model) || []
+                        }}
+                        showChairman={(displayMetadata.execution_mode || executionMode) === 'full'}
+                    />
+                </div>
+            )}
+
+            {/* Stage 1 Content */}
+            {showStage1 && (
+                msg.loading?.stage1 && (!displayStage1 || displayStage1.length === 0) ? (
+                    <Stage1Skeleton />
+                ) : (
+                    <Stage1
+                        responses={displayStage1 || []}
+                        startTime={msg.timers?.stage1Start}
+                        endTime={msg.timers?.stage1End}
+                    />
+                )
+            )}
+
+            {/* Stage 2 */}
+            <div
+                ref={isActiveCouncilTurn ? stage2AnchorRef : null}
+                className="stage-scroll-anchor"
+            >
+                {msg.loading?.stage2 && (!displayStage2 || displayStage2.length === 0) && <Stage2Skeleton />}
+                {Array.isArray(displayStage2) && displayStage2.length > 0 && (
+                    <Stage2
+                        rankings={displayStage2}
+                        labelToModel={displayMetadata.label_to_model}
+                        aggregateRankings={displayMetadata.aggregate_rankings}
+                        canonicalClaims={displayMetadata.canonical_claims}
+                        aggregateClaimVerdicts={displayMetadata.aggregate_claim_verdicts}
+                        startTime={msg.timers?.stage2Start}
+                        endTime={msg.timers?.stage2End}
+                    />
+                )}
+            </div>
+
+            {/* Stage 3 */}
+            <div
+                ref={isActiveCouncilTurn ? stage3AnchorRef : null}
+                className="stage-scroll-anchor"
+            >
+                {msg.loading?.stage3 && !displayStage3 && <Stage3Skeleton />}
+                {displayStage3 && (
+                    <Stage3
+                        finalResponse={displayStage3}
+                        labelToModel={displayMetadata.label_to_model}
+                        startTime={msg.timers?.stage3Start}
+                        endTime={msg.timers?.stage3End}
+                    />
+                )}
+            </div>
+
+            {/* Stage 4 */}
+            {showStage4 && (
+                <div className="stage-scroll-anchor">
+                    {msg.loading?.stage4 && !displayMetadata.stage4 ? (
+                        <Stage4Skeleton />
+                    ) : (
+                        <Stage4
+                            correctedDraft={displayMetadata.stage4}
+                            startTime={msg.timers?.stage4Start || msg.timers?.stage3End}
+                            endTime={msg.timers?.stage4End}
+                        />
+                    )}
+                </div>
+            )}
+
+            {/* Aborted Indicator */}
+            {msg.aborted && (
+                <div className="aborted-indicator">
+                    <span className="aborted-icon">⏹</span>
+                    <span className="aborted-text">
+                        Generation stopped by user.
+                        {displayStage1 && !displayStage3 && ' Partial results shown above.'}
+                    </span>
+                </div>
+            )}
+        </>
     );
 }

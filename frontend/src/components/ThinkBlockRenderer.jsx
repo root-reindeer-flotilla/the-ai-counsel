@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import ReactMarkdown from 'react-markdown';
+import { MarkdownRenderer } from './MarkdownContent';
 import './ThinkBlockRenderer.css';
 
 // Collapsible think block component
@@ -18,7 +18,7 @@ function ThinkBlock({ content }) {
       </button>
       {isExpanded && (
         <div className="think-content">
-          <ReactMarkdown>{content}</ReactMarkdown>
+          <MarkdownRenderer>{content}</MarkdownRenderer>
         </div>
       )}
     </div>
@@ -28,7 +28,7 @@ function ThinkBlock({ content }) {
 // Helper to parse and render content with <think> tags styled differently
 export default function ThinkBlockRenderer({ content }) {
   if (!content || typeof content !== 'string') {
-    return <ReactMarkdown>{String(content || 'No response')}</ReactMarkdown>;
+    return <MarkdownRenderer>{String(content || 'No response')}</MarkdownRenderer>;
   }
 
   // Regex to match <think>...</think> blocks (handles multiline)
@@ -60,7 +60,7 @@ export default function ThinkBlockRenderer({ content }) {
 
   // If no think blocks found, render normally
   if (parts.length === 0) {
-    return <ReactMarkdown>{content}</ReactMarkdown>;
+    return <MarkdownRenderer>{content}</MarkdownRenderer>;
   }
 
   return (
@@ -70,7 +70,7 @@ export default function ThinkBlockRenderer({ content }) {
           <ThinkBlock key={index} content={part.content} />
         ) : (
           <div key={index} className="response-answer">
-            <ReactMarkdown>{part.content}</ReactMarkdown>
+            <MarkdownRenderer>{part.content}</MarkdownRenderer>
           </div>
         )
       ))}

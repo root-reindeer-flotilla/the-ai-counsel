@@ -51,8 +51,8 @@
 
 .final-text {
   color: var(--text-primary);
-  line-height: 1.7;
-  font-size: 15px;
+  line-height: 1.68;
+  font-size: 16px;
   font-family: var(--font-content);
 }
 
@@ -165,8 +165,8 @@
 }
 
 .final-text {
-  color: #e2e8f0;
-  line-height: 1.8;
+  color: #dce6f2;
+  line-height: 1.68;
   font-size: 16px;
   font-family: var(--font-content);
 }
@@ -208,7 +208,7 @@
   }
 
   .final-text {
-    font-size: 14px;
-    line-height: 1.7;
+    font-size: 15px;
+    line-height: 1.65;
   }
 }

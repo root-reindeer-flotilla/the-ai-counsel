@@ -1,18 +1,62 @@
 import { useState, useEffect, useMemo, useRef } from 'react';
-import { api } from '../api';
+import { api, DEFAULT_EXECUTION_MODE } from '../api';
 import SearchableModelSelect from './SearchableModelSelect';
 import ProviderSettings from './settings/ProviderSettings';
 import CouncilConfig from './settings/CouncilConfig';
 import SearchSettings from './settings/SearchSettings';
 import PromptSettings from './settings/PromptSettings';
+import DebateSettings from './settings/DebateSettings';
 import './Settings.css';
 
+const PROMPT_FIELDS = [
+  'stage1_prompt',
+  'stage2_prompt',
+  'stage3_prompt',
+  'stage4_prompt',
+  'title_prompt',
+  'query_prompt',
+  'advisor_round1_prompt',
+  'advisor_followup_prompt',
+  'advisor_cross_pollination_prompt',
+  'advisor_verdict_prompt',
+  'advisor_tiebreaker_prompt',
+];
 
+const isBlankPrompt = (value) => typeof value !== 'string' || value.trim().length === 0;
 
+const buildPromptValues = (source = {}, fallback = '') => (
+  Object.fromEntries(PROMPT_FIELDS.map(key => [key, source[key] ?? fallback]))
+);
 
+const hasAnyDirectKey = (data) => !!(
+  data?.openai_api_key_set
+  || data?.anthropic_api_key_set
+  || data?.google_api_key_set
+  || data?.mistral_api_key_set
+  || data?.deepseek_api_key_set
+  || data?.nvidia_api_key_set
+);
+
+/** Council toggles cannot be ON for providers that have no credentials. */
+const normalizeEnabledProviders = (enabledProviders, data, ollamaConnected) => ({
+  openrouter: !!enabledProviders?.openrouter && !!data?.openrouter_api_key_set,
+  ollama: !!enabledProviders?.ollama && !!ollamaConnected,
+  groq: !!enabledProviders?.groq && !!data?.groq_api_key_set,
+  direct: !!enabledProviders?.direct && hasAnyDirectKey(data),
+  custom: !!enabledProviders?.custom && !!data?.custom_endpoint_url,
+});
+
+const normalizeDirectProviderToggles = (toggles, data) => ({
+  openai: !!toggles?.openai && !!data?.openai_api_key_set,
+  anthropic: !!toggles?.anthropic && !!data?.anthropic_api_key_set,
+  google: !!toggles?.google && !!data?.google_api_key_set,
+  mistral: !!toggles?.mistral && !!data?.mistral_api_key_set,
+  deepseek: !!toggles?.deepseek && !!data?.deepseek_api_key_set,
+  nvidia: !!toggles?.nvidia && !!data?.nvidia_api_key_set,
+});
 
 export default function Settings({ onClose, ollamaStatus, onRefreshOllama, initialSection = 'llm_keys' }) {
-  const [activeSection, setActiveSection] = useState(initialSection); // 'llm_keys', 'council', 'prompts', 'search', 'import_export'
+  const [activeSection, setActiveSection] = useState(initialSection);
 
   const [settings, setSettings] = useState(null);
   const [selectedSearchProvider, setSelectedSearchProvider] = useState('duckduckgo');
@@ -26,12 +70,6 @@ export default function Settings({ onClose, ollamaStatus, onRefreshOllama, initi
   const [availableModels, setAvailableModels] = useState([]);
   const [isTestingOpenRouter, setIsTestingOpenRouter] = useState(false);
   const [openrouterTestResult, setOpenrouterTestResult] = useState(null);
-
-  // Requesty State
-  const [requestyApiKey, setRequestyApiKey] = useState('');
-  const [requestyAvailableModels, setRequestyAvailableModels] = useState([]);
-  const [isTestingRequesty, setIsTestingRequesty] = useState(false);
-  const [requestyTestResult, setRequestyTestResult] = useState(null);
 
   // Groq State
   const [groqApiKey, setGroqApiKey] = useState('');
@@ -58,7 +96,8 @@ export default function Settings({ onClose, ollamaStatus, onRefreshOllama, initi
     anthropic_api_key: '',
     google_api_key: '',
     mistral_api_key: '',
-    deepseek_api_key: ''
+    deepseek_api_key: '',
+    nvidia_api_key: '',
   });
   const [directAvailableModels, setDirectAvailableModels] = useState([]);
 
@@ -76,12 +115,14 @@ export default function Settings({ onClose, ollamaStatus, onRefreshOllama, initi
   const [serperTestResult, setSerperTestResult] = useState(null);
   const [tavilyTestResult, setTavilyTestResult] = useState(null);
   const [braveTestResult, setBraveTestResult] = useState(null);
+  const [tinyfishApiKey, setTinyfishApiKey] = useState('');
+  const [isTestingTinyfish, setIsTestingTinyfish] = useState(false);
+  const [tinyfishTestResult, setTinyfishTestResult] = useState(null);
   const [showResetConfirm, setShowResetConfirm] = useState(false);
 
   // Enabled Providers (which sources are available)
   const [enabledProviders, setEnabledProviders] = useState({
     openrouter: true,
-    requesty: false,
     ollama: false,
     groq: false,
     direct: false,  // Master toggle for all direct connections
@@ -94,7 +135,8 @@ export default function Settings({ onClose, ollamaStatus, onRefreshOllama, initi
     anthropic: false,
     google: false,
     mistral: false,
-    deepseek: false
+    deepseek: false,
+    nvidia: false,
   });
 
   // Council Configuration (unified across all providers)
@@ -105,14 +147,15 @@ export default function Settings({ onClose, ollamaStatus, onRefreshOllama, initi
   const [stage2Temperature, setStage2Temperature] = useState(0.3);
 
   // System Prompts State
-  const [prompts, setPrompts] = useState({
-    stage1_prompt: '',
-    stage2_prompt: '',
-    stage3_prompt: '',
-    title_prompt: '',
-
-  });
+  const [prompts, setPrompts] = useState(() => buildPromptValues());
   const [activePromptTab, setActivePromptTab] = useState('stage1');
+  const [activeAdvisorPromptTab, setActiveAdvisorPromptTab] = useState('advisor_round1');
+
+  // Debate Settings
+  const [critiqueMode, setCritiqueMode] = useState('freeform');
+  const [debateRounds, setDebateRounds] = useState(1);
+  const [autoConverge, setAutoConverge] = useState(true);
+  const [convergenceThreshold, setConvergenceThreshold] = useState(2);
 
   const [isLoadingModels, setIsLoadingModels] = useState(false);
   const [showFreeOnly, setShowFreeOnly] = useState(false);
@@ -137,13 +180,6 @@ export default function Settings({ onClose, ollamaStatus, onRefreshOllama, initi
   useEffect(() => {
     setActiveSection(initialSection);
   }, [initialSection]);
-
-  // When opening Council Config with Ollama connected but no local models loaded, retry loading (e.g. remote URL)
-  useEffect(() => {
-    if (activeSection === 'council' && ollamaStatus?.connected && ollamaAvailableModels.length === 0 && ollamaBaseUrl) {
-      loadOllamaModels(ollamaBaseUrl);
-    }
-  }, [activeSection, ollamaStatus?.connected, ollamaBaseUrl]);
 
   // Check for changes
   useEffect(() => {
@@ -172,9 +208,13 @@ export default function Settings({ onClose, ollamaStatus, onRefreshOllama, initi
       if (JSON.stringify(councilMemberFilters) !== JSON.stringify(settings.council_member_filters || {})) return true;
       if (chairmanFilter !== (settings.chairman_filter || 'remote')) return true;
       // Prompts
-      if (prompts.stage1_prompt !== settings.stage1_prompt) return true;
-      if (prompts.stage2_prompt !== settings.stage2_prompt) return true;
-      if (prompts.stage3_prompt !== settings.stage3_prompt) return true;
+      if (PROMPT_FIELDS.some(key => prompts[key] !== settings[key])) return true;
+
+      // Debate Settings
+      if (critiqueMode !== (settings.critique_mode || 'freeform')) return true;
+      if (debateRounds !== (settings.debate_rounds || 1)) return true;
+      if (autoConverge !== (settings.auto_converge !== undefined ? settings.auto_converge : true)) return true;
+      if (convergenceThreshold !== (settings.convergence_threshold || 2)) return true;
 
       // Note: API keys are auto-saved on test, so we don't check them here
 
@@ -199,11 +239,15 @@ export default function Settings({ onClose, ollamaStatus, onRefreshOllama, initi
     stage2Temperature,
     councilMemberFilters,
     chairmanFilter,
-    prompts
+    prompts,
+    critiqueMode,
+    debateRounds,
+    autoConverge,
+    convergenceThreshold,
   ]);
 
   // Helper to determine if filters need to switch based on availability
-  const isRemoteAvailable = enabledProviders.openrouter || enabledProviders.requesty || enabledProviders.direct || enabledProviders.groq || enabledProviders.custom;
+  const isRemoteAvailable = enabledProviders.openrouter || enabledProviders.direct || enabledProviders.groq || enabledProviders.custom;
   const isLocalAvailable = enabledProviders.ollama;
 
   const getNewFilter = (currentFilter) => {
@@ -214,9 +258,11 @@ export default function Settings({ onClose, ollamaStatus, onRefreshOllama, initi
 
   // Effect 1: Auto-update Council Member filters when providers change or members are added
   useEffect(() => {
+    let changed = false;
+    const indicesToClear = [];
+
     setCouncilMemberFilters(prev => {
       const next = { ...prev };
-      let changed = false;
       // Check all council member indices
       for (let i = 0; i < councilModels.length; i++) {
         const currentFilter = next[i] || 'remote'; // Default is 'remote'
@@ -224,12 +270,22 @@ export default function Settings({ onClose, ollamaStatus, onRefreshOllama, initi
         if (newFilter !== currentFilter) {
           next[i] = newFilter;
           changed = true;
-          // Clear model if filter changed to force re-selection
-          handleCouncilModelChange(i, '');
+          indicesToClear.push(i);
         }
       }
       return changed ? next : prev;
     });
+
+    // Clear models whose filter changed to force re-selection
+    if (indicesToClear.length > 0) {
+      setCouncilModels(prev => {
+        const updated = [...prev];
+        indicesToClear.forEach(i => {
+          updated[i] = '';
+        });
+        return updated;
+      });
+    }
   }, [enabledProviders, councilModels.length]);
 
   // Effect 2: Auto-update Chairman and Search filters when providers change
@@ -332,9 +388,20 @@ export default function Settings({ onClose, ollamaStatus, onRefreshOllama, initi
   const loadSettings = async () => {
     try {
       const data = await api.getSettings();
+      let defaults = {};
+      if (PROMPT_FIELDS.some(key => isBlankPrompt(data[key]))) {
+        defaults = await api.getDefaultSettings();
+      }
+      const normalizedPrompts = Object.fromEntries(
+        PROMPT_FIELDS.map(key => [
+          key,
+          isBlankPrompt(data[key]) ? (defaults[key] || '') : data[key],
+        ])
+      );
+      const normalizedData = { ...data, ...normalizedPrompts };
 
       // Set settings immediately to show UI
-      setSettings(data);
+      setSettings(normalizedData);
 
       setSelectedSearchProvider(data.search_provider || 'duckduckgo');
       setSearchKeywordExtraction(data.search_keyword_extraction || 'direct');
@@ -343,37 +410,40 @@ export default function Settings({ onClose, ollamaStatus, onRefreshOllama, initi
       setSearchHybridMode(data.search_hybrid_mode ?? true);
       setShowFreeOnly(data.show_free_only ?? false);
 
-      // Enabled Providers - use saved settings if available, otherwise auto-enable based on configured keys
+      // Enabled Providers — never show ON for sources that aren't configured
       if (data.enabled_providers) {
-        // User has explicitly set their preferences - use them
-        setEnabledProviders(data.enabled_providers);
+        setEnabledProviders(normalizeEnabledProviders(
+          data.enabled_providers,
+          data,
+          ollamaStatus?.connected
+        ));
       } else {
-        // First time or no saved preferences - auto-enable based on what's configured
-        const hasDirectConfigured = !!(data.openai_api_key_set || data.anthropic_api_key_set ||
-          data.google_api_key_set || data.mistral_api_key_set || data.deepseek_api_key_set);
+        const hasDirectConfigured = hasAnyDirectKey(data);
 
-        setEnabledProviders({
-          openrouter: !!data.openrouter_api_key_set || (!hasDirectConfigured && !ollamaStatus?.connected && !data.groq_api_key_set && !data.requesty_api_key_set),
-          requesty: !!data.requesty_api_key_set,
+        setEnabledProviders(normalizeEnabledProviders({
+          openrouter: !!data.openrouter_api_key_set || (!hasDirectConfigured && !ollamaStatus?.connected && !data.groq_api_key_set),
           ollama: ollamaStatus?.connected || false,
           groq: !!data.groq_api_key_set,
           direct: hasDirectConfigured,
-          custom: !!data.custom_endpoint_api_key_set
-        });
+          custom: !!data.custom_endpoint_url,
+        }, data, ollamaStatus?.connected));
       }
 
       // Individual direct provider toggles - load from saved settings
       if (data.direct_provider_toggles) {
-        setDirectProviderToggles(data.direct_provider_toggles);
+        setDirectProviderToggles(normalizeDirectProviderToggles(
+          data.direct_provider_toggles,
+          data
+        ));
       } else {
-        // Fallback for first-time users: auto-enable if API key is configured
-        setDirectProviderToggles({
+        setDirectProviderToggles(normalizeDirectProviderToggles({
           openai: !!data.openai_api_key_set,
           anthropic: !!data.anthropic_api_key_set,
           google: !!data.google_api_key_set,
           mistral: !!data.mistral_api_key_set,
-          deepseek: !!data.deepseek_api_key_set
-        });
+          deepseek: !!data.deepseek_api_key_set,
+          nvidia: !!data.nvidia_api_key_set,
+        }, data));
       }
 
       // Council Configuration (unified)
@@ -409,12 +479,13 @@ export default function Settings({ onClose, ollamaStatus, onRefreshOllama, initi
       // API key is not sent to frontend for security, similar to other keys
 
       // Prompts
-      setPrompts({
-        stage1_prompt: data.stage1_prompt || '',
-        stage2_prompt: data.stage2_prompt || '',
-        stage3_prompt: data.stage3_prompt || '',
+      setPrompts(normalizedPrompts);
 
-      });
+      // Debate Settings
+      setCritiqueMode(data.critique_mode || 'freeform');
+      setDebateRounds(data.debate_rounds || 1);
+      setAutoConverge(data.auto_converge !== undefined ? data.auto_converge : true);
+      setConvergenceThreshold(data.convergence_threshold || 2);
 
       // Clear Direct Keys (for security)
       setDirectKeys({
@@ -422,7 +493,8 @@ export default function Settings({ onClose, ollamaStatus, onRefreshOllama, initi
         anthropic_api_key: '',
         google_api_key: '',
         mistral_api_key: '',
-        deepseek_api_key: ''
+        deepseek_api_key: '',
+        nvidia_api_key: '',
       });
       setGroqApiKey(''); // Clear Groq key too
 
@@ -455,22 +527,10 @@ export default function Settings({ onClose, ollamaStatus, onRefreshOllama, initi
         setDirectAvailableModels(directModels);
       } catch (error) {
         console.error('Failed to fetch direct models:', error);
+        // Fallback to empty list or basic models if fetch fails
         setDirectAvailableModels([]);
       }
 
-      // Fetch Requesty models
-      try {
-        const requestyData = await api.getRequestyModels();
-        if (requestyData.models && requestyData.models.length > 0) {
-          const sorted = requestyData.models.sort((a, b) => (a.name || '').localeCompare(b.name || ''));
-          setRequestyAvailableModels(sorted);
-        } else {
-          setRequestyAvailableModels([]);
-        }
-      } catch (error) {
-        console.warn('Failed to fetch Requesty models:', error);
-        setRequestyAvailableModels([]);
-      }
     } catch (err) {
       console.warn('Failed to load models:', err);
     } finally {
@@ -485,12 +545,9 @@ export default function Settings({ onClose, ollamaStatus, onRefreshOllama, initi
         // Sort models alphabetically
         const sorted = data.models.sort((a, b) => (a.name || '').localeCompare(b.name || ''));
         setOllamaAvailableModels(sorted);
-      } else {
-        setOllamaAvailableModels([]);
       }
     } catch (err) {
       console.warn('Failed to load Ollama models:', err);
-      setOllamaAvailableModels([]);
     }
   };
 
@@ -534,6 +591,32 @@ export default function Settings({ onClose, ollamaStatus, onRefreshOllama, initi
       setCustomEndpointTestResult({ success: false, message: err.message });
     } finally {
       setIsTestingCustomEndpoint(false);
+    }
+  };
+
+  const resetCustomEndpointLocalState = () => {
+    setCustomEndpointName('');
+    setCustomEndpointUrl('');
+    setCustomEndpointApiKey('');
+    setCustomEndpointModels([]);
+    setCustomEndpointTestResult(null);
+  };
+
+  const handleClearCustomEndpoint = async () => {
+    try {
+      await api.updateSettings({
+        custom_endpoint_name: '',
+        custom_endpoint_url: '',
+        custom_endpoint_api_key: '',
+        enabled_providers: { ...enabledProviders, custom: false },
+      });
+      resetCustomEndpointLocalState();
+      setEnabledProviders(prev => ({ ...prev, custom: false }));
+      await loadSettings();
+      setSuccess(true);
+      setTimeout(() => setSuccess(false), 3000);
+    } catch (err) {
+      setError('Failed to disconnect custom endpoint');
     }
   };
 
@@ -642,6 +725,36 @@ export default function Settings({ onClose, ollamaStatus, onRefreshOllama, initi
     }
   };
 
+  const handleTestTinyfish = async () => {
+    if (!tinyfishApiKey && !settings.tinyfish_api_key_set) {
+      setTinyfishTestResult({ success: false, message: 'Please enter an API key first' });
+      return;
+    }
+    setIsTestingTinyfish(true);
+    setTinyfishTestResult(null);
+    try {
+      const keyToTest = tinyfishApiKey || null;
+      const result = await api.testTinyfishKey(keyToTest);
+      setTinyfishTestResult(result);
+
+      // Auto-save API key AND provider selection if validation succeeds
+      if (result.success && tinyfishApiKey) {
+        await api.updateSettings({
+          tinyfish_api_key: tinyfishApiKey,
+          search_provider: 'tinyfish'
+        });
+        setTinyfishApiKey('');
+        await loadSettings();
+        setSuccess(true);
+        setTimeout(() => setSuccess(false), 3000);
+      }
+    } catch (err) {
+      setTinyfishTestResult({ success: false, message: 'Test failed' });
+    } finally {
+      setIsTestingTinyfish(false);
+    }
+  };
+
   const handleTestOpenRouter = async () => {
     if (!openrouterApiKey && !settings.openrouter_api_key_set) {
       setOpenrouterTestResult({ success: false, message: 'Please enter an API key first' });
@@ -650,14 +763,19 @@ export default function Settings({ onClose, ollamaStatus, onRefreshOllama, initi
     setIsTestingOpenRouter(true);
     setOpenrouterTestResult(null);
     try {
+      // If input is empty but key is configured, pass null to test the saved key
       const keyToTest = openrouterApiKey || null;
       const result = await api.testOpenRouterKey(keyToTest);
       setOpenrouterTestResult(result);
 
+      // Auto-save API key if validation succeeds and a new key was provided
       if (result.success && openrouterApiKey) {
         await api.updateSettings({ openrouter_api_key: openrouterApiKey });
-        setOpenrouterApiKey('');
+        setOpenrouterApiKey(''); // Clear input after save
+
+        // Reload settings
         await loadSettings();
+
         setSuccess(true);
         setTimeout(() => setSuccess(false), 3000);
       }
@@ -665,32 +783,6 @@ export default function Settings({ onClose, ollamaStatus, onRefreshOllama, initi
       setOpenrouterTestResult({ success: false, message: 'Test failed' });
     } finally {
       setIsTestingOpenRouter(false);
-    }
-  };
-
-  const handleTestRequesty = async () => {
-    if (!requestyApiKey && !settings.requesty_api_key_set) {
-      setRequestyTestResult({ success: false, message: 'Please enter an API key first' });
-      return;
-    }
-    setIsTestingRequesty(true);
-    setRequestyTestResult(null);
-    try {
-      const keyToTest = requestyApiKey || null;
-      const result = await api.testRequestyKey(keyToTest);
-      setRequestyTestResult(result);
-
-      if (result.success && requestyApiKey) {
-        await api.updateSettings({ requesty_api_key: requestyApiKey });
-        setRequestyApiKey('');
-        await loadSettings();
-        setSuccess(true);
-        setTimeout(() => setSuccess(false), 3000);
-      }
-    } catch (err) {
-      setRequestyTestResult({ success: false, message: 'Test failed' });
-    } finally {
-      setIsTestingRequesty(false);
     }
   };
 
@@ -744,9 +836,6 @@ export default function Settings({ onClose, ollamaStatus, onRefreshOllama, initi
 
         // Reload settings
         await loadSettings();
-
-        // Load Ollama models with the URL we just tested so "Local" is enabled in Council Config
-        await loadOllamaModels(ollamaBaseUrl);
 
         setSuccess(true);
         setTimeout(() => setSuccess(false), 3000);
@@ -813,19 +902,20 @@ export default function Settings({ onClose, ollamaStatus, onRefreshOllama, initi
       openRouterFreeCount++;
     }
 
-    // Logic for OpenRouter free-tier warnings (50/day without credits; paid OpenRouter has higher limits)
+    // Logic for OpenRouter Warnings
+    // OpenRouter: 20 RPM, 50 RPD (without credits)
     if (openRouterFreeCount > 0) {
-      if (openRouterFreeCount === totalRequestsPerRun) {
+      if (totalRequestsPerRun > 10 && openRouterFreeCount >= 3) { // 10 requests is approx half of 20 RPM
         return {
-          type: 'warning',
-          title: 'Daily Limit (Free OpenRouter)',
-          message: 'Free OpenRouter models are limited to 50 requests/day (without credits). Use paid OpenRouter, Groq (14k/day), or Ollama for higher usage.'
+          type: 'error',
+          title: 'High Rate Limit Risk (OpenRouter)',
+          message: `Your council configuration generates ~${totalRequestsPerRun} requests per run, with ${openRouterFreeCount} free OpenRouter models. This may exceed the 20 requests/minute limit. Consider using Groq or Ollama for some members.`
         };
-      } else if (openRouterFreeCount >= 3) {
+      } else if (openRouterFreeCount === totalRequestsPerRun) { // All requests from free OpenRouter
         return {
           type: 'warning',
-          title: 'Free OpenRouter Usage',
-          message: `Your council uses ${openRouterFreeCount} free OpenRouter models (~${totalRequestsPerRun} requests per run). Free models: 50 requests/day without credits. Paid/groq/ollama have higher limits.`
+          title: 'Daily Limit Caution (OpenRouter)',
+          message: 'Free OpenRouter models are limited to 50 requests/day (without credits). Use Groq (14k/day) or Ollama for unlimited usage.'
         };
       }
     }
@@ -919,7 +1009,7 @@ export default function Settings({ onClose, ollamaStatus, onRefreshOllama, initi
 
     // Determine best default filter based on what's available
     let defaultFilter = 'remote';
-    const isRemoteAvailable = enabledProviders.openrouter || enabledProviders.requesty || enabledProviders.direct || enabledProviders.groq || enabledProviders.custom;
+    const isRemoteAvailable = enabledProviders.openrouter || enabledProviders.direct || enabledProviders.groq || enabledProviders.custom;
     const isLocalAvailable = enabledProviders.ollama && ollamaAvailableModels.length > 0;
 
     if (!isRemoteAvailable && isLocalAvailable) {
@@ -996,15 +1086,18 @@ export default function Settings({ onClose, ollamaStatus, onRefreshOllama, initi
         openrouter: false,
         ollama: false,
         groq: false,
-        direct: false
+        direct: false,
+        custom: false
       });
+      resetCustomEndpointLocalState();
 
       setDirectProviderToggles({
         openai: false,
         anthropic: false,
         google: false,
         mistral: false,
-        deepseek: false
+        deepseek: false,
+        nvidia: false
       });
 
       // 2. Reset Models to "Blank Slate" (User must select)
@@ -1016,7 +1109,6 @@ export default function Settings({ onClose, ollamaStatus, onRefreshOllama, initi
       setStage2Temperature(0.3);
 
       // Reset filters to 'remote' default
-      // Reset filters to 'remote' default
       setCouncilMemberFilters({ 0: 'remote', 1: 'remote' });
       setChairmanFilter('remote');
 
@@ -1027,14 +1119,16 @@ export default function Settings({ onClose, ollamaStatus, onRefreshOllama, initi
       setShowFreeOnly(false);
       setOllamaBaseUrl('http://localhost:11434');
 
+      // Reset debate settings
+      setCritiqueMode('freeform');
+      setDebateRounds(1);
+      setAutoConverge(true);
+      setConvergenceThreshold(2);
+
       // 4. Reset Prompts to System Defaults (keep these useful)
       const defaults = await api.getDefaultSettings();
-      setPrompts({
-        stage1_prompt: defaults.stage1_prompt,
-        stage2_prompt: defaults.stage2_prompt,
-        stage3_prompt: defaults.stage3_prompt,
-
-      });
+      const defaultPrompts = buildPromptValues(defaults);
+      setPrompts(defaultPrompts);
 
       // 5. Save the reset settings to backend
       const updates = {
@@ -1044,14 +1138,19 @@ export default function Settings({ onClose, ollamaStatus, onRefreshOllama, initi
           openrouter: false,
           ollama: false,
           groq: false,
-          direct: false
+          direct: false,
+          custom: false
         },
+        custom_endpoint_name: '',
+        custom_endpoint_url: '',
+        custom_endpoint_api_key: '',
         direct_provider_toggles: {
           openai: false,
           anthropic: false,
           google: false,
           mistral: false,
-          deepseek: false
+          deepseek: false,
+          nvidia: false
         },
         council_models: ['', ''],
         chairman_model: '',
@@ -1062,9 +1161,11 @@ export default function Settings({ onClose, ollamaStatus, onRefreshOllama, initi
         council_member_filters: { 0: 'remote', 1: 'remote' },
         chairman_filter: 'remote',
         search_query_filter: 'remote',
-        stage1_prompt: defaults.stage1_prompt,
-        stage2_prompt: defaults.stage2_prompt,
-        stage3_prompt: defaults.stage3_prompt,
+        critique_mode: 'freeform',
+        debate_rounds: 1,
+        auto_converge: true,
+        convergence_threshold: 2,
+        ...defaultPrompts,
       };
       await api.updateSettings(updates);
 
@@ -1184,11 +1285,18 @@ export default function Settings({ onClose, ollamaStatus, onRefreshOllama, initi
         if (config.show_free_only !== undefined) setShowFreeOnly(config.show_free_only);
 
         // Apply Enabled Providers
-        if (config.enabled_providers) {
-          setEnabledProviders(config.enabled_providers);
+        if (config.enabled_providers && settings) {
+          setEnabledProviders(normalizeEnabledProviders(
+            config.enabled_providers,
+            settings,
+            ollamaStatus?.connected
+          ));
         }
-        if (config.direct_provider_toggles) {
-          setDirectProviderToggles(config.direct_provider_toggles);
+        if (config.direct_provider_toggles && settings) {
+          setDirectProviderToggles(normalizeDirectProviderToggles(
+            config.direct_provider_toggles,
+            settings
+          ));
         }
 
         // Apply Council Configuration (unified)
@@ -1256,8 +1364,8 @@ export default function Settings({ onClose, ollamaStatus, onRefreshOllama, initi
       return;
     }
 
-    // If council members are selected but no chairman, show error
-    if (hasAnyCouncilMember && !hasChairman) {
+    const currentMode = settings?.execution_mode || DEFAULT_EXECUTION_MODE;
+    if (currentMode === 'full' && hasAnyCouncilMember && !hasChairman) {
       setValidationErrors({ chairman: true });
       setError('Please select a Chairman to complete the council configuration.');
       
@@ -1297,6 +1405,11 @@ export default function Settings({ onClose, ollamaStatus, onRefreshOllama, initi
         // Remote/Local filters for each selection
         council_member_filters: councilMemberFilters,
         chairman_filter: chairmanFilter,
+        // Debate Settings
+        critique_mode: critiqueMode,
+        debate_rounds: debateRounds,
+        auto_converge: autoConverge,
+        convergence_threshold: convergenceThreshold,
         // Prompts
         ...prompts
       };
@@ -1310,9 +1423,6 @@ export default function Settings({ onClose, ollamaStatus, onRefreshOllama, initi
       }
       if (openrouterApiKey && !openrouterApiKey.startsWith('•')) {
         updates.openrouter_api_key = openrouterApiKey;
-      }
-      if (requestyApiKey && !requestyApiKey.startsWith('•')) {
-        updates.requesty_api_key = requestyApiKey;
       }
       if (groqApiKey && !groqApiKey.startsWith('•')) {
         updates.groq_api_key = groqApiKey;
@@ -1348,6 +1458,7 @@ export default function Settings({ onClose, ollamaStatus, onRefreshOllama, initi
       case 'Google': return !!(directKeys.google_api_key || settings?.google_api_key_set);
       case 'Mistral': return !!(directKeys.mistral_api_key || settings?.mistral_api_key_set);
       case 'DeepSeek': return !!(directKeys.deepseek_api_key || settings?.deepseek_api_key_set);
+      case 'NVIDIA': return !!(directKeys.nvidia_api_key || settings?.nvidia_api_key_set);
       default: return false;
     }
   };
@@ -1359,11 +1470,6 @@ export default function Settings({ onClose, ollamaStatus, onRefreshOllama, initi
     // Add OpenRouter models if enabled
     if (enabledProviders.openrouter) {
       models.push(...availableModels);
-    }
-
-    // Add Requesty models if enabled
-    if (enabledProviders.requesty) {
-      models.push(...requestyAvailableModels);
     }
 
     // Add Ollama models if enabled
@@ -1410,7 +1516,6 @@ export default function Settings({ onClose, ollamaStatus, onRefreshOllama, initi
   }, [
     enabledProviders,
     availableModels,
-    requestyAvailableModels,
     ollamaAvailableModels,
     directAvailableModels,
     customEndpointModels,
@@ -1428,12 +1533,15 @@ export default function Settings({ onClose, ollamaStatus, onRefreshOllama, initi
     // 1. If it's an OpenRouter model, checks if it's free.
     // 2. If it's NOT OpenRouter (Direct, Ollama, Custom), keep it visible.
     return all.filter(m => {
-      const isOpenRouter = m.source === 'openrouter' || m.provider === 'OpenRouter' || m.id.startsWith('openrouter:') || (m.id.includes('/') && !m.id.startsWith('requesty:'));
-      const isRequesty = m.source === 'requesty' || m.provider === 'Requesty' || m.id.startsWith('requesty:');
+      // Check if it's an OpenRouter model
+      const isOpenRouter = m.source === 'openrouter' || m.provider === 'OpenRouter' || m.id.startsWith('openrouter:');
 
-      if (isOpenRouter || isRequesty) {
+      // If it is OpenRouter, apply the free filter
+      if (isOpenRouter) {
         return m.is_free;
       }
+
+      // Otherwise (Direct, Ollama, Custom), always show
       return true;
     });
   }, [allAvailableModels, showFreeOnly]);
@@ -1443,17 +1551,29 @@ export default function Settings({ onClose, ollamaStatus, onRefreshOllama, initi
   // Filter models by remote/local for specific use case
   const filterByRemoteLocal = (models, filter) => {
     if (filter === 'local') {
+      // Only Ollama models
       return models.filter(m => m.id.startsWith('ollama:'));
+    } else {
+      // Remote: OpenRouter + Direct providers (exclude Ollama)
+      return models.filter(m => !m.id.startsWith('ollama:'));
     }
-    // Remote: OpenRouter, Requesty, Direct providers (exclude Ollama)
-    return models.filter(m => !m.id.startsWith('ollama:'));
   };
 
   if (!settings) {
     return (
-      <div className="settings-overlay">
-        <div className="settings-modal">
-          <div className="settings-loading">Loading settings...</div>
+      <div className="settings-overlay" onClick={onClose}>
+        <div className="settings-modal" onClick={e => e.stopPropagation()}>
+          <div className="settings-header">
+            <h2>Settings</h2>
+            <button className="close-button" onClick={onClose}>&times;</button>
+          </div>
+          <div className="settings-body" style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', minHeight: '200px' }}>
+            {error ? (
+              <div className="settings-error">{error}</div>
+            ) : (
+              <div className="settings-loading">Loading settings...</div>
+            )}
+          </div>
         </div>
       </div>
     );
@@ -1487,10 +1607,22 @@ export default function Settings({ onClose, ollamaStatus, onRefreshOllama, initi
               Council Config
             </button>
             <button
+              className={`sidebar-nav-item ${activeSection === 'debate' ? 'active' : ''}`}
+              onClick={() => setActiveSection('debate')}
+            >
+              Council Debate Config
+            </button>
+            <button
               className={`sidebar-nav-item ${activeSection === 'prompts' ? 'active' : ''}`}
               onClick={() => setActiveSection('prompts')}
             >
-              System Prompts
+              Council System Prompts
+            </button>
+            <button
+              className={`sidebar-nav-item ${activeSection === 'advisor_prompts' ? 'active' : ''}`}
+              onClick={() => setActiveSection('advisor_prompts')}
+            >
+              Advisor System Prompts
             </button>
             <button
               className={`sidebar-nav-item ${activeSection === 'search' ? 'active' : ''}`}
@@ -1513,18 +1645,14 @@ export default function Settings({ onClose, ollamaStatus, onRefreshOllama, initi
             {activeSection === 'llm_keys' && (
               <ProviderSettings
                 settings={settings}
+                availableModels={availableModels}
+                directAvailableModels={directAvailableModels}
                 // OpenRouter
                 openrouterApiKey={openrouterApiKey}
                 setOpenrouterApiKey={(val) => { setOpenrouterApiKey(val); setOpenrouterTestResult(null); }}
                 handleTestOpenRouter={handleTestOpenRouter}
                 isTestingOpenRouter={isTestingOpenRouter}
                 openrouterTestResult={openrouterTestResult}
-                // Requesty
-                requestyApiKey={requestyApiKey}
-                setRequestyApiKey={(val) => { setRequestyApiKey(val); setRequestyTestResult(null); }}
-                handleTestRequesty={handleTestRequesty}
-                isTestingRequesty={isTestingRequesty}
-                requestyTestResult={requestyTestResult}
                 // Groq
                 groqApiKey={groqApiKey}
                 setGroqApiKey={(val) => { setGroqApiKey(val); setGroqTestResult(null); }}
@@ -1533,6 +1661,7 @@ export default function Settings({ onClose, ollamaStatus, onRefreshOllama, initi
                 groqTestResult={groqTestResult}
                 // Ollama
                 ollamaBaseUrl={ollamaBaseUrl}
+                ollamaAvailableModels={ollamaAvailableModels}
                 setOllamaBaseUrl={(val) => { setOllamaBaseUrl(val); setOllamaTestResult(null); }}
                 handleTestOllama={handleTestOllama}
                 isTestingOllama={isTestingOllama}
@@ -1556,6 +1685,7 @@ export default function Settings({ onClose, ollamaStatus, onRefreshOllama, initi
                 isTestingCustomEndpoint={isTestingCustomEndpoint}
                 customEndpointTestResult={customEndpointTestResult}
                 customEndpointModels={customEndpointModels}
+                onClearCustomEndpoint={handleClearCustomEndpoint}
               />
             )}
 
@@ -1583,6 +1713,15 @@ export default function Settings({ onClose, ollamaStatus, onRefreshOllama, initi
                 setCouncilTemperature={setCouncilTemperature}
                 chairmanTemperature={chairmanTemperature}
                 setChairmanTemperature={setChairmanTemperature}
+                // Debate state
+                critiqueMode={critiqueMode}
+                setCritiqueMode={setCritiqueMode}
+                debateRounds={debateRounds}
+                setDebateRounds={setDebateRounds}
+                autoConverge={autoConverge}
+                setAutoConverge={setAutoConverge}
+                convergenceThreshold={convergenceThreshold}
+                setConvergenceThreshold={setConvergenceThreshold}
                 // Data
                 allModels={allAvailableModels}
                 filteredModels={filteredAvailableModels}
@@ -1603,9 +1742,25 @@ export default function Settings({ onClose, ollamaStatus, onRefreshOllama, initi
               />
             )}
 
+            {/* DEBATE CONFIGURATION */}
+            {activeSection === 'debate' && (
+              <DebateSettings
+                critiqueMode={critiqueMode}
+                setCritiqueMode={setCritiqueMode}
+                debateRounds={debateRounds}
+                setDebateRounds={setDebateRounds}
+                autoConverge={autoConverge}
+                setAutoConverge={setAutoConverge}
+                convergenceThreshold={convergenceThreshold}
+                setConvergenceThreshold={setConvergenceThreshold}
+                executionMode={settings?.execution_mode || 'full'}
+              />
+            )}
+
             {/* SYSTEM PROMPTS */}
             {activeSection === 'prompts' && (
               <PromptSettings
+                variant="council"
                 prompts={prompts}
                 handlePromptChange={handlePromptChange}
                 handleResetPrompt={handleResetPrompt}
@@ -1613,6 +1768,18 @@ export default function Settings({ onClose, ollamaStatus, onRefreshOllama, initi
                 setActivePromptTab={setActivePromptTab}
                 stage2Temperature={stage2Temperature}
                 setStage2Temperature={setStage2Temperature}
+              />
+            )}
+
+            {/* ADVISOR SYSTEM PROMPTS */}
+            {activeSection === 'advisor_prompts' && (
+              <PromptSettings
+                variant="advisor"
+                prompts={prompts}
+                handlePromptChange={handlePromptChange}
+                handleResetPrompt={handleResetPrompt}
+                activePromptTab={activeAdvisorPromptTab}
+                setActivePromptTab={setActiveAdvisorPromptTab}
               />
             )}
 
@@ -1643,6 +1810,13 @@ export default function Settings({ onClose, ollamaStatus, onRefreshOllama, initi
                 isTestingBrave={isTestingBrave}
                 braveTestResult={braveTestResult}
                 setBraveTestResult={setBraveTestResult}
+                // TinyFish
+                tinyfishApiKey={tinyfishApiKey}
+                setTinyfishApiKey={setTinyfishApiKey}
+                handleTestTinyfish={handleTestTinyfish}
+                isTestingTinyfish={isTestingTinyfish}
+                tinyfishTestResult={tinyfishTestResult}
+                setTinyfishTestResult={setTinyfishTestResult}
                 // Other Settings
                 fullContentResults={fullContentResults}
                 setFullContentResults={setFullContentResults}

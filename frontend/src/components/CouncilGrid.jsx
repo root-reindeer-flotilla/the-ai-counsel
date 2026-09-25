@@ -1,100 +1,23 @@
 import React from 'react';
 import { createPortal } from 'react-dom';
+import { getProviderInfo, getModelDisplayName, getCouncilLayoutClass, PROVIDER_CONFIG } from '../utils/councilGridUtils';
 import './CouncilGrid.css';
-
-// Import Provider Icons
-import openaiLogo from '../assets/icons/openai.svg';
-import anthropicLogo from '../assets/icons/anthropic.svg';
-import googleLogo from '../assets/icons/google.svg';
-import mistralLogo from '../assets/icons/mistral.svg';
-import ollamaLogo from '../assets/icons/ollama.svg';
-import deepseekLogo from '../assets/icons/deepseek.svg';
-import groqLogo from '../assets/icons/groq.svg';
-import openrouterLogo from '../assets/icons/openrouter.svg';
-import customLogo from '../assets/icons/openai-compatible.svg';
-
-const PROVIDER_CONFIG = {
-    openai: { color: '#10a37f', label: 'OpenAI', logo: openaiLogo },
-    anthropic: { color: '#d97757', label: 'Anthropic', logo: anthropicLogo },
-    google: { color: '#4285f4', label: 'Google', logo: googleLogo },
-    mistral: { color: '#fcd34d', label: 'Mistral', logo: mistralLogo },
-    groq: { color: '#f55036', label: 'Groq', logo: groqLogo },
-    ollama: { color: '#ffffff', label: 'Local', logo: ollamaLogo },
-    deepseek: { color: '#4e61e6', label: 'DeepSeek', logo: deepseekLogo },
-    openrouter: { color: '#7f5af0', label: 'OpenRouter', logo: openrouterLogo },
-    requesty: { color: '#0ea5e9', label: 'Requesty', logo: customLogo },
-    custom: { color: '#06b6d4', label: 'Custom', logo: customLogo },
-    default: { color: '#888888', label: 'Model', logo: null, icon: '🤖' }
-};
-
-const getProviderInfo = (modelId) => {
-    if (!modelId) return PROVIDER_CONFIG.default;
-    const id = modelId.toLowerCase();
-
-    // Check for provider prefixes FIRST (order matters!)
-    if (id.startsWith('custom:')) return PROVIDER_CONFIG.custom;
-    if (id.startsWith('requesty:')) return PROVIDER_CONFIG.requesty;
-    if (id.startsWith('ollama:')) return PROVIDER_CONFIG.ollama;
-    if (id.startsWith('groq:')) return PROVIDER_CONFIG.groq;
-
-    // OpenRouter handling
-    if (id.startsWith('openrouter:') || id.includes('openrouter')) return PROVIDER_CONFIG.openrouter;
-
-    // Check for OpenRouter path format (provider/model) - but not requesty (already handled)
-    if (id.includes('/')) return PROVIDER_CONFIG.openrouter;
-
-    // Check for specific model identifiers (only if no prefix matched)
-    if (id.includes('gpt') || id.includes('openai')) return PROVIDER_CONFIG.openai;
-    if (id.includes('claude') || id.includes('anthropic')) return PROVIDER_CONFIG.anthropic;
-    if (id.includes('gemini') || id.includes('google')) return PROVIDER_CONFIG.google;
-    if (id.includes('mistral') || id.includes('mixtral')) return PROVIDER_CONFIG.mistral;
-    if (id.includes('deepseek')) return PROVIDER_CONFIG.deepseek;
-
-    // Fallback for other known patterns
-    if (id.includes('llama') || id.includes('grok')) {
-        return PROVIDER_CONFIG.openrouter;
-    }
-
-    return PROVIDER_CONFIG.default;
-};
-
-const getModelDisplayName = (modelId) => {
-    if (!modelId) return 'Model';
-    if (modelId.startsWith('placeholder')) return 'Council Member';
-
-    let name = modelId;
-
-    // Remove :free suffix first (from OpenRouter free models)
-    name = name.replace(/:free$/, '');
-
-    // Remove provider prefixes (e.g., "openrouter:", "ollama:", "groq:")
-    if (name.includes(':')) {
-        name = name.split(':').slice(1).join(':');
-    }
-
-    // Remove path-based prefixes (e.g., "openai/", "anthropic/")
-    if (name.includes('/')) {
-        name = name.split('/').pop();
-    }
-
-    return name;
-};
 
 export default function CouncilGrid({
     models = [],
     chairman = null,
     status = 'idle', // 'idle', 'thinking', 'complete'
-    progress = {}    // { currentModel: 'id', completed: ['id1', 'id2'] }
+    progress = {},    // { currentModel: 'id', completed: ['id1', 'id2'] }
+    showChairman = true,
+    chairmanDisabled = false,
+    usePlaceholders = true,
 }) {
-    // Filter out empty/null model IDs, then use placeholders if none remain
+    // Filter out empty/null model IDs; optional decorative placeholders when empty
     const validModels = models.filter(m => m && m.trim() !== '');
-    const displayModels = validModels.length > 0 ? validModels : ['placeholder-1', 'placeholder-2', 'placeholder-3'];
+    const displayModels = validModels.length > 0
+        ? validModels
+        : (usePlaceholders ? ['placeholder-1', 'placeholder-2', 'placeholder-3'] : []);
 
-
-    // Debug: Log model IDs
-
-
-    // Tooltip State
     const [tooltip, setTooltip] = React.useState({ visible: false, x: 0, y: 0, content: '' });
 
     const handleMouseEnter = (e, modelId) => {
@@ -119,36 +42,9 @@ export default function CouncilGrid({
         setTooltip(prev => ({ ...prev, visible: false }));
     };
 
-    // Helper to get chairman info
     const chairmanInfo = chairman ? getProviderInfo(chairman) : null;
-
-    // Calculate grid layout based on member count
-    const memberCount = displayModels.length;
-    let gridClass = 'council-grid';
-
-    if (memberCount <= 2) {
-        gridClass += ' layout-2-members';
-    } else if (memberCount === 3) {
-        gridClass += ' layout-3-members';
-    } else if (memberCount === 4) {
-        gridClass += ' layout-4-members';
-    } else if (memberCount === 5) {
-        gridClass += ' layout-5-members';
-    } else if (memberCount === 6) {
-        gridClass += ' layout-6-members';
-    } else if (memberCount === 7) {
-        gridClass += ' layout-7-members';
-    } else if (memberCount === 8) {
-        gridClass += ' layout-8-members';
-    } else if (memberCount === 9) {
-        gridClass += ' layout-9-members';
-    } else if (memberCount === 10) {
-        gridClass += ' layout-10-members';
-    } else if (memberCount === 11) {
-        gridClass += ' layout-11-members';
-    } else {
-        gridClass += ' layout-12-members'; // 12 (max)
-    }
+    const layoutClass = getCouncilLayoutClass(displayModels.length, showChairman);
+    const gridClass = layoutClass ? `council-grid ${layoutClass}` : 'council-grid';
 
     return (
         <div className={gridClass}>
@@ -202,7 +98,13 @@ export default function CouncilGrid({
                                 <span className="avatar-icon">{info.icon}</span>
                             )}
                             {cardState === 'active' && <div className="thinking-ring"></div>}
-                            {cardState === 'done' && <div className="done-badge">✓</div>}
+                            {cardState === 'done' ? (
+                                <div className="done-badge">✓</div>
+                            ) : (
+                                status === 'thinking' && !isPlaceholder && cardState !== 'active' && (
+                                    <div className="working-badge" title="Still working...">⏳</div>
+                                )
+                            )}
                         </div>
                         <div className="council-info">
                             <span className="model-name">
@@ -214,35 +116,41 @@ export default function CouncilGrid({
                 );
             })}
 
-            {/* Chairman Card - Always show, but state changes */}
-            <div
-                className={`council-card chairman ${status === 'thinking' ? 'waiting' : 'ready'}`}
-                style={{ '--provider-color': (status !== 'thinking' && chairman) ? getProviderInfo(chairman).color : '#94a3b8' }}
-                onMouseEnter={(e) => status !== 'thinking' && handleMouseEnter(e, chairman || 'Chairman')}
-                onMouseMove={handleMouseMove}
-                onMouseLeave={handleMouseLeave}
-            >
-                <div className="role-badge chairman">Chairman</div>
-                <div className="council-avatar">
-                    {status !== 'thinking' && chairmanInfo && chairmanInfo.logo ? (
-                        <img
-                            src={chairmanInfo.logo}
-                            alt={chairmanInfo.label}
-                            className="provider-logo"
-                        />
-                    ) : (
-                        <span className="avatar-icon">{status === 'thinking' ? '⏳' : (chairmanInfo ? chairmanInfo.icon : '⚖️')}</span>
-                    )}
+            {/* Chairman Card */}
+            {showChairman && (
+                <div
+                    className={`council-card chairman ${status === 'thinking' ? 'waiting' : 'ready'} ${chairmanDisabled ? 'chairman-disabled' : ''}`}
+                    style={{ '--provider-color': (chairman && !chairmanDisabled) ? getProviderInfo(chairman).color : '#94a3b8' }}
+                    onMouseEnter={(e) => status !== 'thinking' && !chairmanDisabled && handleMouseEnter(e, chairman || 'Chairman')}
+                    onMouseMove={handleMouseMove}
+                    onMouseLeave={handleMouseLeave}
+                >
+                    <div className="role-badge chairman">Chairman</div>
+                    <div className="council-avatar">
+                        {chairmanInfo && chairmanInfo.logo && !chairmanDisabled ? (
+                            <img
+                                src={chairmanInfo.logo}
+                                alt={chairmanInfo.label}
+                                className="provider-logo"
+                            />
+                        ) : (
+                            <span className="avatar-icon">{chairmanDisabled ? '⚖️' : (chairmanInfo ? chairmanInfo.icon : '⚖️')}</span>
+                        )}
+                        {status === 'thinking' && <div className="thinking-ring"></div>}
+                        {status === 'thinking' && (
+                            <div className="working-badge" title="Verdict pending...">⏳</div>
+                        )}
+                    </div>
+                    <div className="council-info">
+                        <span className="model-name">
+                            {chairmanDisabled ? 'Not Active' : (chairman ? getModelDisplayName(chairman) : 'Model')}
+                        </span>
+                        <span className="provider-label">
+                            {status === 'thinking' ? 'Verdict Pending...' : chairmanDisabled ? 'Full Deliberation only' : 'Final Verdict'}
+                        </span>
+                    </div>
                 </div>
-                <div className="council-info">
-                    <span className="model-name">
-                        {status === 'thinking' ? 'Verdict Pending' : (chairman ? getModelDisplayName(chairman) : 'Model')}
-                    </span>
-                    <span className="provider-label">
-                        {status === 'thinking' ? 'Waiting...' : 'Final Verdict'}
-                    </span>
-                </div>
-            </div>
+            )}
         </div>
     );
 }

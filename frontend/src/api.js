@@ -5,37 +5,57 @@
 // Dynamically determine API base URL based on current hostname
 // This allows the app to work on both localhost and network IPs
 const getApiBase = () => {
+  if (window.__LLM_COUNCIL_CONFIG__?.apiUrl !== undefined) {
+    return window.__LLM_COUNCIL_CONFIG__.apiUrl;
+  }
   if (import.meta.env.VITE_API_URL) {
     return import.meta.env.VITE_API_URL;
   }
-  const hostname =
-    typeof window !== 'undefined' && window.location?.hostname
-      ? window.location.hostname
-      : 'localhost';
+  const hostname = window.location.hostname;
   return `http://${hostname}:8001`;
 };
 
 const API_BASE = getApiBase();
 
-export const parseSseDataChunk = (buffer, chunk, onEvent) => {
-  const text = `${buffer}${chunk}`;
-  const lines = text.split('\n');
-  const nextBuffer = lines.pop() || '';
+export function buildAvailableSearchProviders(settings) {
+  const providers = [{ id: 'duckduckgo', name: 'DuckDuckGo' }];
+  if (settings.serper_api_key_set) providers.push({ id: 'serper', name: 'Serper (Google)' });
+  if (settings.tavily_api_key_set) providers.push({ id: 'tavily', name: 'Tavily' });
+  if (settings.brave_api_key_set) providers.push({ id: 'brave', name: 'Brave Search' });
+  if (settings.tinyfish_api_key_set) providers.push({ id: 'tinyfish', name: 'TinyFish' });
+  return providers;
+}
 
-  for (const line of lines) {
-    if (!line.startsWith('data: ')) continue;
+export const DEFAULT_EXECUTION_MODE = 'full';
 
-    const data = line.slice(6);
-    try {
-      const event = JSON.parse(data);
-      onEvent(event.type, event);
-    } catch (e) {
-      console.error('Failed to parse SSE event:', e);
+async function _consumeSSEStream(body, onEvent) {
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  try {
+    let buffer = '';
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const parts = buffer.split('\n\n');
+      buffer = parts.pop();
+      for (const block of parts) {
+        for (const line of block.split('\n')) {
+          if (line.startsWith('data: ')) {
+            try {
+              const event = JSON.parse(line.slice(6));
+              onEvent(event.type, event);
+            } catch (e) {
+              console.error('Failed to parse SSE event:', e);
+            }
+          }
+        }
+      }
     }
+  } finally {
+    reader.releaseLock();
   }
-
-  return nextBuffer;
-};
+}
 
 export const api = {
   /**
@@ -52,13 +72,13 @@ export const api = {
   /**
    * Create a new conversation.
    */
-  async createConversation() {
+  async createConversation(options = {}) {
     const response = await fetch(`${API_BASE}/api/conversations`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({}),
+      body: JSON.stringify(options),
     });
     if (!response.ok) {
       throw new Error('Failed to create conversation');
@@ -75,6 +95,20 @@ export const api = {
     );
     if (!response.ok) {
       throw new Error('Failed to get conversation');
+    }
+    return response.json();
+  },
+
+  /**
+   * Get live progress for an active streaming run (council or debate).
+   * Returns {active: false} when no run is active for this conversation.
+   */
+  async getConversationProgress(conversationId) {
+    const response = await fetch(
+      `${API_BASE}/api/conversations/${conversationId}/progress`
+    );
+    if (!response.ok) {
+      throw new Error('Failed to get conversation progress');
     }
     return response.json();
   },
@@ -163,6 +197,23 @@ export const api = {
    */
   async testBraveKey(apiKey) {
     const response = await fetch(`${API_BASE}/api/settings/test-brave`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ api_key: apiKey }),
+    });
+    if (!response.ok) {
+      throw new Error('Failed to test API key');
+    }
+    return response.json();
+  },
+
+  /**
+   * Test TinyFish API key.
+   */
+  async testTinyfishKey(apiKey) {
+    const response = await fetch(`${API_BASE}/api/settings/test-tinyfish`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -266,29 +317,6 @@ export const api = {
   },
 
   /**
-   * Get available models from Requesty.
-   */
-  async getRequestyModels() {
-    const response = await fetch(`${API_BASE}/api/models/requesty`);
-    if (!response.ok) {
-      throw new Error('Failed to get Requesty models');
-    }
-    return response.json();
-  },
-
-  /**
-   * Test Requesty API key.
-   */
-  async testRequestyKey(apiKey) {
-    const response = await fetch(`${API_BASE}/api/settings/test-requesty`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ api_key: apiKey || null }),
-    });
-    return response.json();
-  },
-
-  /**
    * Get available models from Ollama.
    */
   async getOllamaModels(baseUrl) {
@@ -342,105 +370,60 @@ export const api = {
     return response.json();
   },
 
-  /**
-   * Start a resumable deliberation run.
-   */
-  async startRun(conversationId, options) {
-    const { content, webSearch = false, executionMode = 'full' } = options;
+  async getPersonas() {
+    const response = await fetch(`${API_BASE}/api/personas`);
+    if (!response.ok) throw new Error('Failed to fetch personas');
+    return response.json();
+  },
+
+  async updatePersona(personaId, overrides) {
+    const response = await fetch(`${API_BASE}/api/personas/${personaId}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(overrides),
+    });
+    if (!response.ok) throw new Error('Failed to update persona');
+    return response.json();
+  },
+
+  async resetPersona(personaId) {
+    const response = await fetch(`${API_BASE}/api/personas/${personaId}/override`, {
+      method: 'DELETE',
+    });
+    if (!response.ok) throw new Error('Failed to reset persona');
+    return response.json();
+  },
+
+  async sendDebateStream(conversationId, options, onEvent, signal) {
+    const body = {
+      question: options.question,
+      persona_ids: options.personaIds,
+      model_assignments: options.modelAssignments || null,
+      default_model: options.defaultModel || null,
+      tiebreaker_model: options.tiebreakerModel || null,
+      max_rounds: options.maxRounds || 3,
+      search_provider: options.searchProvider || null,
+    };
+
     const response = await fetch(
-      `${API_BASE}/api/conversations/${conversationId}/runs`,
+      `${API_BASE}/api/conversations/${conversationId}/debate/stream?_t=${Date.now()}`,
       {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           'Cache-Control': 'no-cache',
         },
-        body: JSON.stringify({ content, web_search: webSearch, execution_mode: executionMode }),
-      }
-    );
-    if (!response.ok) {
-      throw new Error('Failed to start run');
-    }
-    return response.json();
-  },
-
-  /**
-   * Get active run for a conversation.
-   */
-  async getActiveRun(conversationId) {
-    const response = await fetch(`${API_BASE}/api/conversations/${conversationId}/runs/active`);
-    if (!response.ok) {
-      throw new Error('Failed to get active run');
-    }
-    return response.json();
-  },
-
-  /**
-   * Get a run snapshot.
-   */
-  async getRun(runId) {
-    const response = await fetch(`${API_BASE}/api/runs/${runId}`);
-    if (!response.ok) {
-      throw new Error('Failed to get run');
-    }
-    return response.json();
-  },
-
-  /**
-   * Stream events from an existing run.
-   */
-  async streamRun(runId, onEvent, signal, fromEvent = 0) {
-    const response = await fetch(
-      `${API_BASE}/api/runs/${runId}/stream?from_event=${encodeURIComponent(fromEvent)}&_t=${Date.now()}`,
-      {
-      method: 'GET',
-      headers: {
-        'Cache-Control': 'no-cache',
-      },
-      signal,
-      cache: 'no-store',
+        body: JSON.stringify(body),
+        signal,
+        cache: 'no-store',
       }
     );
 
     if (!response.ok) {
-      throw new Error('Failed to stream run');
+      throw new Error('Failed to start debate stream');
     }
 
-    const reader = response.body.getReader();
-    const decoder = new TextDecoder();
-    let sseBuffer = '';
-
-    try {
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        const chunk = decoder.decode(value, { stream: true });
-        sseBuffer = parseSseDataChunk(sseBuffer, chunk, onEvent);
-      }
-
-      const tail = decoder.decode();
-      if (tail || sseBuffer) {
-        parseSseDataChunk('', `${sseBuffer}${tail}\n`, onEvent);
-      }
-    } finally {
-      reader.releaseLock();
-    }
-  },
-
-  /**
-   * Force-stop an active run.
-   */
-  async cancelRun(runId) {
-    const response = await fetch(`${API_BASE}/api/runs/${runId}/cancel`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-    });
-    if (!response.ok) {
-      throw new Error('Failed to cancel run');
-    }
-    return response.json();
+    await _consumeSSEStream(response.body, onEvent);
   },
 
   /**
@@ -455,7 +438,87 @@ export const api = {
    * @returns {Promise<void>}
    */
   async sendMessageStream(conversationId, options, onEvent, signal) {
-    const run = await this.startRun(conversationId, options);
-    await this.streamRun(run.run_id, onEvent, signal);
+    const {
+      content,
+      searchProvider = null,
+      executionMode = 'full',
+      councilModels = null,
+      chairmanModel = null,
+    } = options;
+    const body = {
+      content,
+      search_provider: searchProvider,
+      execution_mode: executionMode,
+    };
+    if (councilModels && councilModels.length > 0) {
+      body.council_models = councilModels;
+    }
+    if (chairmanModel) {
+      body.chairman_model = chairmanModel;
+    }
+    const response = await fetch(
+      `${API_BASE}/api/conversations/${conversationId}/message/stream?_t=${Date.now()}`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Cache-Control': 'no-cache',
+        },
+        body: JSON.stringify(body),
+        signal,
+        cache: 'no-store',
+      }
+    );
+
+    if (!response.ok) {
+      throw new Error('Failed to send message');
+    }
+
+    await _consumeSSEStream(response.body, onEvent);
+  },
+
+  /**
+   * Send a message and stream the multi-round iterative debate process.
+   */
+  async streamDebateMessage(conversationId, options, onEvent, signal) {
+    const {
+      content,
+      searchProvider = null,
+      executionMode = 'full',
+      councilModels = null,
+      chairmanModel = null,
+      debateRounds = null,
+    } = options;
+    const body = {
+      content,
+      search_provider: searchProvider,
+      execution_mode: executionMode,
+      debate_rounds: debateRounds,
+    };
+    if (councilModels && councilModels.length > 0) {
+      body.council_models = councilModels;
+    }
+    if (chairmanModel) {
+      body.chairman_model = chairmanModel;
+    }
+    const response = await fetch(
+      `${API_BASE}/api/conversations/${conversationId}/message/debate?_t=${Date.now()}`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Cache-Control': 'no-cache',
+        },
+        body: JSON.stringify(body),
+        signal,
+        cache: 'no-store',
+      }
+    );
+
+    if (!response.ok) {
+      throw new Error('Failed to start debate stream');
+    }
+
+    await _consumeSSEStream(response.body, onEvent);
   },
 };

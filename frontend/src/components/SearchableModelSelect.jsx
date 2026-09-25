@@ -1,3 +1,4 @@
+import { useMemo } from 'react';
 import Select from 'react-select';
 
 /**
@@ -12,6 +13,7 @@ export default function SearchableModelSelect({
   isDisabled = false,
   isLoading = false,
   allModels = null, // Optional: all models to find current value if filtered out
+  autoOpen = false,
 }) {
   // Convert models to react-select format with grouping
   const groupedOptions = models.reduce((acc, model) => {
@@ -83,8 +85,7 @@ export default function SearchableModelSelect({
     }
   }
 
-  // Custom styles to match the dark theme
-  const customStyles = {
+  const customStyles = useMemo(() => ({
     control: (base, state) => ({
       ...base,
       backgroundColor: 'rgba(30, 41, 59, 0.8)',
@@ -103,6 +104,11 @@ export default function SearchableModelSelect({
       border: '1px solid rgba(148, 163, 184, 0.2)',
       boxShadow: '0 10px 40px rgba(0, 0, 0, 0.5)',
       zIndex: 100,
+      minWidth: '360px',
+    }),
+    menuPortal: (base) => ({
+      ...base,
+      zIndex: 9999,
     }),
     menuList: (base) => ({
       ...base,
@@ -182,7 +188,7 @@ export default function SearchableModelSelect({
       ...base,
       color: '#64748b',
     }),
-  };
+  }), []);
 
   return (
     <Select
@@ -194,18 +200,19 @@ export default function SearchableModelSelect({
       isLoading={isLoading}
       isClearable
       isSearchable
+      autoFocus={autoOpen}
+      defaultMenuIsOpen={autoOpen}
       styles={customStyles}
+      menuPortalTarget={document.body}
       classNamePrefix="model-select"
       noOptionsMessage={() => "No models found"}
       loadingMessage={() => "Loading models..."}
       filterOption={(option, inputValue) => {
         if (!inputValue) return true;
-        const searchLower = inputValue.toLowerCase();
-        // Search in both label and value (model ID)
-        return (
-          option.label.toLowerCase().includes(searchLower) ||
-          option.value.toLowerCase().includes(searchLower)
-        );
+        // Normalize dashes/underscores to spaces so "kimi k2" matches "kimi-k2"
+        const normalize = (s) => s.toLowerCase().replace(/[-_]/g, ' ');
+        const q = normalize(inputValue);
+        return normalize(option.label).includes(q) || normalize(option.value).includes(q);
       }}
     />
   );

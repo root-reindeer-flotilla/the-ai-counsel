@@ -63,8 +63,12 @@ class CustomOpenAIProvider(LLMProvider):
                     "error": False
                 }
 
+        except httpx.TimeoutException:
+            return {"error": True, "error_message": f"Request timed out after {int(timeout)}s — {name} did not respond"}
+        except httpx.ConnectError:
+            return {"error": True, "error_message": f"Connection failed — check the {name} endpoint URL"}
         except Exception as e:
-            return {"error": True, "error_message": str(e)}
+            return {"error": True, "error_message": str(e) or repr(e)}
 
     async def get_models(self) -> List[Dict[str, Any]]:
         name, base_url, api_key = self._get_config()

@@ -2,10 +2,11 @@
   /* --- Council Chamber Theme (refined Midnight Glass) --- */
 
   /* Backgrounds */
-  --bg-dark: #0c1222;
-  --bg-darker: #060a12;
-  --bg-card: rgba(12, 18, 34, 0.72);
-  --bg-sidebar: rgba(8, 12, 22, 0.92);
+  --bg-dark: #080c1a;
+  --bg-darker: #05080f;
+  --bg-card: rgba(10, 14, 26, 0.75);
+  --bg-sidebar: rgba(6, 9, 18, 0.95);
+  --accent-advisor: #8b5cf6;
 
   /* Text */
   --text-primary: #f0f4f8;
@@ -28,7 +29,7 @@
   /* Typography */
   --font-display: 'Syne', sans-serif;
   --font-ui: 'Plus Jakarta Sans', system-ui, sans-serif;
-  --font-content: 'Source Serif 4', Georgia, serif;
+  --font-content: 'IBM Plex Sans', 'Plus Jakarta Sans', system-ui, sans-serif;
   --font-code: 'JetBrains Mono', monospace;
 
   /* Shadows & glow */
@@ -44,9 +45,9 @@ body {
   -moz-osx-font-smoothing: grayscale;
   background-color: var(--bg-darker);
   background-image:
-    radial-gradient(ellipse 120% 80% at 50% -20%, rgba(59, 130, 246, 0.12) 0%, transparent 50%),
-    radial-gradient(ellipse 80% 50% at 100% 50%, rgba(34, 211, 238, 0.06) 0%, transparent 45%),
-    linear-gradient(180deg, #0c1222 0%, #0f172a 40%, #0a0f1a 100%);
+    radial-gradient(ellipse 90% 70% at 15% 10%, rgba(59, 130, 246, 0.1) 0%, transparent 55%),
+    radial-gradient(ellipse 70% 60% at 85% 85%, rgba(139, 92, 246, 0.09) 0%, transparent 55%),
+    radial-gradient(ellipse 50% 40% at 50% 50%, rgba(34, 211, 238, 0.03) 0%, transparent 60%);
   background-attachment: fixed;
   color: var(--text-primary);
   height: 100vh;
@@ -101,9 +102,10 @@ body::after {
 /* Markdown Content Styling */
 .markdown-content {
   font-family: var(--font-content);
-  font-size: 15px;
-  line-height: 1.75;
-  color: #e2e8f0;
+  font-size: 16px;
+  font-weight: 400;
+  line-height: 1.68;
+  color: #dce6f2;
 }
 
 .markdown-content h1,
@@ -119,6 +121,11 @@ body::after {
 
 .markdown-content p {
   margin-bottom: 1em;
+}
+
+.markdown-content strong {
+  font-weight: 600;
+  color: #f2f6fb;
 }
 
 .markdown-content code {
@@ -160,6 +167,46 @@ body::after {
   background: rgba(59, 130, 246, 0.05);
   padding: 12px 16px;
   border-radius: 0 8px 8px 0;
+}
+
+.markdown-content table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 1em 0;
+  font-size: 13px;
+  font-family: var(--font-ui);
+  border-radius: 8px;
+  overflow: hidden;
+  border: 1px solid rgba(148, 163, 184, 0.15);
+}
+
+.markdown-content thead {
+  background: rgba(59, 130, 246, 0.1);
+}
+
+.markdown-content th {
+  padding: 10px 14px;
+  text-align: left;
+  font-weight: 600;
+  color: var(--text-primary);
+  border-bottom: 1px solid rgba(148, 163, 184, 0.2);
+  white-space: nowrap;
+}
+
+.markdown-content td {
+  padding: 9px 14px;
+  color: var(--text-secondary);
+  border-bottom: 1px solid rgba(148, 163, 184, 0.08);
+  vertical-align: top;
+  line-height: 1.5;
+}
+
+.markdown-content tr:last-child td {
+  border-bottom: none;
+}
+
+.markdown-content tbody tr:hover {
+  background: rgba(255, 255, 255, 0.03);
 }
 
 /* Global Button Reset */

@@ -6,12 +6,14 @@ export default function Sidebar({
   currentConversationId,
   onSelectConversation,
   onNewConversation,
+  onNewAdvisors,
   onDeleteConversation,
   onOpenSettings,
   isLoading,
   onAbort,
   isOpen,
-  onClose
+  onClose,
+  onGoHome,
 }) {
   const [confirmingDelete, setConfirmingDelete] = useState(null);
   const [searchQuery, setSearchQuery] = useState('');
@@ -58,8 +60,8 @@ export default function Sidebar({
         <div className="sidebar-header">
         <div className="sidebar-title-wrapper">
           <div className="sidebar-title">LLM Council <span className="title-plus">Plus</span></div>
-          <div className="sidebar-subtitle">Created by: Jacob Ben-David</div>
-          <div className="sidebar-version">v0.2.1</div>
+          <div className="sidebar-subtitle">Created by: <a href="https://github.com/jacob-bd" target="_blank" rel="noopener noreferrer" style={{ color: 'inherit', textDecoration: 'none', borderBottom: '1px dotted rgba(255,255,255,0.3)', paddingBottom: '1px', transition: 'border-color 0.2s' }} onMouseEnter={e => e.target.style.borderBottomColor = 'rgba(255,255,255,0.7)'} onMouseLeave={e => e.target.style.borderBottomColor = 'rgba(255,255,255,0.3)'}>Jacob Ben-David</a></div>
+          <div className="sidebar-version">v0.7.0</div>
         </div>
         <button
           className="icon-button"
@@ -70,16 +72,30 @@ export default function Sidebar({
         </button>
       </div>
 
-      {/* Prominent New Discussion Button */}
+      {/* Mode Actions */}
       <div className="sidebar-actions">
-        <button
-          className="new-council-btn"
-          onClick={onNewConversation}
-          disabled={isLoading}
-        >
-          <span className="btn-icon">+</span>
-          <span className="btn-text">New Discussion</span>
+        <button className="sidebar-action-btn sidebar-action-btn--home" onClick={onGoHome}>
+          <span className="btn-icon">⌂</span>
+          <span className="btn-text">Home</span>
         </button>
+        <div className="sidebar-action-row">
+          <button
+            className="sidebar-action-btn sidebar-action-btn--council"
+            onClick={onNewConversation}
+            disabled={isLoading}
+          >
+            <span className="btn-icon">+</span>
+            <span className="btn-text">New Council</span>
+          </button>
+          <button
+            className="sidebar-action-btn sidebar-action-btn--advisors"
+            onClick={onNewAdvisors}
+            disabled={isLoading}
+          >
+            <span className="btn-icon">+</span>
+            <span className="btn-text">New Advisors</span>
+          </button>
+        </div>
       </div>
 
       {/* Search Input */}
@@ -115,6 +131,9 @@ export default function Sidebar({
               onClick={() => onSelectConversation(conv.id)}
             >
               <div className="conversation-title">
+                <span className={`conv-mode-tag conv-mode-tag--${conv.mode === 'advisors' ? 'advisors' : 'council'}`}>
+                  {conv.mode === 'advisors' ? 'ADV' : 'CNC'}
+                </span>
                 {conv.title || 'New Conversation'}
               </div>
               <div className="conversation-meta">

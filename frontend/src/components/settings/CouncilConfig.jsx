@@ -1,4 +1,5 @@
 import React from 'react';
+import { DEFAULT_EXECUTION_MODE } from '../../api';
 import SearchableModelSelect from '../SearchableModelSelect';
 
 const DIRECT_PROVIDERS = [
@@ -7,6 +8,7 @@ const DIRECT_PROVIDERS = [
     { id: 'google', name: 'Google', key: 'google_api_key' },
     { id: 'mistral', name: 'Mistral', key: 'mistral_api_key' },
     { id: 'deepseek', name: 'DeepSeek', key: 'deepseek_api_key' },
+    { id: 'nvidia', name: 'NVIDIA', key: 'nvidia_api_key' },
 ];
 
 export default function CouncilConfig({
@@ -31,6 +33,17 @@ export default function CouncilConfig({
     setCouncilTemperature,
     chairmanTemperature,
     setChairmanTemperature,
+    setActiveSection,
+    setActivePromptTab,
+    // Debate state
+    critiqueMode,
+    setCritiqueMode,
+    debateRounds,
+    setDebateRounds,
+    autoConverge,
+    setAutoConverge,
+    convergenceThreshold,
+    setConvergenceThreshold,
     // Data
     allModels, // Result of getAllAvailableModels()
     filteredModels, // Result of getFilteredAvailableModels()
@@ -43,8 +56,6 @@ export default function CouncilConfig({
     handleCouncilModelChange,
     handleRemoveCouncilMember,
     handleAddCouncilMember,
-    setActiveSection,
-    setActivePromptTab,
     // Validation
     validationErrors = {},
     chairmanSelectRef
@@ -53,7 +64,6 @@ export default function CouncilConfig({
     const isSourceConfigured = (source) => {
         switch (source) {
             case 'openrouter': return !!settings?.openrouter_api_key_set;
-            case 'requesty': return !!settings?.requesty_api_key_set;
             case 'ollama': return ollamaStatus?.connected;
             case 'groq': return !!settings?.groq_api_key_set;
             case 'custom': return !!(settings?.custom_endpoint_url);
@@ -62,6 +72,7 @@ export default function CouncilConfig({
             case 'google': return !!settings?.google_api_key_set;
             case 'mistral': return !!settings?.mistral_api_key_set;
             case 'deepseek': return !!settings?.deepseek_api_key_set;
+            case 'nvidia': return !!settings?.nvidia_api_key_set;
             default: return false;
         }
     };
@@ -72,10 +83,12 @@ export default function CouncilConfig({
             // Only Ollama models
             return models.filter(m => m.id.startsWith('ollama:'));
         } else {
-            // Remote: OpenRouter, Requesty, Direct providers (exclude Ollama)
+            // Remote: OpenRouter + Direct providers (exclude Ollama)
             return models.filter(m => !m.id.startsWith('ollama:'));
         }
     };
+
+    const chairmanDisabled = (settings?.execution_mode || DEFAULT_EXECUTION_MODE) !== 'full';
 
     const getMemberFilter = (index) => {
         return councilMemberFilters[index] || 'remote';
@@ -86,7 +99,8 @@ export default function CouncilConfig({
             <section className="settings-section">
                 <h3>Available Model Sources</h3>
                 <p className="section-description">
-                    Toggle which providers are available for the search generator, council members, and chairman.
+                    Toggle which providers are available for LLM Council only — the search generator, council members, and chairman.
+                    Advisor debates always use every provider you configure under LLM API Keys, regardless of these toggles.
                     <br /><em style={{ opacity: 0.7, fontSize: '12px' }}>Note: Non-chat models (embeddings, image generation, speech, OCR, etc.) are automatically filtered out.</em>
                 </p>
 
@@ -95,66 +109,65 @@ export default function CouncilConfig({
                     <div className="filter-group">
                         <label 
                             className={`toggle-wrapper ${!isSourceConfigured('openrouter') ? 'source-disabled' : ''}`}
-                            title={!isSourceConfigured('openrouter') ? 'SOURCE NOT CONFIGURED - Add API key in LLM API Keys' : ''}
+                            title={!isSourceConfigured('openrouter') ? 'Not configured — add API key in LLM API Keys' : ''}
                         >
                             <div className="toggle-switch">
                                 <input
                                     type="checkbox"
-                                    checked={enabledProviders.openrouter}
+                                    checked={isSourceConfigured('openrouter') && enabledProviders.openrouter}
                                     onChange={(e) => setEnabledProviders(prev => ({ ...prev, openrouter: e.target.checked }))}
                                     disabled={!isSourceConfigured('openrouter')}
                                 />
                                 <span className="slider"></span>
                             </div>
-                            <span className="toggle-text">OpenRouter (Cloud)</span>
-                        </label>
-
-                        <label 
-                            className={`toggle-wrapper ${!isSourceConfigured('requesty') ? 'source-disabled' : ''}`}
-                            title={!isSourceConfigured('requesty') ? 'SOURCE NOT CONFIGURED - Add API key in LLM API Keys' : ''}
-                        >
-                            <div className="toggle-switch">
-                                <input
-                                    type="checkbox"
-                                    checked={enabledProviders.requesty}
-                                    onChange={(e) => setEnabledProviders(prev => ({ ...prev, requesty: e.target.checked }))}
-                                    disabled={!isSourceConfigured('requesty')}
-                                />
-                                <span className="slider"></span>
-                            </div>
-                            <span className="toggle-text">Requesty (Cloud)</span>
+                            <span className="toggle-text">
+                                OpenRouter (Cloud)
+                                {!isSourceConfigured('openrouter') && (
+                                    <span className="toggle-hint"> · not configured</span>
+                                )}
+                            </span>
                         </label>
 
                         <label 
                             className={`toggle-wrapper ${!isSourceConfigured('ollama') ? 'source-disabled' : ''}`}
-                            title={!isSourceConfigured('ollama') ? 'SOURCE NOT CONFIGURED - Connect Ollama in LLM API Keys' : ''}
+                            title={!isSourceConfigured('ollama') ? 'Not configured — connect Ollama in LLM API Keys' : ''}
                         >
                             <div className="toggle-switch">
                                 <input
                                     type="checkbox"
-                                    checked={enabledProviders.ollama}
+                                    checked={isSourceConfigured('ollama') && enabledProviders.ollama}
                                     onChange={(e) => setEnabledProviders(prev => ({ ...prev, ollama: e.target.checked }))}
                                     disabled={!isSourceConfigured('ollama')}
                                 />
                                 <span className="slider"></span>
                             </div>
-                            <span className="toggle-text">Local (Ollama)</span>
+                            <span className="toggle-text">
+                                Local (Ollama)
+                                {!isSourceConfigured('ollama') && (
+                                    <span className="toggle-hint"> · not configured</span>
+                                )}
+                            </span>
                         </label>
 
                         <label 
                             className={`toggle-wrapper ${!isSourceConfigured('groq') ? 'source-disabled' : ''}`}
-                            title={!isSourceConfigured('groq') ? 'SOURCE NOT CONFIGURED - Add API key in LLM API Keys' : ''}
+                            title={!isSourceConfigured('groq') ? 'Not configured — add API key in LLM API Keys' : ''}
                         >
                             <div className="toggle-switch">
                                 <input
                                     type="checkbox"
-                                    checked={enabledProviders.groq}
+                                    checked={isSourceConfigured('groq') && enabledProviders.groq}
                                     onChange={(e) => setEnabledProviders(prev => ({ ...prev, groq: e.target.checked }))}
                                     disabled={!isSourceConfigured('groq')}
                                 />
                                 <span className="slider"></span>
                             </div>
-                            <span className="toggle-text">Groq (Fast Inference)</span>
+                            <span className="toggle-text">
+                                Groq (Fast Inference)
+                                {!isSourceConfigured('groq') && (
+                                    <span className="toggle-hint"> · not configured</span>
+                                )}
+                            </span>
                         </label>
 
                         {/* Custom Endpoint Toggle - only show if configured */}
@@ -192,7 +205,8 @@ export default function CouncilConfig({
                                                 anthropic: false,
                                                 google: false,
                                                 mistral: false,
-                                                deepseek: false
+                                                deepseek: false,
+                                                nvidia: false
                                             });
                                         }
                                     }}
@@ -216,7 +230,7 @@ export default function CouncilConfig({
                                     <div className="toggle-switch direct-toggle">
                                         <input
                                             type="checkbox"
-                                            checked={directProviderToggles[dp.id]}
+                                            checked={configured && directProviderToggles[dp.id]}
                                             disabled={!configured}
                                             onChange={(e) => {
                                                 const isEnabled = e.target.checked;
@@ -254,18 +268,18 @@ export default function CouncilConfig({
                 <h3>Council Composition</h3>
                 <div className="model-options-row">
                     <div className="model-filter-controls">
-                        <label className="free-filter-label" style={{ opacity: (enabledProviders.openrouter || enabledProviders.requesty) ? 1 : 0.3, cursor: (enabledProviders.openrouter || enabledProviders.requesty) ? 'pointer' : 'not-allowed' }}>
+                        <label className="free-filter-label" style={{ opacity: enabledProviders.openrouter ? 1 : 0.3, cursor: enabledProviders.openrouter ? 'pointer' : 'not-allowed' }}>
                             <input
                                 type="checkbox"
                                 checked={showFreeOnly}
                                 onChange={e => setShowFreeOnly(e.target.checked)}
-                                disabled={!enabledProviders.openrouter && !enabledProviders.requesty}
+                                disabled={!enabledProviders.openrouter}
                             />
                             Show free OpenRouter models only
                             <div className="info-tooltip-container">
                                 <span className="info-icon">i</span>
                                 <div className="info-tooltip">
-                                    Free OpenRouter models have a 50 requests/day limit (without credits). Paid OpenRouter and other providers have higher limits.
+                                    Free OpenRouter models are limited to 20 requests/minute and 50/day (without credits). Large councils generate many requests at once.
                                 </div>
                             </div>
                         </label>
@@ -299,8 +313,8 @@ export default function CouncilConfig({
                                             type="button"
                                             className={`type-btn ${memberFilter === 'remote' ? 'active' : ''}`}
                                             onClick={() => handleMemberFilterChange(index, 'remote')}
-                                            disabled={!enabledProviders.openrouter && !enabledProviders.requesty && !enabledProviders.direct && !enabledProviders.groq && !enabledProviders.custom}
-                                            title={!enabledProviders.openrouter && !enabledProviders.requesty && !enabledProviders.direct && !enabledProviders.groq && !enabledProviders.custom ? 'Enable a remote provider first' : ''}
+                                            disabled={!enabledProviders.openrouter && !enabledProviders.direct && !enabledProviders.groq && !enabledProviders.custom}
+                                            title={!enabledProviders.openrouter && !enabledProviders.direct && !enabledProviders.groq && !enabledProviders.custom ? 'Enable a remote provider first' : ''}
                                         >
                                             Remote
                                         </button>
@@ -309,7 +323,7 @@ export default function CouncilConfig({
                                             className={`type-btn ${memberFilter === 'local' ? 'active' : ''}`}
                                             onClick={() => handleMemberFilterChange(index, 'local')}
                                             disabled={!enabledProviders.ollama || ollamaAvailableModels.length === 0}
-                                            title={!enabledProviders.ollama ? 'Enable Ollama in Available Model Sources first' : ollamaAvailableModels.length === 0 ? 'Connect Ollama in LLM API Keys, then click Refresh Local Models' : ''}
+                                            title={!enabledProviders.ollama || ollamaAvailableModels.length === 0 ? 'Enable and connect Ollama first' : ''}
                                         >
                                             Local
                                         </button>
@@ -330,7 +344,7 @@ export default function CouncilConfig({
                                             </div>
                                         )}
                                     </div>
-                                    {index >= 2 && (
+                                    {index >= 1 && (
                                         <button
                                             type="button"
                                             className="remove-member-button"
@@ -348,12 +362,12 @@ export default function CouncilConfig({
                         type="button"
                         className="add-member-button"
                         onClick={handleAddCouncilMember}
-                        disabled={filteredModels.length === 0 || councilModels.length >= 12}
+                        disabled={filteredModels.length === 0 || councilModels.length >= 8}
                     >
                         + Add Council Member
                     </button>
                     <p className="section-description" style={{ marginTop: '8px', marginBottom: '0' }}>
-                        Max 12 members. With 6+ members, requests are processed in batches of 3.
+                        Max 8 members. With 6+ members, requests are processed in batches.
                     </p>
                     {councilModels.length >= 6 && (
                         <div className="council-size-warning">
@@ -411,8 +425,7 @@ export default function CouncilConfig({
                         </p>
                     </div>
                 </div>
-                {/* Chairman */}
-                <div className="subsection" style={{ marginTop: '24px' }}>
+                <div className={`subsection ${chairmanDisabled ? 'subsection--disabled' : ''}`} style={{ marginTop: '24px' }}>
                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
                         <h4 style={{ margin: 0 }}>Chairman Model</h4>
                         <div className="model-type-toggle">
@@ -423,8 +436,8 @@ export default function CouncilConfig({
                                     setChairmanFilter('remote');
                                     setChairmanModel('');
                                 }}
-                                disabled={!enabledProviders.openrouter && !enabledProviders.requesty && !enabledProviders.direct && !enabledProviders.groq && !enabledProviders.custom}
-                                title={!enabledProviders.openrouter && !enabledProviders.requesty && !enabledProviders.direct && !enabledProviders.groq && !enabledProviders.custom ? 'Enable a remote provider first' : ''}
+                                disabled={chairmanDisabled || (!enabledProviders.openrouter && !enabledProviders.direct && !enabledProviders.groq && !enabledProviders.custom)}
+                                title={!enabledProviders.openrouter && !enabledProviders.direct && !enabledProviders.groq && !enabledProviders.custom ? 'Enable a remote provider first' : ''}
                             >
                                 Remote
                             </button>
@@ -435,14 +448,19 @@ export default function CouncilConfig({
                                     setChairmanFilter('local');
                                     setChairmanModel('');
                                 }}
-                                disabled={!enabledProviders.ollama || ollamaAvailableModels.length === 0}
-                                title={!enabledProviders.ollama ? 'Enable Ollama in Available Model Sources first' : ollamaAvailableModels.length === 0 ? 'Connect Ollama in LLM API Keys, then click Refresh Local Models' : ''}
+                                disabled={chairmanDisabled || !enabledProviders.ollama || ollamaAvailableModels.length === 0}
+                                title={!enabledProviders.ollama || ollamaAvailableModels.length === 0 ? 'Enable and connect Ollama first' : ''}
                             >
                                 Local
                             </button>
                         </div>
                     </div>
-                    <div 
+                    {chairmanDisabled && (
+                        <p className="section-description" style={{ marginBottom: '8px', fontStyle: 'italic' }}>
+                            Chairman is only used in Full Deliberation mode.
+                        </p>
+                    )}
+                    <div
                         className={`chairman-selection ${validationErrors.chairman ? 'validation-error' : ''}`}
                         ref={chairmanSelectRef}
                     >
@@ -451,6 +469,7 @@ export default function CouncilConfig({
                             value={chairmanModel}
                             onChange={(value) => setChairmanModel(value)}
                             placeholder="Search models..."
+                            isDisabled={chairmanDisabled}
                             isLoading={isLoadingModels}
                             allModels={allModels}
                         />
@@ -477,7 +496,7 @@ export default function CouncilConfig({
                                 value={chairmanTemperature}
                                 onChange={(e) => setChairmanTemperature(parseFloat(e.target.value))}
                                 className="heat-slider"
-                                disabled={chairmanModel.includes('gpt-5.1') || chairmanModel.includes('o1-') || chairmanModel.includes('o3-')}
+                                disabled={chairmanDisabled || chairmanModel.includes('gpt-5.1') || chairmanModel.includes('o1-') || chairmanModel.includes('o3-')}
                             />
                             <span className="heat-icon hot">🔥</span>
                         </div>

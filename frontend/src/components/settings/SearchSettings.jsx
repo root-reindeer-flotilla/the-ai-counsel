@@ -1,6 +1,6 @@
 import React from 'react';
 
-const SEARCH_PROVIDERS = [
+export const SEARCH_PROVIDERS = [
     {
         id: 'duckduckgo',
         name: 'DuckDuckGo',
@@ -29,6 +29,13 @@ const SEARCH_PROVIDERS = [
         requiresKey: true,
         keyType: 'brave',
     },
+    {
+        id: 'tinyfish',
+        name: 'TinyFish',
+        description: 'AI-powered search with free tier (5 req/min). Free API key, no credit card. Includes batch content fetching.',
+        requiresKey: true,
+        keyType: 'tinyfish',
+    },
 ];
 
 export default function SearchSettings({
@@ -56,6 +63,13 @@ export default function SearchSettings({
     isTestingBrave,
     braveTestResult,
     setBraveTestResult,
+    // TinyFish
+    tinyfishApiKey,
+    setTinyfishApiKey,
+    handleTestTinyfish,
+    isTestingTinyfish,
+    tinyfishTestResult,
+    setTinyfishTestResult,
     // Other Settings
     fullContentResults,
     setFullContentResults,
@@ -197,6 +211,52 @@ export default function SearchSettings({
                                 )}
                             </div>
                         )}
+
+                        {/* Inline API Key Input for TinyFish */}
+                        {selectedSearchProvider === 'tinyfish' && provider.id === 'tinyfish' && (
+                            <div className="inline-api-key-section">
+                                <div className="api-key-input-row">
+                                    <input
+                                        type="password"
+                                        placeholder={settings?.tinyfish_api_key_set ? '••••••••••••••••' : 'Enter TinyFish API key'}
+                                        value={tinyfishApiKey}
+                                        onChange={e => {
+                                            setTinyfishApiKey(e.target.value);
+                                            if (setTinyfishTestResult) setTinyfishTestResult(null);
+                                        }}
+                                        className={settings?.tinyfish_api_key_set && !tinyfishApiKey ? 'key-configured' : ''}
+                                    />
+                                    <button
+                                        type="button"
+                                        className="test-button"
+                                        onClick={handleTestTinyfish}
+                                        disabled={isTestingTinyfish || (!tinyfishApiKey && !settings?.tinyfish_api_key_set)}
+                                    >
+                                        {isTestingTinyfish ? 'Testing...' : (settings?.tinyfish_api_key_set && !tinyfishApiKey ? 'Retest' : 'Test')}
+                                    </button>
+                                </div>
+                                {settings?.tinyfish_api_key_set && !tinyfishApiKey && (
+                                    <div className="key-status set">✓ API key configured</div>
+                                )}
+                                {tinyfishTestResult && (
+                                    <div className={`test-result ${tinyfishTestResult.success ? 'success' : 'error'}`}>
+                                        {tinyfishTestResult.success ? '✓' : '✗'} {tinyfishTestResult.message}
+                                    </div>
+                                )}
+                                <div className="rate-limit-notice" style={{ marginTop: '8px', fontSize: '12px', color: '#94a3b8' }}>
+                                    ⚠ Free tier: 5 searches/min. Upgrade at <a href="https://agent.tinyfish.ai" target="_blank" rel="noopener noreferrer" style={{ color: '#60a5fa' }}>agent.tinyfish.ai</a> for higher limits.
+                                </div>
+                                <a
+                                    href="https://agent.tinyfish.ai/api-keys"
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    className="api-key-link"
+                                    style={{ marginTop: '8px', display: 'inline-block', fontSize: '12px', color: '#60a5fa' }}
+                                >
+                                    Get free API key at agent.tinyfish.ai →
+                                </a>
+                            </div>
+                        )}
                     </div>
                 ))}
             </div>
@@ -268,53 +328,74 @@ export default function SearchSettings({
                 </div>
             )}
 
-            {/* Search Query Processing - only show for Tavily/Brave since DuckDuckGo has built-in optimization */}
-            {selectedSearchProvider !== 'duckduckgo' && (
-                <div className="keyword-extraction-section" style={{ marginTop: '24px', paddingTop: '20px', borderTop: '1px solid rgba(255, 255, 255, 0.1)' }}>
-                    <label>Search Query Processing</label>
-                    <p className="setting-description">
-                        Choose how your prompt is sent to the search engine.
-                    </p>
+            {/* Search Query Processing */}
+            <div className="keyword-extraction-section" style={{ marginTop: '24px', paddingTop: '20px', borderTop: '1px solid rgba(255, 255, 255, 0.1)' }}>
+                <label>Search Query Processing</label>
+                <p className="setting-description">
+                    Choose how your prompt is sent to the search engine.
+                    {selectedSearchProvider === 'duckduckgo' && (
+                        <span style={{ display: 'block', marginTop: '4px', color: 'var(--text-tertiary)', fontSize: '12px' }}>
+                            ℹ️ DuckDuckGo uses built-in query optimization. Direct mode is recommended.
+                        </span>
+                    )}
+                </p>
 
-                    <div className="provider-options">
-                        <div className={`provider-option-container ${searchKeywordExtraction === 'direct' ? 'selected' : ''}`}>
-                            <label className="provider-option">
-                                <input
-                                    type="radio"
-                                    name="keyword_extraction"
-                                    value="direct"
-                                    checked={searchKeywordExtraction === 'direct'}
-                                    onChange={() => setSearchKeywordExtraction('direct')}
-                                />
-                                <div className="provider-info">
-                                    <span className="provider-name">Direct (Recommended)</span>
-                                    <span className="provider-description">
-                                        Send your exact query to the search engine. Best for modern semantic search engines like Tavily and Brave.
-                                    </span>
-                                </div>
-                            </label>
-                        </div>
+                <div className="provider-options">
+                    <div className={`provider-option-container ${searchKeywordExtraction === 'direct' ? 'selected' : ''}`}>
+                        <label className="provider-option">
+                            <input
+                                type="radio"
+                                name="keyword_extraction"
+                                value="direct"
+                                checked={searchKeywordExtraction === 'direct'}
+                                onChange={() => setSearchKeywordExtraction('direct')}
+                            />
+                            <div className="provider-info">
+                                <span className="provider-name">Direct (Recommended)</span>
+                                <span className="provider-description">
+                                    Send your exact query to the search engine. Best for most providers.
+                                </span>
+                            </div>
+                        </label>
+                    </div>
 
-                        <div className={`provider-option-container ${searchKeywordExtraction === 'yake' ? 'selected' : ''}`}>
-                            <label className="provider-option">
-                                <input
-                                    type="radio"
-                                    name="keyword_extraction"
-                                    value="yake"
-                                    checked={searchKeywordExtraction === 'yake'}
-                                    onChange={() => setSearchKeywordExtraction('yake')}
-                                />
-                                <div className="provider-info">
-                                    <span className="provider-name">Smart Keywords (Yake)</span>
-                                    <span className="provider-description">
-                                        Extract key terms from your prompt before searching. Useful if you paste very long prompts that confuse the search engine.
-                                    </span>
-                                </div>
-                            </label>
-                        </div>
+                    <div className={`provider-option-container ${searchKeywordExtraction === 'yake' ? 'selected' : ''}`}>
+                        <label className="provider-option">
+                            <input
+                                type="radio"
+                                name="keyword_extraction"
+                                value="yake"
+                                checked={searchKeywordExtraction === 'yake'}
+                                onChange={() => setSearchKeywordExtraction('yake')}
+                            />
+                            <div className="provider-info">
+                                <span className="provider-name">Smart Keywords (YAKE)</span>
+                                <span className="provider-description">
+                                    Extract key terms from your prompt before searching. Useful if you paste very long prompts that confuse the search engine.
+                                </span>
+                            </div>
+                        </label>
+                    </div>
+
+                    <div className={`provider-option-container ${searchKeywordExtraction === 'llm' ? 'selected' : ''}`}>
+                        <label className="provider-option">
+                            <input
+                                type="radio"
+                                name="keyword_extraction"
+                                value="llm"
+                                checked={searchKeywordExtraction === 'llm'}
+                                onChange={() => setSearchKeywordExtraction('llm')}
+                            />
+                            <div className="provider-info">
+                                <span className="provider-name">LLM Reformulation</span>
+                                <span className="provider-description">
+                                    Use the Chairman model to rephrase your query into an optimal search term. Slower but can improve results for complex questions.
+                                </span>
+                            </div>
+                        </label>
                     </div>
                 </div>
-            )}
+            </div>
         </section>
     );
 }

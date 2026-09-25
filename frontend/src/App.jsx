@@ -1,13 +1,43 @@
-import { useState, useEffect, useRef } from 'react';
+import { Suspense, lazy, useState, useEffect, useRef, useCallback, Component } from 'react';
 import Sidebar from './components/Sidebar';
-import ChatInterface from './components/ChatInterface';
-import Settings from './components/Settings';
-import { api } from './api';
+import { api, DEFAULT_EXECUTION_MODE, buildAvailableSearchProviders } from './api';
 import './App.css';
 import './components/StageCopyButtons.css';
+import './ModeToggle.css';
 
-const ACTIVE_RUNS_STORAGE_KEY = 'llmcp_active_runs';
-const CURRENT_CONVERSATION_STORAGE_KEY = 'llmcp_current_conversation_id';
+const ChatInterface = lazy(() => import('./components/ChatInterface'));
+const Settings = lazy(() => import('./components/Settings'));
+const LandingPage = lazy(() => import('./components/LandingPage'));
+
+function AppLoadingFallback() {
+  return (
+    <div className="app-loading" role="status" aria-live="polite">
+      Loading...
+    </div>
+  );
+}
+
+class AppErrorBoundary extends Component {
+  constructor(props) {
+    super(props);
+    this.state = { hasError: false };
+  }
+
+  static getDerivedStateFromError() {
+    return { hasError: true };
+  }
+
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div className="app-loading" role="alert">
+          Failed to load. Please refresh the page.
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
 
 function App() {
   const [conversations, setConversations] = useState([]);
@@ -25,28 +55,50 @@ function App() {
   const [councilModels, setCouncilModels] = useState([]);
   const [chairmanModel, setChairmanModel] = useState(null);
   const [searchProvider, setSearchProvider] = useState('duckduckgo');
-  const [executionMode, setExecutionMode] = useState('full');
+  const [availableSearchProviders, setAvailableSearchProviders] = useState([{ id: 'duckduckgo', name: 'DuckDuckGo' }]);
+  const [executionMode, setExecutionMode] = useState(DEFAULT_EXECUTION_MODE);
+  const [critiqueMode, setCritiqueMode] = useState('freeform');
+  const [debateRounds, setDebateRounds] = useState(1);
+  const [autoConverge, setAutoConverge] = useState(true);
+  const [convergenceThreshold, setConvergenceThreshold] = useState(2);
   const [sidebarOpen, setSidebarOpen] = useState(false);
-  const [activeRuns, setActiveRuns] = useState(() => {
-    try {
-      return JSON.parse(sessionStorage.getItem(ACTIVE_RUNS_STORAGE_KEY) || '{}');
-    } catch {
-      return {};
-    }
-  });
+  const [appMode, setAppMode] = useState(null); // null shows landing page
   const abortControllerRef = useRef(null);
+  const advisorAbortControllerRef = useRef(null);
+  const progressPollRef = useRef(null);
   const requestIdRef = useRef(0);
   const isInitialMount = useRef(true);
+  const conversationVersionRef = useRef(0);
+  const skipLoadForIdRef = useRef(null);
 
-  useEffect(() => {
-    sessionStorage.setItem(ACTIVE_RUNS_STORAGE_KEY, JSON.stringify(activeRuns));
-  }, [activeRuns]);
-
-  useEffect(() => {
-    if (currentConversationId) {
-      sessionStorage.setItem(CURRENT_CONVERSATION_STORAGE_KEY, currentConversationId);
+  const computeCouncilConfigured = useCallback((models, chairman, mode) => {
+    const members = (models || []).filter((m) => m && m.trim());
+    if (members.length < 1) return false;
+    if (mode === 'full') {
+      return !!(chairman && chairman.trim());
     }
-  }, [currentConversationId]);
+    return true;
+  }, []);
+
+  const handleCouncilChange = useCallback(async ({ councilModels: nextModels, chairmanModel: nextChairman }) => {
+    const filtered = (nextModels || []).filter((m) => m && m.trim());
+    const chairman = nextChairman || '';
+    setCouncilModels(filtered);
+    setChairmanModel(chairman);
+    setCouncilConfigured(computeCouncilConfigured(filtered, chairman, executionMode));
+    try {
+      await api.updateSettings({
+        council_models: filtered,
+        chairman_model: chairman,
+      });
+    } catch (err) {
+      console.error('Failed to save council lineup:', err);
+    }
+  }, [computeCouncilConfigured, executionMode]);
+
+  useEffect(() => {
+    setCouncilConfigured(computeCouncilConfigured(councilModels, chairmanModel, executionMode));
+  }, [councilModels, chairmanModel, executionMode, computeCouncilConfigured]);
 
   // Check initial configuration on mount
   useEffect(() => {
@@ -59,11 +111,17 @@ function App() {
       const settings = await api.getSettings();
 
       // Load execution mode preference
-      setExecutionMode(settings.execution_mode || 'full');
+      setExecutionMode(settings.execution_mode || DEFAULT_EXECUTION_MODE);
       setSearchProvider(settings.search_provider || 'duckduckgo');
 
+      setCritiqueMode(settings.critique_mode || 'freeform');
+      setDebateRounds(settings.debate_rounds || 1);
+      setAutoConverge(settings.auto_converge !== undefined ? settings.auto_converge : true);
+      setConvergenceThreshold(settings.convergence_threshold || 2);
+
+      setAvailableSearchProviders(buildAvailableSearchProviders(settings));
+
       const hasApiKey = settings.openrouter_api_key_set ||
-        settings.requesty_api_key_set ||
         settings.groq_api_key_set ||
         settings.openai_api_key_set ||
         settings.anthropic_api_key_set ||
@@ -96,15 +154,13 @@ function App() {
       }
 
       // 3. Check if council is configured (has models selected)
-      const models = settings.council_models || [];
+      const models = (settings.council_models || []).filter((m) => m && m.trim());
       const chairman = settings.chairman_model || '';
 
       setCouncilModels(models);
       setChairmanModel(chairman);
 
-      const hasCouncilMembers = models.some(m => m && m.trim() !== '');
-      const hasChairman = chairman && chairman.trim() !== '';
-      setCouncilConfigured(hasCouncilMembers && hasChairman);
+      setCouncilConfigured(computeCouncilConfigured(models, chairman, settings.execution_mode || DEFAULT_EXECUTION_MODE));
 
       // 4. If no providers are configured, open settings
       if (!hasApiKey && !isOllamaConnected) {
@@ -121,16 +177,25 @@ function App() {
     setShowSettings(false);
     try {
       const settings = await api.getSettings();
-      const models = settings.council_models || [];
+      const models = (settings.council_models || []).filter((m) => m && m.trim());
       const chairman = settings.chairman_model || '';
 
       setCouncilModels(models);
       setChairmanModel(chairman);
       setSearchProvider(settings.search_provider || 'duckduckgo');
+      setAvailableSearchProviders(buildAvailableSearchProviders(settings));
+      setExecutionMode(settings.execution_mode || DEFAULT_EXECUTION_MODE);
 
-      const hasCouncilMembers = models.some(m => m && m.trim() !== '');
-      const hasChairman = chairman && chairman.trim() !== '';
-      setCouncilConfigured(hasCouncilMembers && hasChairman);
+      setCritiqueMode(settings.critique_mode || 'freeform');
+      setDebateRounds(settings.debate_rounds || 1);
+      setAutoConverge(settings.auto_converge !== undefined ? settings.auto_converge : true);
+      setConvergenceThreshold(settings.convergence_threshold || 2);
+
+      setCouncilConfigured(computeCouncilConfigured(
+        models,
+        chairman,
+        settings.execution_mode || DEFAULT_EXECUTION_MODE
+      ));
     } catch (error) {
       console.error('Error after closing settings:', error);
     }
@@ -144,6 +209,18 @@ function App() {
   // Load conversations on mount
   useEffect(() => {
     loadConversations();
+  }, []);
+
+  // Periodically refresh the conversation list so MCP/API-created conversations
+  // appear in the sidebar without requiring a page reload.
+  useEffect(() => {
+    const tick = () => { if (document.visibilityState === 'visible') loadConversations(); };
+    const interval = setInterval(tick, 30000);
+    document.addEventListener('visibilitychange', tick);
+    return () => {
+      clearInterval(interval);
+      document.removeEventListener('visibilitychange', tick);
+    };
   }, []);
 
   // Auto-save execution mode preference when changed
@@ -198,14 +275,22 @@ function App() {
     }
   };
 
-  // Load conversation details when selected
+  // Load conversation details when selected, then check for active runs
   useEffect(() => {
-    if (currentConversationId) {
-      if (abortControllerRef.current) {
-        abortControllerRef.current.abort();
-        abortControllerRef.current = null;
+    if (currentConversationId && currentConversationId !== 'draft') {
+      if (skipLoadForIdRef.current === currentConversationId) {
+        skipLoadForIdRef.current = null;
+        return;
       }
-      loadConversation(currentConversationId);
+      // Capture the current version — if an optimistic update bumps it
+      // before the fetch resolves, the stale response is discarded.
+      // This is StrictMode-safe: double-invocation just fires two loads,
+      // both of which will be stale if a debate was started.
+      const versionAtStart = conversationVersionRef.current;
+      const convId = currentConversationId;
+      loadConversation(convId, versionAtStart).then(() => {
+        checkForActiveRun(convId);
+      });
     }
   }, [currentConversationId]);
 
@@ -213,12 +298,6 @@ function App() {
     try {
       const convs = await api.listConversations();
       setConversations(convs);
-      if (!currentConversationId) {
-        const storedConversationId = sessionStorage.getItem(CURRENT_CONVERSATION_STORAGE_KEY);
-        if (storedConversationId && convs.some((c) => c.id === storedConversationId)) {
-          setCurrentConversationId(storedConversationId);
-        }
-      }
     } catch (error) {
       console.error('Failed to load conversations:', error);
       // Retry up to 3 times with increasing delays (1s, 2s, 3s)
@@ -228,123 +307,143 @@ function App() {
     }
   };
 
-  const loadConversation = async (id) => {
+  const loadConversation = async (id, expectedVersion) => {
     try {
       const conv = await api.getConversation(id);
-      setCurrentConversation(conv);
-
-      const active = await api.getActiveRun(id);
-      const activeRun = active?.active_run;
-      if (!activeRun) {
-        setIsLoading(false);
-        setActiveRuns((prev) => {
-          if (!prev[id]) return prev;
-          const next = { ...prev };
-          delete next[id];
-          return next;
-        });
-        return;
-      }
-
-      setActiveRuns((prev) => ({ ...prev, [id]: activeRun.run_id }));
-      setIsLoading(true);
-
-      if (!activeRun.assistant_message_saved) {
-        const isRunning = activeRun.status === 'running' || activeRun.status === 'queued';
-        const stage1Done = Array.isArray(activeRun.stage1_results) && activeRun.stage1_results.length > 0;
-        const stage2Done = Array.isArray(activeRun.stage2_results) && activeRun.stage2_results.length > 0;
-        const assistantMsg = {
-          role: 'assistant',
-          stage1: activeRun.stage1_results || null,
-          stage2: activeRun.stage2_results || null,
-          stage3: activeRun.stage3_result || null,
-          metadata: activeRun.metadata || null,
-          loading: {
-            search: false,
-            stage1: isRunning && !stage1Done,
-            stage2: isRunning && activeRun.execution_mode !== 'chat_only' && stage1Done && !stage2Done,
-            stage3: isRunning && activeRun.execution_mode === 'full' && stage2Done && !activeRun.stage3_result,
-          },
-          timers: {
-            stage1Start: null,
-            stage1End: null,
-            stage2Start: null,
-            stage2End: null,
-            stage3Start: null,
-            stage3End: null,
-          },
-          progress: activeRun.progress || {
-            stage1: { count: 0, total: 0, currentModel: null },
-            stage2: { count: 0, total: 0, currentModel: null },
-          }
-        };
-
-        setCurrentConversation((prev) => {
-          if (!prev || prev.id !== id) return prev;
-          const last = prev.messages[prev.messages.length - 1];
-          const hasPendingAssistant =
-            last?.role === 'assistant' &&
-            (last.loading?.stage1 || last.loading?.stage2 || last.loading?.stage3);
-          if (hasPendingAssistant) {
-            const messages = [...prev.messages];
-            messages[messages.length - 1] = { ...messages[messages.length - 1], ...assistantMsg };
-            return { ...prev, messages };
-          }
-          return { ...prev, messages: [...prev.messages, assistantMsg] };
-        });
-      }
-
-      if (activeRun.status === 'running' || activeRun.status === 'queued') {
-        const reconnectRequestId = ++requestIdRef.current;
-        abortControllerRef.current = new AbortController();
-        api.streamRun(
-          activeRun.run_id,
-          handleRunEvent(id, activeRun.run_id),
-          abortControllerRef.current.signal,
-          activeRun.event_count || 0
-        )
-          .catch((error) => {
-            if (error.name !== 'AbortError') {
-              console.error('Failed to reconnect run stream:', error);
-            }
-          })
-          .finally(() => {
-            if (requestIdRef.current === reconnectRequestId) {
-              abortControllerRef.current = null;
-              setIsLoading(false);
-            }
-          });
+      // Only apply if no newer optimistic update has occurred since we started
+      if (conversationVersionRef.current === expectedVersion) {
+        setCurrentConversation(conv);
       }
     } catch (error) {
       console.error('Failed to load conversation:', error);
-      setIsLoading(false);
+    }
+  };
+
+  const stopProgressPolling = () => {
+    if (progressPollRef.current) {
+      clearInterval(progressPollRef.current);
+      progressPollRef.current = null;
+    }
+  };
+
+  const abortAllStreams = () => {
+    stopProgressPolling();
+    if (advisorAbortControllerRef.current) {
+      advisorAbortControllerRef.current.abort();
+      advisorAbortControllerRef.current = null;
+    }
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+      abortControllerRef.current = null;
+    }
+  };
+
+  const loadingFlagsFromStage = (stage) => ({
+    search: stage === 'search',
+    stage1: stage === 'stage1' || stage === 'initializing',
+    stage2: stage === 'stage2',
+    stage3: stage === 'stage3',
+    stage4: stage === 'stage4',
+  });
+
+  const checkForActiveRun = async (conversationId) => {
+    stopProgressPolling();
+    try {
+      const progress = await api.getConversationProgress(conversationId);
+      if (!progress.active) return;
+
+      setCurrentConversation(prev => {
+        if (!prev || prev.id !== conversationId) return prev;
+        const messages = [...prev.messages];
+        const lastMsg = messages[messages.length - 1];
+        if (lastMsg?.role === 'user') {
+          messages.push({
+            role: 'assistant',
+            stage1: progress.stage1 || null,
+            stage2: progress.stage2 || null,
+            stage3: progress.stage3 || null,
+            loading: loadingFlagsFromStage(progress.stage),
+            progress: progress.progress || {},
+            metadata: {
+              execution_mode: progress.execution_mode,
+              stage4: progress.stage4 || null,
+            },
+            externalRun: true,
+          });
+        }
+        return { ...prev, messages };
+      });
+
+      let inFlight = false;
+      progressPollRef.current = setInterval(async () => {
+        if (inFlight) return;
+        inFlight = true;
+        try {
+          const p = await api.getConversationProgress(conversationId);
+          if (!p.active) {
+            stopProgressPolling();
+            const versionAtReload = conversationVersionRef.current;
+            await loadConversation(conversationId, versionAtReload);
+            loadConversations();
+            return;
+          }
+          setCurrentConversation(prev => {
+            if (!prev || prev.id !== conversationId) return prev;
+            const messages = [...prev.messages];
+            const lastIdx = messages.length - 1;
+            if (lastIdx >= 0 && messages[lastIdx]?.externalRun) {
+              messages[lastIdx] = {
+                ...messages[lastIdx],
+                stage1: p.stage1 || messages[lastIdx].stage1,
+                stage2: p.stage2 || messages[lastIdx].stage2,
+                stage3: p.stage3 || messages[lastIdx].stage3,
+                loading: loadingFlagsFromStage(p.stage),
+                progress: p.progress || messages[lastIdx].progress,
+                metadata: {
+                  ...messages[lastIdx].metadata,
+                  stage4: p.stage4 || messages[lastIdx].metadata?.stage4,
+                }
+              };
+            }
+            return { ...prev, messages };
+          });
+        } catch {
+          // Poll errors are expected during network blips
+        } finally {
+          inFlight = false;
+        }
+      }, 3000);
+    } catch {
+      // Progress endpoint unavailable — no-op
     }
   };
 
   const handleNewConversation = async () => {
-    // Check if there's already an empty/unused conversation
-    const existingEmpty = conversations.find(conv => !conv.title && conv.message_count === 0);
+    abortAllStreams();
+    setIsLoading(false);
+    setAppMode('council');
 
-    if (existingEmpty) {
-      // Reuse the existing empty conversation instead of creating a new one
-      setCurrentConversationId(existingEmpty.id);
-      return;
-    }
-
-    try {
-      const newConv = await api.createConversation();
-      setConversations([
-        { id: newConv.id, created_at: newConv.created_at, message_count: 0 },
-        ...conversations,
-      ]);
-      setCurrentConversationId(newConv.id);
-    } catch (error) {
-      console.error('Failed to create conversation:', error);
-    }
+    // Reset current states to indicate we are in a fresh Client-Side Draft
+    setCurrentConversationId('draft');
+    setCurrentConversation({
+      id: 'draft',
+      mode: 'council',
+      title: 'New Conversation',
+      messages: []
+    });
   };
 
   const handleSelectConversation = (id) => {
+    abortAllStreams();
+    setIsLoading(false);
     setCurrentConversationId(id);
+    // Auto-switch mode based on conversation mode
+    const conv = conversations.find(c => c.id === id);
+    if (conv?.mode === 'advisors') {
+      setAppMode('advisors');
+    } else {
+      setAppMode('council');
+    }
   };
 
   const handleDeleteConversation = async (id) => {
@@ -356,7 +455,6 @@ function App() {
       if (id === currentConversationId) {
         setCurrentConversationId(null);
         setCurrentConversation(null);
-        sessionStorage.removeItem(CURRENT_CONVERSATION_STORAGE_KEY);
       }
     } catch (error) {
       console.error('Failed to delete conversation:', error);
@@ -364,289 +462,290 @@ function App() {
   };
 
   const handleAbort = () => {
-    const runId = currentConversationId ? activeRuns[currentConversationId] : null;
-    if (runId) {
-      api.cancelRun(runId).catch((error) => {
-        console.error('Failed to cancel run:', error);
-      });
-    }
     if (abortControllerRef.current) {
       abortControllerRef.current.abort();
+      // Don't set to null here - let the request handler clean up
+      // This prevents race conditions with rapid clicks
+      setIsLoading(false);
     }
-    setIsLoading(false);
   };
 
-  const handleRunEvent = (conversationId, runId) => (eventType, event) => {
-    switch (eventType) {
-      case 'search_start':
+  const handleStartDebate = async (options) => {
+    stopProgressPolling();
+    const currentRequestId = ++requestIdRef.current;
+
+    setIsLoading(true);
+    let activeConversationId = currentConversationId;
+
+    try {
+      // Lazily create the conversation if it is a Client-Side Draft
+      if (activeConversationId === 'draft' || !activeConversationId) {
+        try {
+          const newConv = await api.createConversation({ mode: 'advisors' });
+          activeConversationId = newConv.id;
+          
+          // Pre-populate index states so it appears immediately in the sidebar list
+          setConversations((prev) => [
+            { id: newConv.id, created_at: newConv.created_at, message_count: 0, mode: 'advisors', title: 'New Conversation' },
+            ...prev,
+          ]);
+          
+          // Update draft references safely
+          conversationVersionRef.current++;
+          skipLoadForIdRef.current = newConv.id;
+          setCurrentConversationId(newConv.id);
+        } catch (createErr) {
+          console.error('Lazy creation of conversation failed:', createErr);
+          setIsLoading(false);
+          return;
+        }
+      }
+
+      setAppMode('advisors');
+
+      const userMessage = { role: 'user', content: options.question };
+      const debateMessage = {
+        role: 'assistant',
+        type: 'advisor_debate',
+        mode: 'advisors',
+        isRunning: true,
+        currentRound: 0,
+        maxRounds: options.maxRounds || 3,
+        question: options.question,
+        webSearch: options.searchProvider || null,
+        personas: [],
+        rounds: [],
+        verdict: null,
+        tiebreaker: null,
+        consensusReached: false,
+        error: null,
+      };
+
+      setCurrentConversation({
+        id: activeConversationId,
+        messages: [userMessage, debateMessage],
+      });
+
+      advisorAbortControllerRef.current = new AbortController();
+
+      await api.sendDebateStream(
+        activeConversationId,
+        options,
+        (eventType, event) => {
+          switch (eventType) {
+            case 'advisor_debate_start':
+              setCurrentConversation((prev) => {
+                const messages = [...prev.messages];
+                const lastMsg = messages[messages.length - 1];
+                messages[messages.length - 1] = {
+                  ...lastMsg,
+                  personas: event.data?.personas || [],
+                  maxRounds: event.data?.max_rounds || lastMsg.maxRounds,
+                };
+                return { ...prev, messages };
+              });
+              break;
+
+            case 'advisor_round_start':
+              setCurrentConversation((prev) => {
+                const messages = [...prev.messages];
+                const lastMsg = messages[messages.length - 1];
+                messages[messages.length - 1] = {
+                  ...lastMsg,
+                  currentRound: event.round || event.data?.round_number || lastMsg.currentRound,
+                };
+                return { ...prev, messages };
+              });
+              break;
+
+            case 'advisor_response':
+              setCurrentConversation((prev) => {
+                const messages = [...prev.messages];
+                const lastMsg = messages[messages.length - 1];
+                const rounds = [...(lastMsg.rounds || [])];
+                const roundIndex = (event.round || 1) - 1;
+                if (!rounds[roundIndex]) {
+                  rounds[roundIndex] = { round: event.round, responses: [], complete: false };
+                }
+                rounds[roundIndex] = {
+                  ...rounds[roundIndex],
+                  responses: [...rounds[roundIndex].responses, event.data],
+                };
+                messages[messages.length - 1] = { ...lastMsg, rounds };
+                return { ...prev, messages };
+              });
+              break;
+
+            case 'advisor_round_complete':
+              setCurrentConversation((prev) => {
+                const messages = [...prev.messages];
+                const lastMsg = messages[messages.length - 1];
+                const rounds = [...(lastMsg.rounds || [])];
+                const roundIndex = (event.round || 1) - 1;
+                if (!rounds[roundIndex]) {
+                  rounds[roundIndex] = { round: event.round, responses: [], complete: false };
+                }
+                rounds[roundIndex] = {
+                  ...rounds[roundIndex],
+                  complete: true,
+                  consensusReached: event.consensus_reached || false,
+                };
+                messages[messages.length - 1] = {
+                  ...lastMsg,
+                  rounds,
+                  consensusReached: event.consensus_reached || false,
+                };
+                return { ...prev, messages };
+              });
+              break;
+
+            case 'advisor_verdict':
+              setCurrentConversation((prev) => {
+                const messages = [...prev.messages];
+                const lastMsg = messages[messages.length - 1];
+                messages[messages.length - 1] = {
+                  ...lastMsg,
+                  verdict: event.data || event,
+                };
+                return { ...prev, messages };
+              });
+              break;
+
+            case 'advisor_tiebreaker':
+              setCurrentConversation((prev) => {
+                const messages = [...prev.messages];
+                const lastMsg = messages[messages.length - 1];
+                messages[messages.length - 1] = {
+                  ...lastMsg,
+                  tiebreaker: event.data || event,
+                };
+                return { ...prev, messages };
+              });
+              break;
+
+            case 'advisor_complete':
+              setCurrentConversation((prev) => {
+                const messages = [...prev.messages];
+                const lastMsg = messages[messages.length - 1];
+                messages[messages.length - 1] = { ...lastMsg, isRunning: false };
+                return { ...prev, messages };
+              });
+              setIsLoading(false);
+              break;
+
+            case 'advisor_error':
+              setCurrentConversation((prev) => {
+                const messages = [...prev.messages];
+                const lastMsg = messages[messages.length - 1];
+                messages[messages.length - 1] = {
+                  ...lastMsg,
+                  isRunning: false,
+                  error: event.message || 'Advisor debate failed',
+                };
+                return { ...prev, messages };
+              });
+              setIsLoading(false);
+              break;
+
+            default:
+              break;
+          }
+        },
+        advisorAbortControllerRef.current.signal
+      );
+    } catch (error) {
+      if (error.name === 'AbortError') {
         setCurrentConversation((prev) => {
-          if (!prev || prev.id !== conversationId) return prev;
+          if (!prev || prev.messages.length < 2) return prev;
           const messages = [...prev.messages];
           const lastMsg = messages[messages.length - 1];
-          messages[messages.length - 1] = {
-            ...lastMsg,
-            loading: { ...lastMsg.loading, search: true }
-          };
-          return { ...prev, messages };
-        });
-        break;
-
-      case 'search_complete':
-        setCurrentConversation((prev) => {
-          if (!prev || prev.id !== conversationId) return prev;
-          const messages = [...prev.messages];
-          const lastMsg = messages[messages.length - 1];
-          messages[messages.length - 1] = {
-            ...lastMsg,
-            loading: { ...lastMsg.loading, search: false },
-            metadata: {
-              ...lastMsg.metadata,
-              search_query: event.data.search_query,
-              extracted_query: event.data.extracted_query,
-              search_context: event.data.search_context,
-            }
-          };
-          return { ...prev, messages };
-        });
-        break;
-
-      case 'stage1_start':
-        setCurrentConversation((prev) => {
-          if (!prev || prev.id !== conversationId) return prev;
-          const messages = [...prev.messages];
-          const lastMsg = messages[messages.length - 1];
-          messages[messages.length - 1] = {
-            ...lastMsg,
-            loading: { ...lastMsg.loading, stage1: true },
-            timers: { ...lastMsg.timers, stage1Start: Date.now() }
-          };
-          return { ...prev, messages };
-        });
-        break;
-
-      case 'stage1_init':
-        setCurrentConversation((prev) => {
-          if (!prev || prev.id !== conversationId) return prev;
-          const messages = [...prev.messages];
-          const lastMsg = messages[messages.length - 1];
-          messages[messages.length - 1] = {
-            ...lastMsg,
-            progress: {
-              ...lastMsg.progress,
-              stage1: { count: 0, total: event.total, currentModel: null }
-            }
-          };
-          return { ...prev, messages };
-        });
-        break;
-
-      case 'stage1_progress':
-        setCurrentConversation((prev) => {
-          if (!prev || prev.id !== conversationId) return prev;
-          const messages = [...prev.messages];
-          const lastMsg = messages[messages.length - 1];
-          const updatedStage1 = lastMsg.stage1 ? [...lastMsg.stage1, event.data] : [event.data];
-          messages[messages.length - 1] = {
-            ...lastMsg,
-            progress: {
-              ...lastMsg.progress,
-              stage1: {
-                count: event.count,
-                total: event.total,
-                currentModel: event.data.model
-              }
-            },
-            stage1: updatedStage1
-          };
-          return { ...prev, messages };
-        });
-        break;
-
-      case 'stage1_complete':
-        setCurrentConversation((prev) => {
-          if (!prev || prev.id !== conversationId) return prev;
-          const messages = [...prev.messages];
-          const lastMsg = messages[messages.length - 1];
-          messages[messages.length - 1] = {
-            ...lastMsg,
-            stage1: event.data,
-            loading: { ...lastMsg.loading, stage1: false },
-            timers: { ...lastMsg.timers, stage1End: Date.now() }
-          };
-          return { ...prev, messages };
-        });
-        break;
-
-      case 'stage2_start':
-        setCurrentConversation((prev) => {
-          if (!prev || prev.id !== conversationId) return prev;
-          const messages = [...prev.messages];
-          const lastMsg = messages[messages.length - 1];
-          messages[messages.length - 1] = {
-            ...lastMsg,
-            loading: { ...lastMsg.loading, stage2: true },
-            timers: { ...lastMsg.timers, stage2Start: Date.now() }
-          };
-          return { ...prev, messages };
-        });
-        break;
-
-      case 'stage2_init':
-        setCurrentConversation((prev) => {
-          if (!prev || prev.id !== conversationId) return prev;
-          const messages = [...prev.messages];
-          const lastMsg = messages[messages.length - 1];
-          messages[messages.length - 1] = {
-            ...lastMsg,
-            progress: {
-              ...lastMsg.progress,
-              stage2: { count: 0, total: event.total, currentModel: null }
-            }
-          };
-          return { ...prev, messages };
-        });
-        break;
-
-      case 'stage2_progress':
-        setCurrentConversation((prev) => {
-          if (!prev || prev.id !== conversationId) return prev;
-          const messages = [...prev.messages];
-          const lastMsg = messages[messages.length - 1];
-          const updatedStage2 = lastMsg.stage2 ? [...lastMsg.stage2, event.data] : [event.data];
-          messages[messages.length - 1] = {
-            ...lastMsg,
-            progress: {
-              ...lastMsg.progress,
-              stage2: {
-                count: event.count,
-                total: event.total,
-                currentModel: event.data.model
-              }
-            },
-            stage2: updatedStage2
-          };
-          return { ...prev, messages };
-        });
-        break;
-
-      case 'stage2_complete':
-        setCurrentConversation((prev) => {
-          if (!prev || prev.id !== conversationId) return prev;
-          const messages = [...prev.messages];
-          const lastMsg = messages[messages.length - 1];
-          messages[messages.length - 1] = {
-            ...lastMsg,
-            stage2: event.data,
-            loading: { ...lastMsg.loading, stage2: false },
-            timers: { ...lastMsg.timers, stage2End: Date.now() },
-            metadata: { ...lastMsg.metadata, ...event.metadata }
-          };
-          return { ...prev, messages };
-        });
-        break;
-
-      case 'stage3_start':
-        setCurrentConversation((prev) => {
-          if (!prev || prev.id !== conversationId) return prev;
-          const messages = [...prev.messages];
-          const lastMsg = messages[messages.length - 1];
-          messages[messages.length - 1] = {
-            ...lastMsg,
-            loading: { ...lastMsg.loading, stage3: true },
-            timers: { ...lastMsg.timers, stage3Start: Date.now() }
-          };
-          return { ...prev, messages };
-        });
-        break;
-
-      case 'stage3_complete':
-        setCurrentConversation((prev) => {
-          if (!prev || prev.id !== conversationId) return prev;
-          const messages = [...prev.messages];
-          const lastMsg = messages[messages.length - 1];
-          messages[messages.length - 1] = {
-            ...lastMsg,
-            stage3: event.data,
-            loading: { ...lastMsg.loading, stage3: false },
-            timers: { ...lastMsg.timers, stage3End: Date.now() }
-          };
-          return { ...prev, messages };
-        });
-        setIsLoading(false);
-        break;
-
-      case 'title_complete':
-        loadConversations();
-        break;
-
-      case 'cancelled':
-        setCurrentConversation((prev) => {
-          if (!prev || prev.id !== conversationId) return prev;
-          const messages = [...prev.messages];
-          const lastMsg = messages[messages.length - 1];
-          if (lastMsg?.role === 'assistant') {
-            messages[messages.length - 1] = {
-              ...lastMsg,
-              aborted: true,
-              loading: { search: false, stage1: false, stage2: false, stage3: false }
-            };
+          if (lastMsg.type === 'advisor_debate') {
+            messages[messages.length - 1] = { ...lastMsg, isRunning: false, aborted: true };
           }
           return { ...prev, messages };
         });
-        setActiveRuns((prev) => {
-          if (prev[conversationId] !== runId) return prev;
-          const next = { ...prev };
-          delete next[conversationId];
-          return next;
-        });
         setIsLoading(false);
-        loadConversation(conversationId);
-        break;
-
-      case 'complete':
-        setActiveRuns((prev) => {
-          if (prev[conversationId] !== runId) return prev;
-          const next = { ...prev };
-          delete next[conversationId];
-          return next;
-        });
-        loadConversations();
-        setIsLoading(false);
-        break;
-
-      case 'error':
-        console.error('Run stream error:', event.message);
-        setActiveRuns((prev) => {
-          if (prev[conversationId] !== runId) return prev;
-          const next = { ...prev };
-          delete next[conversationId];
-          return next;
-        });
-        setIsLoading(false);
-        break;
-
-      default:
-        break;
+        return;
+      }
+      console.error('Failed to start debate:', error);
+      // Surface the error to the user instead of showing a blank screen
+      setCurrentConversation((prev) => {
+        if (!prev?.messages?.length) return prev;
+        const messages = [...prev.messages];
+        const lastMsg = messages[messages.length - 1];
+        if (lastMsg.type === 'advisor_debate') {
+          messages[messages.length - 1] = {
+            ...lastMsg,
+            isRunning: false,
+            error: error.message || 'Failed to start debate. Please try again.',
+          };
+        }
+        return { ...prev, messages };
+      });
+      setIsLoading(false);
+    } finally {
+      advisorAbortControllerRef.current = null;
+      loadConversations();
     }
   };
 
-  const handleSendMessage = async (content, webSearch) => {
+  const handleSendMessage = async (content, searchProvider) => {
     if (!currentConversationId) return;
 
-    const targetConversationId = currentConversationId;
+    stopProgressPolling();
     const currentRequestId = ++requestIdRef.current;
+
+    // Create new AbortController for this request
     abortControllerRef.current = new AbortController();
+
     setIsLoading(true);
+    let activeConversationId = currentConversationId;
 
     try {
+      // Lazily create the conversation if it is a Client-Side Draft
+      if (activeConversationId === 'draft') {
+        try {
+          const newConv = await api.createConversation({ mode: 'council' });
+          activeConversationId = newConv.id;
+          
+          // Pre-populate index states so it appears immediately in the sidebar list
+          setConversations((prev) => [
+            { id: newConv.id, created_at: newConv.created_at, message_count: 0, mode: 'council', title: 'New Conversation' },
+            ...prev,
+          ]);
+          
+          // Update draft references safely
+          conversationVersionRef.current++;
+          skipLoadForIdRef.current = newConv.id;
+          setCurrentConversationId(newConv.id);
+        } catch (createErr) {
+          console.error('Lazy creation of conversation failed:', createErr);
+          setIsLoading(false);
+          return;
+        }
+      }
+
+      // Optimistically add user message to UI
       const userMessage = { role: 'user', content };
+      setCurrentConversation((prev) => ({
+        ...prev,
+        id: activeConversationId, // transition draft ID to actual database UUID
+        messages: [...prev.messages, userMessage],
+      }));
+
+      // Create a partial assistant message that will be updated progressively
       const assistantMessage = {
         role: 'assistant',
         stage1: null,
         stage2: null,
         stage3: null,
         metadata: null,
-        loading: { search: false, stage1: false, stage2: false, stage3: false },
+        loading: {
+          search: false,
+          stage1: false,
+          stage2: false,
+          stage3: false,
+        },
         timers: {
           stage1Start: null,
           stage1End: null,
@@ -661,32 +760,574 @@ function App() {
         }
       };
 
+      // Add the partial assistant message
       setCurrentConversation((prev) => ({
         ...prev,
-        messages: [...prev.messages, userMessage, assistantMessage],
+        messages: [...prev.messages, assistantMessage],
       }));
 
-      const run = await api.startRun(targetConversationId, { content, webSearch, executionMode });
-      setActiveRuns((prev) => ({ ...prev, [targetConversationId]: run.run_id }));
-      await api.streamRun(
-        run.run_id,
-        handleRunEvent(targetConversationId, run.run_id),
-        abortControllerRef.current?.signal
-      );
+      // Send message with streaming
+      const isDebate = debateRounds > 1 || critiqueMode !== 'freeform';
+      const streamMethod = isDebate ? api.streamDebateMessage.bind(api) : api.sendMessageStream.bind(api);
+      const streamOptions = {
+        content,
+        searchProvider,
+        executionMode,
+        councilModels,
+        chairmanModel: executionMode === 'full' ? chairmanModel : undefined,
+      };
+      if (isDebate) {
+        streamOptions.debateRounds = debateRounds;
+      }
+
+      await streamMethod(
+        activeConversationId,
+        streamOptions,
+        (eventType, event) => {
+          switch (eventType) {
+            case 'search_start':
+              setCurrentConversation((prev) => {
+                const messages = [...prev.messages];
+                const lastMsg = messages[messages.length - 1];
+
+                const updatedLastMsg = {
+                  ...lastMsg,
+                  loading: {
+                    ...lastMsg.loading,
+                    search: true
+                  }
+                };
+
+                messages[messages.length - 1] = updatedLastMsg;
+                return { ...prev, messages };
+              });
+              break;
+
+            case 'search_complete':
+              setCurrentConversation((prev) => {
+                const messages = [...prev.messages];
+                const lastMsg = messages[messages.length - 1];
+
+                const updatedLastMsg = {
+                  ...lastMsg,
+                  loading: {
+                    ...lastMsg.loading,
+                    search: false
+                  },
+                  metadata: {
+                    ...lastMsg.metadata,
+                    search_query: event.data.search_query,
+                    extracted_query: event.data.extracted_query,
+                    search_context: event.data.search_context,
+                  }
+                };
+
+                messages[messages.length - 1] = updatedLastMsg;
+                return { ...prev, messages };
+              });
+              break;
+
+            case 'stage1_start':
+              setCurrentConversation((prev) => {
+                const messages = [...prev.messages];
+                const lastMsg = messages[messages.length - 1];
+
+                const updatedLastMsg = {
+                  ...lastMsg,
+                  loading: {
+                    ...lastMsg.loading,
+                    stage1: true
+                  },
+                  timers: {
+                    ...lastMsg.timers,
+                    stage1Start: Date.now()
+                  }
+                };
+
+                messages[messages.length - 1] = updatedLastMsg;
+                return { ...prev, messages };
+              });
+              break;
+
+            case 'stage1_init':
+              setCurrentConversation((prev) => {
+                const messages = [...prev.messages];
+                const lastMsg = messages[messages.length - 1];
+
+                const updatedLastMsg = {
+                  ...lastMsg,
+                  progress: {
+                    ...lastMsg.progress,
+                    stage1: {
+                      count: 0,
+                      total: event.total,
+                      currentModel: null
+                    }
+                  }
+                };
+
+                messages[messages.length - 1] = updatedLastMsg;
+                return { ...prev, messages };
+              });
+              break;
+
+            case 'stage1_progress':
+              setCurrentConversation((prev) => {
+                const messages = [...prev.messages];
+                const lastMsg = messages[messages.length - 1];
+
+                // Immutable update for stage1
+                const updatedStage1 = lastMsg.stage1 ? [...lastMsg.stage1, event.data] : [event.data];
+                const updatedLastMsg = {
+                  ...lastMsg,
+                  progress: {
+                    ...lastMsg.progress,
+                    stage1: {
+                      count: event.count,
+                      total: event.total,
+                      currentModel: event.data.model
+                    }
+                  },
+                  stage1: updatedStage1
+                };
+
+                messages[messages.length - 1] = updatedLastMsg;
+
+                return { ...prev, messages };
+              });
+              break;
+
+            case 'stage1_complete':
+              setCurrentConversation((prev) => {
+                const messages = [...prev.messages];
+                const lastMsg = messages[messages.length - 1];
+
+                // Immutable update to prevent React rendering issues
+                const updatedLastMsg = {
+                  ...lastMsg,
+                  stage1: event.data,
+                  loading: {
+                    ...lastMsg.loading,
+                    stage1: false
+                  },
+                  timers: {
+                    ...lastMsg.timers,
+                    stage1End: Date.now()
+                  }
+                };
+
+                messages[messages.length - 1] = updatedLastMsg;
+                return { ...prev, messages };
+              });
+              break;
+
+            case 'stage2_start':
+              setCurrentConversation((prev) => {
+                const messages = [...prev.messages];
+                const lastMsg = messages[messages.length - 1];
+
+                const updatedLastMsg = {
+                  ...lastMsg,
+                  loading: {
+                    ...lastMsg.loading,
+                    stage2: true
+                  },
+                  timers: {
+                    ...lastMsg.timers,
+                    stage2Start: Date.now()
+                  }
+                };
+
+                messages[messages.length - 1] = updatedLastMsg;
+                return { ...prev, messages };
+              });
+              break;
+
+            case 'stage2_init':
+              setCurrentConversation((prev) => {
+                const messages = [...prev.messages];
+                const lastMsg = messages[messages.length - 1];
+
+                const updatedLastMsg = {
+                  ...lastMsg,
+                  progress: {
+                    ...lastMsg.progress,
+                    stage2: {
+                      count: 0,
+                      total: event.total,
+                      currentModel: null
+                    }
+                  }
+                };
+
+                messages[messages.length - 1] = updatedLastMsg;
+                return { ...prev, messages };
+              });
+              break;
+
+            case 'stage2_progress':
+              setCurrentConversation((prev) => {
+                const messages = [...prev.messages];
+                const lastMsg = messages[messages.length - 1];
+
+                // Immutable update for stage2
+                const updatedStage2 = lastMsg.stage2 ? [...lastMsg.stage2, event.data] : [event.data];
+                const updatedLastMsg = {
+                  ...lastMsg,
+                  progress: {
+                    ...lastMsg.progress,
+                    stage2: {
+                      count: event.count,
+                      total: event.total,
+                      currentModel: event.data.model
+                    }
+                  },
+                  stage2: updatedStage2
+                };
+
+                messages[messages.length - 1] = updatedLastMsg;
+
+                return { ...prev, messages };
+              });
+              break;
+
+            case 'stage2_complete':
+              setCurrentConversation((prev) => {
+                const messages = [...prev.messages];
+                const lastMsg = messages[messages.length - 1];
+
+                // Immutable update to prevent React rendering issues
+                const updatedLastMsg = {
+                  ...lastMsg,
+                  stage2: event.data,
+                  loading: {
+                    ...lastMsg.loading,
+                    stage2: false
+                  },
+                  timers: {
+                    ...lastMsg.timers,
+                    stage2End: Date.now()
+                  },
+                  metadata: {
+                    ...lastMsg.metadata,
+                    ...event.metadata
+                  }
+                };
+
+                messages[messages.length - 1] = updatedLastMsg;
+                return { ...prev, messages };
+              });
+              break;
+
+            case 'stage3_start':
+              setCurrentConversation((prev) => {
+                const messages = [...prev.messages];
+                const lastMsg = messages[messages.length - 1];
+
+                const updatedLastMsg = {
+                  ...lastMsg,
+                  loading: {
+                    ...lastMsg.loading,
+                    stage3: true
+                  },
+                  timers: {
+                    ...lastMsg.timers,
+                    stage3Start: Date.now()
+                  }
+                };
+
+                messages[messages.length - 1] = updatedLastMsg;
+                return { ...prev, messages };
+              });
+              break;
+
+            case 'stage3_complete':
+              setCurrentConversation((prev) => {
+                const messages = [...prev.messages];
+                const lastMsg = messages[messages.length - 1];
+
+                // Immutable update to prevent React rendering issues
+                const updatedLastMsg = {
+                  ...lastMsg,
+                  stage3: event.data,
+                  loading: {
+                    ...lastMsg.loading,
+                    stage3: false
+                  },
+                  timers: {
+                    ...lastMsg.timers,
+                    stage3End: Date.now()
+                  }
+                };
+
+                messages[messages.length - 1] = updatedLastMsg;
+                return { ...prev, messages };
+              });
+              // Hide loading indicator once final answer is shown
+              setIsLoading(false);
+              break;
+
+            case 'round_start':
+              setCurrentConversation((prev) => {
+                const messages = [...prev.messages];
+                const lastMsg = messages[messages.length - 1];
+                const round = event.round;
+
+                const updatedLastMsg = {
+                  ...lastMsg,
+                  stage1: round > 1 ? null : lastMsg.stage1,
+                  stage2: round > 1 ? null : lastMsg.stage2,
+                  stage3: round > 1 ? null : lastMsg.stage3,
+                  loading: {
+                    ...lastMsg.loading,
+                    stage1: false,
+                    stage2: false,
+                    stage3: false,
+                  },
+                  timers: {
+                    ...lastMsg.timers,
+                    stage1Start: round > 1 ? null : lastMsg.timers?.stage1Start,
+                    stage1End: round > 1 ? null : lastMsg.timers?.stage1End,
+                    stage2Start: round > 1 ? null : lastMsg.timers?.stage2Start,
+                    stage2End: round > 1 ? null : lastMsg.timers?.stage2End,
+                    stage3Start: round > 1 ? null : lastMsg.timers?.stage3Start,
+                    stage3End: round > 1 ? null : lastMsg.timers?.stage3End,
+                  },
+                  metadata: {
+                    ...lastMsg.metadata,
+                    current_round: round,
+                    debate_rounds_configured: event.total_rounds,
+                  }
+                };
+
+                messages[messages.length - 1] = updatedLastMsg;
+                return { ...prev, messages };
+              });
+              break;
+
+            case 'round_complete':
+              setCurrentConversation((prev) => {
+                const messages = [...prev.messages];
+                const lastMsg = messages[messages.length - 1];
+                
+                const currentRoundData = {
+                  round_number: event.round,
+                  stage1: lastMsg.stage1,
+                  stage2: lastMsg.stage2,
+                  stage3: lastMsg.stage3,
+                  metadata: {
+                    label_to_model: lastMsg.metadata?.label_to_model,
+                    aggregate_rankings: lastMsg.metadata?.aggregate_rankings,
+                    canonical_claims: lastMsg.metadata?.canonical_claims,
+                    aggregate_claim_verdicts: lastMsg.metadata?.aggregate_claim_verdicts,
+                  }
+                };
+
+                const existingRounds = lastMsg.metadata?.rounds || [];
+                const updatedRounds = [...existingRounds];
+                const existingIdx = updatedRounds.findIndex(r => r.round_number === event.round);
+                if (existingIdx >= 0) {
+                  updatedRounds[existingIdx] = currentRoundData;
+                } else {
+                  updatedRounds.push(currentRoundData);
+                }
+
+                const updatedLastMsg = {
+                  ...lastMsg,
+                  metadata: {
+                    ...lastMsg.metadata,
+                    rounds: updatedRounds,
+                  }
+                };
+
+                messages[messages.length - 1] = updatedLastMsg;
+                return { ...prev, messages };
+              });
+              break;
+
+            case 'convergence':
+              setCurrentConversation((prev) => {
+                const messages = [...prev.messages];
+                const lastMsg = messages[messages.length - 1];
+
+                const updatedLastMsg = {
+                  ...lastMsg,
+                  metadata: {
+                    ...lastMsg.metadata,
+                    converged: true,
+                    convergence_message: event.message,
+                  }
+                };
+
+                messages[messages.length - 1] = updatedLastMsg;
+                return { ...prev, messages };
+              });
+              break;
+
+            case 'stage4_start':
+              setCurrentConversation((prev) => {
+                const messages = [...prev.messages];
+                const lastMsg = messages[messages.length - 1];
+
+                const updatedLastMsg = {
+                  ...lastMsg,
+                  loading: {
+                    ...lastMsg.loading,
+                    stage4: true
+                  },
+                  timers: {
+                    ...lastMsg.timers,
+                    stage4Start: Date.now()
+                  }
+                };
+
+                messages[messages.length - 1] = updatedLastMsg;
+                return { ...prev, messages };
+              });
+              break;
+
+            case 'stage4_complete':
+              setCurrentConversation((prev) => {
+                const messages = [...prev.messages];
+                const lastMsg = messages[messages.length - 1];
+
+                const updatedLastMsg = {
+                  ...lastMsg,
+                  loading: {
+                    ...lastMsg.loading,
+                    stage4: false
+                  },
+                  timers: {
+                    ...lastMsg.timers,
+                    stage4End: Date.now()
+                  },
+                  metadata: {
+                    ...lastMsg.metadata,
+                    stage4: event.data
+                  }
+                };
+
+                messages[messages.length - 1] = updatedLastMsg;
+                return { ...prev, messages };
+              });
+              break;
+
+            case 'debate_complete':
+              setCurrentConversation((prev) => {
+                const messages = [...prev.messages];
+                const lastMsg = messages[messages.length - 1];
+                const rounds = event.rounds || [];
+                const lastRound = rounds[rounds.length - 1] || {};
+
+                const updatedLastMsg = {
+                  ...lastMsg,
+                  stage1: lastRound.stage1 || lastMsg.stage1,
+                  stage2: lastRound.stage2 || lastMsg.stage2,
+                  stage3: lastRound.stage3 || lastMsg.stage3,
+                  metadata: {
+                    ...lastMsg.metadata,
+                    rounds: rounds,
+                    stage4: event.stage4 || lastMsg.metadata?.stage4,
+                    converged: event.converged || lastMsg.metadata?.converged,
+                    critique_mode: event.critique_mode || lastMsg.metadata?.critique_mode,
+                    label_to_model: lastRound.metadata?.label_to_model || lastMsg.metadata?.label_to_model,
+                    aggregate_rankings: lastRound.metadata?.aggregate_rankings || lastMsg.metadata?.aggregate_rankings,
+                    canonical_claims: lastRound.metadata?.canonical_claims || lastMsg.metadata?.canonical_claims,
+                    aggregate_claim_verdicts: lastRound.metadata?.aggregate_claim_verdicts || lastMsg.metadata?.aggregate_claim_verdicts,
+                  }
+                };
+
+                messages[messages.length - 1] = updatedLastMsg;
+                return { ...prev, messages };
+              });
+              break;
+
+            case 'title_complete':
+              // Reload conversations to get updated title
+              loadConversations();
+              break;
+
+            case 'complete':
+              // Stream complete, reload conversations list
+              loadConversations();
+              setIsLoading(false);
+              break;
+
+            case 'error':
+              console.error('Stream error:', event.message);
+              setCurrentConversation((prev) => {
+                if (!prev || prev.messages.length === 0) return prev;
+                const messages = [...prev.messages];
+                const lastMsg = messages[messages.length - 1];
+                if (lastMsg.role === 'assistant') {
+                  messages[messages.length - 1] = {
+                    ...lastMsg,
+                    error: event.message || 'The council request failed.',
+                    loading: {
+                      search: false,
+                      stage1: false,
+                      stage2: false,
+                      stage3: false,
+                    },
+                  };
+                }
+                return { ...prev, messages };
+              });
+              setIsLoading(false);
+              break;
+
+            default:
+              console.log('Unknown event type:', eventType);
+          }
+        }, abortControllerRef.current?.signal);
     } catch (error) {
+      // Handle aborted requests - mark message as aborted
       if (error.name === 'AbortError') {
+        console.log('Request aborted');
+        // Mark the assistant message as aborted and stop timers
+        setCurrentConversation((prev) => {
+          if (!prev || prev.messages.length < 2) return prev;
+          const messages = [...prev.messages];
+          const lastMsg = messages[messages.length - 1];
+          if (lastMsg.role === 'assistant') {
+            const now = Date.now();
+            messages[messages.length - 1] = {
+              ...lastMsg,
+              aborted: true,
+              loading: {
+                search: false,
+                stage1: false,
+                stage2: false,
+                stage3: false,
+              },
+              timers: {
+                ...lastMsg.timers,
+                // Stop any running timers
+                stage1End: lastMsg.timers?.stage1Start && !lastMsg.timers?.stage1End ? now : lastMsg.timers?.stage1End,
+                stage2End: lastMsg.timers?.stage2Start && !lastMsg.timers?.stage2End ? now : lastMsg.timers?.stage2End,
+                stage3End: lastMsg.timers?.stage3Start && !lastMsg.timers?.stage3End ? now : lastMsg.timers?.stage3End,
+              }
+            };
+          }
+          return { ...prev, messages };
+        });
+        setIsLoading(false);
         return;
       }
       console.error('Failed to send message:', error);
+      // Remove optimistic messages on error
       setCurrentConversation((prev) => ({
         ...prev,
-        messages: prev?.messages ? prev.messages.slice(0, -2) : [],
+        messages: prev.messages.slice(0, -2),
       }));
       setIsLoading(false);
     } finally {
+      // Only clear the controller if this is still the current request
+      // This prevents race conditions if user rapidly sends multiple messages
       if (requestIdRef.current === currentRequestId) {
         abortControllerRef.current = null;
       }
+      // Reload conversations to ensure title/messages are synced, even if aborted
       loadConversations();
     }
   };
@@ -702,6 +1343,29 @@ function App() {
     setSidebarOpen(false); // Close sidebar on mobile after creating new conversation
   };
 
+  const resetAppState = (mode) => {
+    abortAllStreams();
+    setIsLoading(false);
+    
+    if (mode === 'advisors') {
+      setCurrentConversationId('draft');
+      setCurrentConversation({
+        id: 'draft',
+        mode: 'advisors',
+        title: 'New Conversation',
+        messages: []
+      });
+    } else {
+      setCurrentConversationId(null);
+      setCurrentConversation(null);
+    }
+    
+    setAppMode(mode);
+    setSidebarOpen(false);
+  };
+
+  const handleMobileNewAdvisors = () => resetAppState('advisors');
+
   const handleMobileOpenSettings = () => {
     setShowSettings(true);
     setSidebarOpen(false); // Close sidebar on mobile
@@ -710,8 +1374,8 @@ function App() {
   return (
     <div className="app">
       {/* Mobile hamburger menu button */}
-      <button 
-        className="mobile-menu-btn" 
+      <button
+        className="mobile-menu-btn"
         onClick={() => setSidebarOpen(true)}
         aria-label="Open menu"
       >
@@ -723,33 +1387,56 @@ function App() {
         currentConversationId={currentConversationId}
         onSelectConversation={handleMobileSelectConversation}
         onNewConversation={handleMobileNewConversation}
+        onNewAdvisors={handleMobileNewAdvisors}
         onDeleteConversation={handleDeleteConversation}
         onOpenSettings={handleMobileOpenSettings}
         isLoading={isLoading}
         onAbort={handleAbort}
         isOpen={sidebarOpen}
         onClose={() => setSidebarOpen(false)}
+        onGoHome={() => resetAppState(null)}
       />
-      <ChatInterface
-        conversation={currentConversation}
-        onSendMessage={handleSendMessage}
-        onAbort={handleAbort}
-        isLoading={isLoading}
-        councilConfigured={councilConfigured}
-        councilModels={councilModels}
-        chairmanModel={chairmanModel}
-        searchProvider={searchProvider}
-        onOpenSettings={handleOpenSettings}
-        executionMode={executionMode}
-        onExecutionModeChange={setExecutionMode}
-      />
+
+      <div className="main-area">
+        <AppErrorBoundary>
+          <Suspense fallback={<AppLoadingFallback />}>
+            {appMode === null && !currentConversationId ? (
+              <LandingPage onSelectMode={(m) => setAppMode(m)} />
+            ) : (
+              <ChatInterface
+                conversation={currentConversation}
+                onSendMessage={handleSendMessage}
+                onAbort={handleAbort}
+                isLoading={isLoading}
+                councilConfigured={councilConfigured}
+                councilModels={councilModels}
+                chairmanModel={chairmanModel}
+                searchProvider={searchProvider}
+                availableSearchProviders={availableSearchProviders}
+                onOpenSettings={handleOpenSettings}
+                executionMode={executionMode}
+                onExecutionModeChange={setExecutionMode}
+                mode={appMode}
+                onStartDebate={handleStartDebate}
+                onNewConversation={handleNewConversation}
+                onCouncilChange={handleCouncilChange}
+              />
+            )}
+          </Suspense>
+        </AppErrorBoundary>
+      </div>
+
       {showSettings && (
-        <Settings
-          onClose={handleSettingsClose}
-          ollamaStatus={ollamaStatus}
-          onRefreshOllama={testOllamaConnection}
-          initialSection={settingsInitialSection}
-        />
+        <AppErrorBoundary>
+          <Suspense fallback={<AppLoadingFallback />}>
+            <Settings
+              onClose={handleSettingsClose}
+              ollamaStatus={ollamaStatus}
+              onRefreshOllama={testOllamaConnection}
+              initialSection={settingsInitialSection}
+            />
+          </Suspense>
+        </AppErrorBoundary>
       )}
     </div>
   );

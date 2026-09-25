@@ -9,6 +9,18 @@
   z-index: 1;
 }
 
+.app-loading {
+  display: flex;
+  min-height: 100%;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-secondary);
+  font-family: var(--font-ui);
+  font-size: 14px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
 /* Mobile hamburger menu button */
 .mobile-menu-btn {
   display: none;

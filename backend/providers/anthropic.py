@@ -96,10 +96,11 @@ class AnthropicProvider(LLMProvider):
                 if response.status_code != 200:
                     # Fallback to hardcoded list if API fails (e.g. older keys or API not enabled)
                     return [
-                        {"id": "anthropic:claude-3-5-sonnet-20241022", "name": "Claude 3.5 Sonnet", "provider": "Anthropic"},
-                        {"id": "anthropic:claude-3-opus-20240229", "name": "Claude 3 Opus", "provider": "Anthropic"},
-                        {"id": "anthropic:claude-3-sonnet-20240229", "name": "Claude 3 Sonnet", "provider": "Anthropic"},
-                        {"id": "anthropic:claude-3-haiku-20240307", "name": "Claude 3 Haiku", "provider": "Anthropic"},
+                        {"id": "anthropic:claude-opus-4-7", "name": "Claude Opus 4.7 [Anthropic]", "provider": "Anthropic"},
+                        {"id": "anthropic:claude-opus-4-6", "name": "Claude Opus 4.6 [Anthropic]", "provider": "Anthropic"},
+                        {"id": "anthropic:claude-sonnet-4-6", "name": "Claude Sonnet 4.6 [Anthropic]", "provider": "Anthropic"},
+                        {"id": "anthropic:claude-haiku-4-5-20251001", "name": "Claude Haiku 4.5 [Anthropic]", "provider": "Anthropic"},
+                        {"id": "anthropic:claude-3-5-sonnet-20241022", "name": "Claude 3.5 Sonnet [Anthropic]", "provider": "Anthropic"},
                     ]
                     
                 data = response.json()
@@ -120,7 +121,6 @@ class AnthropicProvider(LLMProvider):
 
     async def validate_key(self, api_key: str) -> Dict[str, Any]:
         try:
-            # Test with a cheap call
             async with httpx.AsyncClient(timeout=10.0) as client:
                 response = await client.post(
                     f"{self.BASE_URL}/messages",
@@ -130,15 +130,20 @@ class AnthropicProvider(LLMProvider):
                         "content-type": "application/json"
                     },
                     json={
-                        "model": "claude-3-haiku-20240307",
+                        "model": "claude-haiku-4-5-20251001",
                         "messages": [{"role": "user", "content": "Hi"}],
                         "max_tokens": 1
                     }
                 )
-                
+
                 if response.status_code == 200:
                     return {"success": True, "message": "API key is valid"}
-                else:
-                    return {"success": False, "message": "Invalid API key"}
+
+                error_body = response.json() if response.headers.get("content-type", "").startswith("application/json") else {}
+                error_detail = error_body.get("error", {}).get("message", response.text)
+
+                if response.status_code == 401:
+                    return {"success": False, "message": f"Invalid API key: {error_detail}"}
+                return {"success": False, "message": f"Anthropic API error ({response.status_code}): {error_detail}"}
         except Exception as e:
             return {"success": False, "message": str(e)}

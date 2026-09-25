@@ -42,3 +42,6 @@ DESIGN_SESSION_CONTEXT.md
 .security-key
 logs/security/
 .coverage
+
+# Antigravity CLI config
+.antigravitycli/

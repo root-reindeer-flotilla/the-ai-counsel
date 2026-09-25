@@ -2,7 +2,7 @@
 
 import json
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List, Dict, Any, Optional
 from pathlib import Path
 from .config import DATA_DIR
@@ -64,6 +64,7 @@ def rebuild_index() -> List[Dict[str, Any]]:
                         "id": data["id"],
                         "created_at": data["created_at"],
                         "title": data.get("title", "New Conversation"),
+                        "mode": data.get("mode", "council"),
                         "message_count": len(data["messages"])
                     })
             except (json.JSONDecodeError, OSError):
@@ -87,6 +88,7 @@ def _update_index_entry(conversation: Dict[str, Any]):
         "id": conversation["id"],
         "created_at": conversation["created_at"],
         "title": conversation.get("title", "New Conversation"),
+        "mode": conversation.get("mode", "council"),
         "message_count": len(conversation["messages"])
     }
 
@@ -114,12 +116,13 @@ def _remove_from_index(conversation_id: str):
         _save_index(new_index)
 
 
-def create_conversation(conversation_id: str) -> Dict[str, Any]:
+def create_conversation(conversation_id: str, mode: str = "council") -> Dict[str, Any]:
     """
     Create a new conversation.
 
     Args:
         conversation_id: Unique identifier for the conversation
+        mode: Conversation mode — "council" or "advisors"
 
     Returns:
         New conversation dict
@@ -128,8 +131,9 @@ def create_conversation(conversation_id: str) -> Dict[str, Any]:
 
     conversation = {
         "id": conversation_id,
-        "created_at": datetime.utcnow().isoformat(),
+        "created_at": datetime.now(timezone.utc).isoformat(),
         "title": "New Conversation",
+        "mode": mode,
         "messages": []
     }
 
@@ -200,17 +204,22 @@ def list_conversations() -> List[Dict[str, Any]]:
     return index
 
 
-def add_user_message(conversation_id: str, content: str):
-    """
-    Add a user message to a conversation.
+def add_user_message(conversation_id: str, content: str, conversation: Optional[Dict[str, Any]] = None):
+    """Add a user message to a conversation.
 
     Args:
         conversation_id: Conversation identifier
         content: User message content
+        conversation: Pre-loaded conversation dict (avoids redundant disk read)
     """
-    conversation = get_conversation(conversation_id)
+    if conversation is None:
+        conversation = get_conversation(conversation_id)
     if conversation is None:
         raise ValueError(f"Conversation {conversation_id} not found")
+
+    # If this is the very first message in a reused empty draft, reset the creation date to now
+    if len(conversation["messages"]) == 0:
+        conversation["created_at"] = datetime.now(timezone.utc).isoformat()
 
     conversation["messages"].append({
         "role": "user",
@@ -224,22 +233,22 @@ def add_assistant_message(
     conversation_id: str,
     stage1: List[Dict[str, Any]],
     stage2: Optional[List[Dict[str, Any]]] = None,
-    stage3: Optional[Dict[str,Any]] = None,
-    metadata: Optional[Dict[str, Any]] = None
+    stage3: Optional[Dict[str, Any]] = None,
+    metadata: Optional[Dict[str, Any]] = None,
+    conversation: Optional[Dict[str, Any]] = None
 ):
-    """
-    Add an assistant message to a conversation.
-    
-    Supports partial execution modes where stage2 and/or stage3 may be None.
-    
+    """Add an assistant message to a conversation.
+
     Args:
         conversation_id: Conversation identifier
         stage1: List of individual model responses (always present)
         stage2: List of model rankings (None if execution_mode was 'chat_only')
         stage3: Final synthesized response (None if execution_mode was not 'full')
         metadata: Optional metadata including execution_mode, label_to_model, etc.
+        conversation: Pre-loaded conversation dict (avoids redundant disk read)
     """
-    conversation = get_conversation(conversation_id)
+    if conversation is None:
+        conversation = get_conversation(conversation_id)
     if conversation is None:
         raise ValueError(f"Conversation {conversation_id} not found")
 
@@ -247,18 +256,58 @@ def add_assistant_message(
         "role": "assistant",
         "stage1": stage1,
     }
-    
-    # Only include stage2 and stage3 if they were executed
+
     if stage2 is not None:
         message["stage2"] = stage2
     if stage3 is not None:
         message["stage3"] = stage3
-
     if metadata:
         message["metadata"] = metadata
 
     conversation["messages"].append(message)
+    save_conversation(conversation)
 
+
+def add_advisor_message(
+    conversation_id: str,
+    rounds: List[Dict[str, Any]],
+    verdict: Optional[Dict[str, Any]] = None,
+    tiebreaker: Optional[Dict[str, Any]] = None,
+    personas: Optional[List[Dict[str, Any]]] = None,
+    metadata: Optional[Dict[str, Any]] = None,
+    conversation: Optional[Dict[str, Any]] = None
+):
+    """Add an advisor debate message to a conversation.
+
+    Args:
+        conversation_id: Conversation identifier
+        rounds: List of round dicts, each with round_number and responses
+        verdict: Structured verdict (summary, consensus, disagreements, etc.)
+        tiebreaker: Tiebreaker result if vote was tied
+        metadata: Optional metadata (persona_ids, models, etc.)
+        conversation: Pre-loaded conversation dict (avoids redundant disk read)
+    """
+    if conversation is None:
+        conversation = get_conversation(conversation_id)
+    if conversation is None:
+        raise ValueError(f"Conversation {conversation_id} not found")
+
+    message = {
+        "role": "assistant",
+        "mode": "advisors",
+        "rounds": rounds,
+    }
+
+    if personas is not None:
+        message["personas"] = personas
+    if verdict is not None:
+        message["verdict"] = verdict
+    if tiebreaker is not None:
+        message["tiebreaker"] = tiebreaker
+    if metadata:
+        message["metadata"] = metadata
+
+    conversation["messages"].append(message)
     save_conversation(conversation)
 
 
@@ -279,7 +328,7 @@ def add_error_message(conversation_id: str, error_text: str):
         "content": None,
         "error": error_text,
         "stage1": [],
-        "stage2": [],
+        "stage2": None,
         "stage3": None
     }
 
