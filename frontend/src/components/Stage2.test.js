@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { deanonymizeStage2Text } from '../utils/stage2Labels';
 
 describe('Stage2 reasoning renderer wiring', () => {
   it('uses ThinkBlockRenderer for ranking content', () => {
@@ -24,7 +25,9 @@ describe('Stage2 leaderboard metric formatting', () => {
 
 describe('Stage2 evaluator label map selection', () => {
   it('prefers evaluator-specific mapping and falls back to global mapping', () => {
-    const src = readFileSync(resolve(__dirname, 'Stage2.jsx'), 'utf8');
+    // The selection moved to utils/stage2Labels.js: Stage2.jsx may only export
+    // components (react-refresh lint rule), and the helper is now unit-tested.
+    const src = readFileSync(resolve(__dirname, '../utils/stage2Labels.js'), 'utf8');
     expect(src).toContain('function getEvaluatorLabelMap');
     expect(src).toContain('currentRanking?.stage2_label_model_map');
     expect(src).toContain('stage2LabelMapsByEvaluator[evaluatorModel]');
@@ -32,3 +35,18 @@ describe('Stage2 evaluator label map selection', () => {
   });
 });
 
+
+describe('deanonymizeStage2Text', () => {
+  const global = { 'Response A': 'm/one', 'Response B': 'm/two' };
+
+  it('uses the evaluator-local map when present', () => {
+    const result = { stage2_label_map: { 'Response A': 'm/two', 'Response B': 'm/one' } };
+    expect(deanonymizeStage2Text('Response A beats Response B', result, global))
+      .toBe('**two** beats **one**');
+  });
+
+  it('falls back to the conversation map for pre-integration results', () => {
+    expect(deanonymizeStage2Text('Response A beats Response B', {}, global))
+      .toBe('**one** beats **two**');
+  });
+});

@@ -1,7 +1,9 @@
 import { useState, useEffect } from 'react';
 import Skeleton from './common/Skeleton';
-import MarkdownContent from './MarkdownContent';
+import ThinkBlockRenderer from './ThinkBlockRenderer';
 import { getModelVisuals, getShortModelName } from '../utils/modelHelpers';
+import { getEvaluatorLabelMap, getRankedEntries, replaceResponseLabels } from '../utils/stage2Labels';
+import { formatUsd } from '../utils/formatCost';
 import RankingHeatmap from './RankingHeatmap';
 import { ClaimCardWithVerdicts } from './ClaimCards';
 import './Stage2.css';
@@ -9,25 +11,13 @@ import './ClaimCards.css';
 import StageTimer from './StageTimer';
 import { copyToClipboard } from '../utils/clipboard';
 
-function deAnonymizeText(text, labelToModel) {
-    if (!labelToModel) return text;
-
-    let result = text;
-    // Replace each "Response X" with the actual model name
-    Object.entries(labelToModel).forEach(([label, model]) => {
-        const modelShortName = getShortModelName(model);
-        result = result.replace(new RegExp(label, 'g'), `**${modelShortName}**`);
-    });
-    return result;
-}
-
 // Helper to convert hex to rgb for CSS variable
 function hexToRgb(hex) {
     const result = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex);
     return result ? `${parseInt(result[1], 16)}, ${parseInt(result[2], 16)}, ${parseInt(result[3], 16)}` : '255, 255, 255';
 }
 
-export default function Stage2({ rankings, labelToModel, aggregateRankings, startTime, endTime, canonicalClaims, aggregateClaimVerdicts }) {
+export default function Stage2({ rankings, labelToModel, stage2LabelMapsByEvaluator, aggregateRankings, startTime, endTime, canonicalClaims, aggregateClaimVerdicts }) {
     const [activeTab, setActiveTab] = useState(0);
     const [viewMode, setViewMode] = useState('leaderboard'); // 'leaderboard' or 'heatmap'
 
@@ -49,10 +39,9 @@ export default function Stage2({ rankings, labelToModel, aggregateRankings, star
 
     // Get visuals for current tab
     const currentVisuals = getModelVisuals(currentRanking?.model);
-    const knownLabels = labelToModel ? new Set(Object.keys(labelToModel)) : null;
-    const parsedRanking = (currentRanking?.parsed_ranking || []).filter(
-        (label) => !knownLabels || knownLabels.has(label)
-    );
+    // Fork: raw ranking text uses this evaluator's own labels (balanced Stage 2 order).
+    const currentLabelMap = getEvaluatorLabelMap(currentRanking, labelToModel, stage2LabelMapsByEvaluator);
+    const parsedRanking = getRankedEntries(currentRanking, labelToModel);
     const anonymizedLabelText = labelToModel
         ? Object.keys(labelToModel).join(', ')
         : 'Response A, Response B, etc.';
@@ -70,7 +59,7 @@ export default function Stage2({ rankings, labelToModel, aggregateRankings, star
     const handleCopy = async () => {
         const ranking = currentRanking?.ranking;
         const rankingText = typeof ranking === 'string' ? ranking : String(ranking || '');
-        const textToCopy = deAnonymizeText(rankingText, labelToModel);
+        const textToCopy = replaceResponseLabels(rankingText, currentLabelMap);
 
         if (!textToCopy) return;
 
@@ -109,7 +98,7 @@ export default function Stage2({ rankings, labelToModel, aggregateRankings, star
                     <div style={{ marginTop: '12px' }}>
                         <RawEvaluationTabs
                             rankings={rankings}
-                            labelToModel={labelToModel}
+                            currentLabelMap={currentLabelMap}
                             activeTab={activeTab}
                             setActiveTab={setActiveTab}
                             currentRanking={currentRanking}
@@ -132,7 +121,7 @@ export default function Stage2({ rankings, labelToModel, aggregateRankings, star
                     </p>
                     <RawEvaluationTabs
                         rankings={rankings}
-                        labelToModel={labelToModel}
+                        currentLabelMap={currentLabelMap}
                         activeTab={activeTab}
                         setActiveTab={setActiveTab}
                         currentRanking={currentRanking}
@@ -184,6 +173,22 @@ export default function Stage2({ rankings, labelToModel, aggregateRankings, star
                             {aggregateRankings.map((agg, index) => {
                                 const visuals = getModelVisuals(agg.model);
                                 const shortName = getShortModelName(agg.model);
+                                // Fork: per-model generation time, tokens and cost (backend/runs.py rows).
+                                const parsedRowSeconds = Number(agg?.generation_time_seconds);
+                                const safeRowSeconds = agg?.generation_time_seconds != null && Number.isFinite(parsedRowSeconds)
+                                    ? Math.max(0, Math.round(parsedRowSeconds))
+                                    : null;
+                                const generationTimeLabel = safeRowSeconds !== null ? `${safeRowSeconds}s` : null;
+                                const parsedRowTokens = Number(agg?.generation_total_tokens);
+                                const safeRowTokens = agg?.generation_total_tokens != null && Number.isFinite(parsedRowTokens)
+                                    ? Math.max(0, Math.round(parsedRowTokens))
+                                    : null;
+                                const generationTokensLabel = safeRowTokens !== null
+                                    ? safeRowTokens.toLocaleString('en-US')
+                                    : null;
+                                const generationCostLabel = typeof agg?.generation_total_cost === 'number'
+                                    ? formatUsd(agg.generation_total_cost)
+                                    : null;
 
                                 // Calculate bar width proportional to the rank value
                                 // Higher rank = longer bar (matches the number visually)
@@ -214,6 +219,24 @@ export default function Stage2({ rankings, labelToModel, aggregateRankings, star
                                                         <span className="rank-score">
                                                             {agg.average_rank.toFixed(2)}
                                                         </span>
+                                                        {generationTimeLabel && (
+                                                            <span className="rank-score" title="Generation time (Stages 1 and 2)">
+                                                                {" | "}
+                                                                {generationTimeLabel}
+                                                            </span>
+                                                        )}
+                                                        {generationTokensLabel && (
+                                                            <span className="rank-score" title="Tokens used (Stages 1 and 2)">
+                                                                {" | "}
+                                                                {generationTokensLabel}
+                                                            </span>
+                                                        )}
+                                                        {generationCostLabel && (
+                                                            <span className="rank-score" title="Cost (Stages 1 and 2)">
+                                                                {" | "}
+                                                                {generationCostLabel}
+                                                            </span>
+                                                        )}
                                                         {index === 0 && <span className="trophy-icon">🏆</span>}
                                                     </div>
                                                 </div>
@@ -303,7 +326,7 @@ export function Stage2Skeleton() {
 
 function RawEvaluationTabs({
     rankings,
-    labelToModel,
+    currentLabelMap,
     activeTab,
     setActiveTab,
     currentRanking,
@@ -394,13 +417,15 @@ function RawEvaluationTabs({
                     </div>
                 ) : (
                     <>
-                        <MarkdownContent className="ranking-content">
-                            {(() => {
-                                const ranking = currentRanking?.ranking;
-                                const rankingText = typeof ranking === 'string' ? ranking : String(ranking || '');
-                                return deAnonymizeText(rankingText, labelToModel);
-                            })()}
-                        </MarkdownContent>
+                        <div className="ranking-content markdown-content">
+                            <ThinkBlockRenderer
+                                content={(() => {
+                                    const ranking = currentRanking?.ranking;
+                                    const rankingText = typeof ranking === 'string' ? ranking : String(ranking || '');
+                                    return replaceResponseLabels(rankingText, currentLabelMap);
+                                })()}
+                            />
+                        </div>
 
                         {parsedRanking.length > 0 && (
                             <div className="parsed-ranking">
@@ -414,11 +439,9 @@ function RawEvaluationTabs({
                                     </span>
                                 </span>
                                 <ol>
-                                    {parsedRanking.map((label, i) => (
+                                    {parsedRanking.map(({ label, model }, i) => (
                                         <li key={i}>
-                                            {labelToModel && labelToModel[label]
-                                                ? getShortModelName(labelToModel[label])
-                                                : label}
+                                            {model ? getShortModelName(model) : label}
                                         </li>
                                     ))}
                                 </ol>
