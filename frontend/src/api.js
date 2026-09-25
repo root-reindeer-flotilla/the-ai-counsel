@@ -2,6 +2,8 @@
  * API client for The AI Counsel backend.
  */
 
+import { createForkApi, parseSseDataChunk, responseError } from './forkApi';
+
 // Dynamically determine API base URL based on current hostname
 // This allows the app to work on both localhost and network IPs
 // In Vite dev, the backend port comes from PORT_BACKEND (see vite.config.js).
@@ -26,6 +28,9 @@ const getApiBase = () => {
 };
 
 const API_BASE = getApiBase();
+
+// Fork: Requesty and resumable-run calls live in forkApi.js.
+export { parseSseDataChunk };
 
 export function buildAvailableSearchProviders(settings) {
   const providers = [{ id: 'duckduckgo', name: 'DuckDuckGo' }];
@@ -68,6 +73,8 @@ async function _consumeSSEStream(body, onEvent) {
 }
 
 export const api = {
+  ...createForkApi(API_BASE),
+
   /**
    * List all conversations.
    */
@@ -152,7 +159,7 @@ export const api = {
       }
     );
     if (!response.ok) {
-      throw new Error('Failed to send message');
+      throw await responseError(response, 'Failed to send message');
     }
     return response.json();
   },
@@ -483,7 +490,7 @@ export const api = {
     );
 
     if (!response.ok) {
-      throw new Error('Failed to start debate stream');
+      throw await responseError(response, 'Failed to start debate stream');
     }
 
     await _consumeSSEStream(response.body, onEvent);
@@ -538,7 +545,7 @@ export const api = {
     );
 
     if (!response.ok) {
-      throw new Error('Failed to send message');
+      throw await responseError(response, 'Failed to send message');
     }
 
     await _consumeSSEStream(response.body, onEvent);
@@ -587,7 +594,7 @@ export const api = {
     );
 
     if (!response.ok) {
-      throw new Error('Failed to start debate stream');
+      throw await responseError(response, 'Failed to start debate stream');
     }
 
     await _consumeSSEStream(response.body, onEvent);
