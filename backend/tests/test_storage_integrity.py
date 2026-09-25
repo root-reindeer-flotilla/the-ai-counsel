@@ -114,5 +114,6 @@ def test_add_user_and_error_messages_append_expected_shapes(isolated_data_dir):
     assert err_msg["role"] == "assistant"
     assert err_msg["error"] == "boom"
     assert err_msg["stage1"] == []
-    assert err_msg["stage2"] == []
+    # Upstream stores stage2 as None on error messages.
+    assert err_msg["stage2"] is None
     assert err_msg["stage3"] is None

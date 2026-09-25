@@ -1,6 +1,6 @@
 from fastapi.testclient import TestClient
 
-from backend import main
+from backend import main, settings_payload
 from backend.settings import Settings
 
 
@@ -22,7 +22,8 @@ def test_post_conversations_happy_path(monkeypatch):
         "messages": [],
     }
     monkeypatch.setattr(main.uuid, "uuid4", lambda: "fixed-id")
-    monkeypatch.setattr(main.storage, "create_conversation", lambda _cid: conversation)
+    # Upstream passes mode= to create_conversation.
+    monkeypatch.setattr(main.storage, "create_conversation", lambda _cid, **_kwargs: conversation)
 
     resp = client.post("/api/conversations", json={})
     assert resp.status_code == 200
@@ -35,7 +36,11 @@ def test_get_conversations_happy_path(monkeypatch):
 
     resp = client.get("/api/conversations")
     assert resp.status_code == 200
-    assert resp.json() == data
+    body = resp.json()
+    assert len(body) == len(data)
+    # Upstream adds mode, run_summary and cost fields to each item.
+    for item, expected in zip(body, data):
+        assert expected.items() <= item.items()
 
 
 def test_get_conversation_missing_returns_404(monkeypatch):
@@ -57,15 +62,20 @@ def test_delete_conversation_success_and_missing(monkeypatch):
 
 
 def test_get_settings_returns_shape_with_key_flags(monkeypatch):
+    # Upstream builds the payload in settings_payload and reads key flags
+    # from the credential store (has_secret), not plaintext settings fields.
     monkeypatch.setattr(
-        main,
+        settings_payload,
         "get_settings",
         lambda: _settings_with(
-            openrouter_api_key="x",
-            tavily_api_key=None,
             council_models=["m1", "m2"],
             chairman_model="m1",
         ),
+    )
+    monkeypatch.setattr(
+        settings_payload,
+        "_key_set",
+        lambda secret_id: secret_id == "api:openrouter",
     )
 
     resp = client.get("/api/settings")
@@ -115,14 +125,16 @@ def test_put_settings_invalid_council_model_count_returns_400():
     assert "At least two council models" in resp.json()["detail"]
 
 
-def test_stream_endpoint_invalid_execution_mode_returns_400(monkeypatch):
+def test_stream_endpoint_invalid_execution_mode_is_rejected(monkeypatch):
     monkeypatch.setattr(main.storage, "get_conversation", lambda _cid: {"messages": []})
     resp = client.post(
         "/api/conversations/c1/message/stream",
         json={"content": "hello", "execution_mode": "invalid"},
     )
-    assert resp.status_code == 400
-    assert "Invalid execution_mode" in resp.json()["detail"]
+    # Upstream validates execution_mode with a pydantic Literal, so FastAPI returns 422.
+    assert resp.status_code == 422
+    detail = resp.json()["detail"]
+    assert any("execution_mode" in err.get("loc", []) for err in detail)
 
 
 def test_stream_endpoint_missing_conversation_returns_404(monkeypatch):

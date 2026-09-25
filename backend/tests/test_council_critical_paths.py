@@ -17,7 +17,8 @@ def test_parse_ranking_truncates_to_expected_count():
         "4. Response C\n"
     )
     parsed = council.parse_ranking_from_text(text, expected_count=2)
-    assert parsed == ["Response A", "Response A"]
+    # Upstream's parser dedupes labels before truncating to expected_count.
+    assert parsed == ["Response A", "Response B"]
 
 
 def test_parse_ranking_coerces_non_string_input():
