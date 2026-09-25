@@ -46,7 +46,7 @@ The Global Constraints and the "never" rules (no skipped tests, no history rewri
 1. **Stage 2 edge inputs.** When one Stage 1 model fails, only successful models evaluate. With a single successful response, Stage 2 still yields a one-entry label map. An evaluator that writes unknown labels ("Response Z") or repeats labels must have those dropped from `parsed_ranking`, never mapped to a wrong model. Tests go in Task 8.
 2. **Old conversations.** Saved Stage 2 items from before integration have no `stage2_label_map`. `Stage2.jsx` must fall back to the conversation's `label_to_model` and render exactly as before. Tests go in Task 12.
 3. **Plaintext Requesty key from the fork.** Existing fork users have `requesty_api_key` in `data/settings.json`. On the first settings load (`GET /api/settings`, which the UI does on open; upstream's migration is lazy, not at process start) it must migrate into the credential store (`api:requesty`) and be removed from `settings.json`. `REQUESTY_API_KEY` in the environment must also work, and "Disconnect All Providers" must wipe `api:requesty`. Tests go in Task 9.
-4. **Backend restart mid-run.** Runs are in memory. After a restart, `GET /api/conversations/{id}/runs/active` must return 404 (not 500), the stored conversation must keep the user message, and the UI must leave the loading state. Tests go in Task 10 (backend) and Task 12 (frontend).
+4. **Backend restart mid-run.** Runs are in memory. After a restart, `GET /api/conversations/{id}/runs/active` must not return 500 or hang: it returns the fork's `200 {"active_run": null}` for an existing conversation (404 only when the conversation itself is missing; see Task 10 execution notes). The stored conversation must keep the user message, and the UI must leave the loading state. Tests go in Task 10 (backend) and Task 12 (frontend).
 5. **Debate runs keep one label space.** `debate.py` calls Stage 2 with `balanced_order=False`. Claim verdicts and paragraph annotations must keep referring to the same model in every round. Test goes in Task 8.
 
 ---
@@ -1137,14 +1137,14 @@ Found after the Step B merge (`$SCRATCH/stepB-fork-failures.txt`). These fork te
 
 **Files:**
 - Modify: `backend/runs.py`: move to upstream's stage signatures, the flat Stage 2 contract, and the `_active_runs` progress map.
-- Modify: `backend/main.py`: `RUN_MANAGER = RunManager()` and the five run routes.
+- Modify: `backend/main.py`: `RUN_MANAGER = RunManager(progress=_active_runs)`, the five run routes, `run_id`/`event_count` in `/progress`, and `_build_chat_history` delegating to `runs.build_chat_history`.
 - Test: `backend/tests/test_runs_resume.py` (fork) and new cases in `backend/tests/test_main_api_routes.py`.
 
 **Interfaces:**
 - Consumes: the Stage 2 contract from Task 8.
 - Produces:
-  - `POST /api/conversations/{id}/runs` (body = upstream `SendMessageRequest`) → run snapshot; 400 bad mode, 404 missing conversation, 409 active run.
-  - `GET /api/conversations/{id}/runs/active` → snapshot, or 404 `"No active run"`.
+  - `POST /api/conversations/{id}/runs` (body = upstream `SendMessageRequest`, including `search_provider`, `council_models`, `chairman_model`, `documents`) → run snapshot; 422 bad mode (pydantic `Literal`, as upstream's `/message/stream`), 400 invalid documents, 404 missing conversation, 409 active run (a `/runs` run, or an upstream stream or advisor debate registered in `_active_runs`).
+  - `GET /api/conversations/{id}/runs/active` → `{"active_run": snapshot}`, or `{"active_run": null}` when none (the fork's contract, kept); 404 `"Conversation not found"`.
   - `GET /api/runs/{run_id}` → snapshot, or 404.
   - `GET /api/runs/{run_id}/stream?from_event=N` → SSE (`text/event-stream`), or 404.
   - `POST /api/runs/{run_id}/cancel` → snapshot, or 404.
@@ -1226,6 +1226,20 @@ Found after the Step B merge (`$SCRATCH/stepB-fork-failures.txt`). These fork te
   git add backend/runs.py backend/main.py backend/tests/test_runs_resume.py backend/tests/test_main_api_routes.py
   git commit -m "feat(fork): restore resumable council runs on upstream stage pipeline and progress map"
   ```
+
+**Task 10 execution notes (2026-09-25).** Done in `bbcdbfe`. Changes from the steps above:
+
+- `GET …/runs/active` keeps the fork's contract, as Step 1 allows: `200 {"active_run": null}` when the conversation exists but has no live run (the state after a restart), 404 only for a missing conversation. The route test is `test_active_run_after_restart_reports_no_active_run`. Review Focus 4 and the Interfaces block are updated.
+- `POST …/runs` with a bad mode returns 422, not 400. The body is upstream's `SendMessageRequest`, whose `execution_mode` is a `Literal`, and upstream's own `/message/stream` test expects 422.
+- `start_run` also takes upstream's `documents`: the stages get `build_effective_query(content, documents)`, and the user message stores `content` plus attachment metadata, as `/message/stream` does. Invalid documents raise `DocumentError` (a `ValueError`) → 400. Without this, sending through `/runs` would silently drop attachments.
+- Failed turns are recorded as upstream records them. Preflight failure and "all Stage 1 models failed" call `storage.add_error_message` (the fork saved an assistant message holding the failed Stage 1 results). An unexpected exception saves the partial results (`incomplete: True`) when Stage 1 produced any, otherwise an `Error: …` error message. Cancel still saves an `aborted` assistant message, now also with `incomplete: True`.
+- Saved metadata gains upstream's `cost_report` and `web_search: True`; the `complete` event carries `{"metadata": {"cost_report": …}}` like upstream's.
+- `start_run` refuses (409) while `_active_runs` already holds an entry for the conversation (an upstream `/message/stream` or advisor debate), and the run only pops its own entry. Otherwise the two would overwrite and pop each other's progress.
+- Fixed a fork bug: `cancel_run` on a run whose task had not started yet cancelled the task before `_execute_run` entered its `try`, so the run stayed `queued` and kept the conversation locked. A queued run now only gets `cancel_event`, which `_execute_run` checks first.
+- `runs.py` mirrors upstream's `_apply_search_env` (same four providers, keys through `get_api_key`) because it must not import `main`. If upstream adds a search provider, update `_SEARCH_API_KEY_ENV` too.
+- `build_chat_history` lives in `runs.py`; `main._build_chat_history` delegates to it, so `/message/stream`, debate and `/message` also stop sending thinking blocks back as context.
+- Fork tests edited for upstream API drift only: stage and title fakes accept upstream's keyword arguments (`**_kwargs`), and an autouse fixture stubs `preflight_models` (and title generation) so no test calls a real model.
+- `run.stage2_label_maps_by_evaluator` / `stage2_candidate_maps_by_evaluator` stay keyed by model for the snapshot shape. A model listed twice collapses there; nothing in `runs.py` reads them. Aggregation reads each result's own `stage2_label_map`.
 
 ---
 
@@ -1367,7 +1381,7 @@ Found after the Step B merge (`$SCRATCH/stepB-fork-failures.txt`). These fork te
 
   - `Stage2.jsx`: move upstream's label-replacement code into an exported `deanonymizeStage2Text(text, result, labelToModel)` that uses `const map = result?.stage2_label_map ?? labelToModel;`, and call it per evaluator.
   - `api.js`: copy `getRequestyModels`, `testRequestyKey`, `startRun`, `getActiveRun`, `getRun`, `streamRun`, and `cancelRun` from `git show pre-integration-2026-09-25:frontend/src/api.js` (lines 271–456) into upstream's `api` object. Reuse upstream's SSE parsing helper if it exists, and keep the fork's `parseSseDataChunk` only if upstream lacks one.
-  - `App.jsx`: for council modes (`chat_only`, `chat_ranking`, `full`) call `api.startRun` then `api.streamRun`, feeding events into the handler upstream's `sendMessageStream` uses. Debate keeps `sendMessageStream`/debate endpoints. On selecting a conversation, call `api.getActiveRun(id)`. On success, `streamRun(run.run_id, handler, signal, 0)`. On 404, clear the loading state.
+  - `App.jsx`: for council modes (`chat_only`, `chat_ranking`, `full`) call `api.startRun` then `api.streamRun`, feeding events into the handler upstream's `sendMessageStream` uses. `startRun` sends the same body upstream's `sendMessageStream` sends (`search_provider`, `council_models`, `chairman_model`, `documents`). Debate keeps `sendMessageStream`/debate endpoints. On selecting a conversation, call `api.getActiveRun(id)`. When `active_run` is a snapshot, `streamRun(active_run.run_id, handler, signal, 0)` (or rebuild from the snapshot and pass `from_event = active_run.event_count`). When `active_run` is `null` (no live run, including after a backend restart), clear the loading state; a 404 means the conversation is gone. `GET /progress` for a `/runs` run also carries `run_id` and `event_count`. For Stage 2 de-anonymization, use each result's `stage2_label_map`, not `metadata.stage2_label_maps_by_evaluator` (keyed by model, so a duplicated model collapses).
   - Requesty UI: mirror the NVIDIA entries in `councilGridUtils.js` (`requesty: { color: '#6d5dfc', label: 'Requesty', logo: requestyLogo }` and `['requesty:', 'requesty']`), `CouncilSetup.jsx` (`requesty: 'requesty_api_key_set'` and the `||` availability check), `CouncilConfig.jsx`, `AdvisorSetup.jsx`, and `Settings.jsx`. In `ProviderSettings.jsx`, add a Requesty section cloned from the OpenRouter one (key field, Test button → `api.testRequestyKey`, enable toggle bound to `enabled_providers.requesty`).
   - `modelHelpers.js`: add back only the functions `modelHelpers.test.js` imports that upstream lacks (`git show pre-integration-2026-09-25:frontend/src/utils/modelHelpers.js`).
   - Reference from the parallel attempt (`backup/local-step-a-8d67949`): `App.jsx` `createCouncilEventHandler`/`attachToRun` (Stop calls `cancelRun`; switching conversation or unmount only aborts the stream; lost stream keeps partial results with a "reload to resume" error), `api.js` `sendMessageRun`/`streamRun(runId, onEvent, signal, fromEvent)`, and the 12-slot layout in `EditableCouncilGrid.jsx`/`councilGridUtils.js`. Adapt to v0.13.1's components; do not copy wholesale.
