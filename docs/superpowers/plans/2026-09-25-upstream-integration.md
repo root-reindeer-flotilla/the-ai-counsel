@@ -693,9 +693,9 @@ Found after the Step B merge (`$SCRATCH/stepB-fork-failures.txt`). These fork te
 ### Task 8: F3 + F6 retry: balanced cyclic Stage 2 ordering on upstream's contract
 
 **Files:**
-- Modify: `backend/council.py`: helpers `_canonical_candidate_id`, `_build_stage2_candidates`, `_deterministic_cyclic_orders`, `_dedupe_valid_order`; the `balanced_order` keyword and per-evaluator maps in `stage2_collect_rankings`; the middle-out retry.
+- Modify: `backend/council.py`: helpers `_canonical_candidate_id`, `_build_stage2_candidates`, `_deterministic_cyclic_orders`, `_dedupe_valid_order`; the `balanced_order` keyword and per-evaluator maps in `stage2_collect_rankings`; the middle-out retry; `calculate_aggregate_rankings`; `build_stage_texts` plus `_relabel_ranking_to_global` (Step 5c).
 - Modify: `backend/debate.py:642`: pass `balanced_order=False`.
-- Modify: `backend/tests/test_stage2_permutation.py`, `backend/tests/test_stage2_middle_out.py`, `backend/tests/test_rankings_aggregation.py`: adapt to the flat first yield.
+- Modify: `backend/tests/test_stage2_permutation.py`, `backend/tests/test_stage2_middle_out.py`: adapt to the flat first yield. (Revised during execution: `backend/tests/test_rankings_aggregation.py` has no `query_model` fake and needed no change; it passes as written once Step 5b lands.)
 - Create: `backend/tests/test_stage2_contract.py`
 
 **Interfaces:**
@@ -705,6 +705,7 @@ Found after the Step B merge (`$SCRATCH/stepB-fork-failures.txt`). These fork te
   - First yield: `Dict[str, str]` (`"Response A" → model`, canonical order).
   - Each result dict: upstream keys plus `stage2_label_map: Dict[str, str]`, `stage2_candidate_label_map: Dict[str, str]`, `parsed_ranking_local: List[str]`, `parsed_ranking_candidate_ids: List[str]`, `parsed_ranking_models: List[str]`, `stage2_transform_applied: bool`, `stage2_retry_reason: Optional[str]`, `stage2_middle_out_mode: str`. `parsed_ranking` holds **global** labels.
   - `calculate_aggregate_rankings(stage2_results, label_to_model, return_diagnostics=False)`: upstream's call shape; the fork's weighted, per-evaluator-aware body (Step 5b).
+  - `build_stage_texts(stage1_results, stage2_results)`: unchanged signature; Stage 2 ranking text comes out in the global label space (Step 5c).
 
 - [ ] **Step 1: Write the contract test.**
 
@@ -804,6 +805,8 @@ Found after the Step B merge (`$SCRATCH/stepB-fork-failures.txt`). These fork te
           assert r["parsed_ranking"] == r["parsed_ranking_local"]
   ```
 
+  Revised during execution: upstream's Stage 2 reads `settings.response_language`, so every fake settings object in this task (the contract test's `_settings()` and the fakes in `test_stage2_permutation.py` and `test_stage2_middle_out.py`) also sets `response_language=None`. That follows an upstream API change and checks the same behavior. The contract test also gets the tests from Steps 5c and 6, plus `test_debate_requests_one_label_space_every_round` (Review Focus 5: `run_iterative_debate` passes `balanced_order=False` to Stage 2 in every round).
+
 - [ ] **Step 2: Adapt the fork tests to the flat first yield.**
 
   In `backend/tests/test_stage2_permutation.py::test_stage2_uses_per_evaluator_label_maps_and_normalizes_to_canonical`:
@@ -811,7 +814,7 @@ Found after the Step B merge (`$SCRATCH/stepB-fork-failures.txt`). These fork te
   - replace `stage2_candidate_maps = init_payload["stage2_candidate_maps_by_evaluator"]` with `stage2_candidate_maps = {r["model"]: r["stage2_candidate_label_map"] for r in results}`;
   - replace `init_payload["label_to_model"]` with `init_payload`.
 
-  Apply the same fake-signature change in `test_stage2_middle_out.py` and `test_rankings_aggregation.py`, and patch `council.query_model` (not `council.openrouter.query_model`) for the retry cases. The retry must now go through `query_model(..., transforms=["middle-out"])`. Assert on the `transforms` keyword that the fake records.
+  Apply the same fake-signature change in `test_stage2_middle_out.py` (`test_rankings_aggregation.py` has no fake; see **Files**), and patch `council.query_model` (not `council.openrouter.query_model`) for the retry cases. The retry must now go through `query_model(..., transforms=["middle-out"])`. Assert on the `transforms` keyword that the fake records.
 
 - [ ] **Step 3: Run the Stage 2 tests and confirm they fail.**
 
@@ -823,7 +826,7 @@ Found after the Step B merge (`$SCRATCH/stepB-fork-failures.txt`). These fork te
 
 - [ ] **Step 4: Re-add the pure helpers.**
 
-  Copy `_canonical_candidate_id`, `_build_stage2_candidates`, `_deterministic_cyclic_orders`, and `_dedupe_valid_order` unchanged from `git show pre-integration-2026-09-25:backend/council.py` (fork lines 436–489) into `backend/council.py`, just above `stage2_collect_rankings`. Add `import hashlib` if missing. In `_build_stage2_candidates`, `strip_thinking_tags` resolves through the Task 6 alias.
+  Copy `_canonical_candidate_id`, `_build_stage2_candidates`, `_deterministic_cyclic_orders`, and `_dedupe_valid_order` unchanged from `git show pre-integration-2026-09-25:backend/council.py` (fork lines 436–489; if the local tag is missing, `0ffffa4` and `origin/backup/pre-integration-2026-09-25` have the identical file) into `backend/council.py`, just above `stage2_collect_rankings`. Add `import hashlib` if missing. In `_build_stage2_candidates`, `strip_thinking_tags` resolves through the Task 6 alias.
 
 - [ ] **Step 5: Rework `stage2_collect_rankings` on upstream's body.**
 
@@ -877,7 +880,7 @@ Found after the Step B merge (`$SCRATCH/stepB-fork-failures.txt`). These fork te
           return response, meta
   ```
 
-  Keep upstream's Ollama-sequential / cloud-parallel scheduling and its disconnect checks around `_query_one`. When building each result, after upstream parses `parsed = parse_ranking_from_text(text, expected_count=…)`:
+  Keep upstream's scheduling and its disconnect checks around `_query_one`. (Revised during execution: upstream v0.13.1's Stage 2 has no Ollama-sequential split; it runs one task per evaluator in parallel, and that is kept as is. The retry metadata is created in the exception-safe wrapper and passed into `_query_one`, so an exception during the middle-out retry still reports `stage2_transform_applied=True`.) When building each result, after upstream parses `parsed = parse_ranking_from_text(text, expected_count=…)`:
 
   ```python
           local_map = label_maps.get(model, {})
@@ -904,6 +907,8 @@ Found after the Step B merge (`$SCRATCH/stepB-fork-failures.txt`). These fork te
 
   Read `stage3_synthesize_final`. If it puts evaluator ranking text into the chairman prompt, convert each evaluator's local labels to global labels first (through `stage2_label_map` → model → global label), and do it in one pass so `A→B` and `B→A` swaps don't chain. Add a test in `test_stage2_contract.py` showing the chairman prompt only uses global labels. If Stage 3 already works from `parsed_ranking` or model names, record that in the commit message and add no code.
 
+  Resolved during execution: upstream's Stage 3 builds `stage2_text` from each evaluator's raw ranking text in `build_stage_texts` (also used by `debate.py`), so conversion was needed. `build_stage_texts` now runs each ranking through `_relabel_ranking_to_global`, one regex pass over `\bResponse [A-Z]\b`. The global labels come from the order of the successful Stage 1 results, which is exactly how `stage2_collect_rankings` assigns them. Results without `stage2_label_map` (legacy, or upstream fakes) are left unchanged. For debate (`balanced_order=False`) the rewrite is the identity.
+
 - [ ] **Step 6: Keep debate on one label space.**
 
   In `backend/debate.py`, in the `stage2_collect_rankings(` call near line 642, add `balanced_order=False,` after `conversation_id=conversation_id,`.
@@ -921,7 +926,7 @@ Found after the Step B merge (`$SCRATCH/stepB-fork-failures.txt`). These fork te
 - [ ] **Step 8: Commit.**
 
   ```bash
-  git add backend/council.py backend/debate.py backend/tests/test_stage2_contract.py backend/tests/test_stage2_permutation.py backend/tests/test_stage2_middle_out.py backend/tests/test_rankings_aggregation.py
+  git add backend/council.py backend/debate.py backend/tests/test_stage2_contract.py backend/tests/test_stage2_permutation.py backend/tests/test_stage2_middle_out.py
   git commit -m "feat(fork): balanced cyclic Stage 2 ordering on upstream's label_to_model contract
 
   Per-evaluator label maps travel on each result; parsed_ranking stays in the
