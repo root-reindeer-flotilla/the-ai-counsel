@@ -59,6 +59,7 @@ A second session, started from a stale shallow clone, did its own Step A merge b
 - **Task 10:** `RunManager` carries upstream's per-request options (`council_models`, `chairman_model`, `search_provider`, multi-turn history), runs model preflight like `/message/stream`, and awaits the now-async `generate_search_query`. The progress entry carries `run_id` and `event_count` so the UI can re-attach with `from_event`.
 - **Task 10:** `_build_chat_history` strips thinking blocks (via `strip_thinking_tags`) before prior turns are reused as context.
 - **Task 12:** the frontend event-handler, re-attach and Stop/navigate split, and the 12-slot council grid layout from that branch are reference implementations (`git show backup/local-step-a-8d67949:<path>`), adapted to v0.13.1 components.
+- **Not restored:** the fork's sequential Ollama scheduling. Upstream runs every model in parallel and the owner chose to keep that (spec decision 10). Task 13 must not document sequential Ollama execution.
 
 ### Task 1: Prepare workspace, remotes, and backups
 

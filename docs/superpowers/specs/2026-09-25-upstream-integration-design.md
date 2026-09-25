@@ -15,6 +15,7 @@ The repository owner confirmed these before execution started. They override any
 7. **Pull request.** `integrate/ai-counsel` → `main`, merged with a merge commit (no squash or rebase). The PR is opened and left open for the owner.
 8. **Local cutover (Task 15)** is the owner's. The execution session supplies the commands and does not run them.
 9. **Upstream head.** If `upstream/main` has moved past v0.13.1 (`614dfb9`), merge the newer head and update the plan. At execution start (2026-09-25) upstream `main` was still `614dfb9`.
+10. **Ollama scheduling follows upstream** (confirmed 2026-09-25, during execution). The fork ran Ollama models one at a time in Stages 1 and 2 (`_is_ollama_model`, `_run_ollama_sequential`), a feature the F1–F9 list missed. The owner does not use Ollama and chose to stay in sync with upstream to keep the code simple, so it is dropped: all council models run in parallel, as in v0.13.1. Docs must not describe sequential Ollama execution.
 
 ## Goal
 
