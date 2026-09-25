@@ -92,7 +92,8 @@ The Global Constraints and the "never" rules (no skipped tests, no history rewri
 
   ```bash
   git tag pre-integration-2026-09-25 HEAD
-  git push origin pre-integration-2026-09-25    # required (decision 6): the pushed tag is the durable backup
+  git push origin pre-integration-2026-09-25    # decision 6: a durable backup on origin. If tag pushes are refused (the cloud session's
+                                                # proxy returns 403), create branch backup/pre-integration-2026-09-25 at HEAD through the GitHub API instead.
   git bundle create "$HOME/the-ai-counsel-pre-integration.bundle" --all   # optional; not durable in a cloud container
   git bundle verify "$HOME/the-ai-counsel-pre-integration.bundle"   # expect "is okay"
   ```
@@ -1377,7 +1378,7 @@ The Global Constraints and the "never" rules (no skipped tests, no history rewri
   git replace -l                                                                  # empty
   test "$(git merge-base HEAD upstream/main)" = "$(git rev-parse upstream/main)" && echo linked
   git log --graph --oneline -25
-  git log --oneline 58009fa..pre-integration-2026-09-25 | wc -l                   # 11 (6 fork commits + merge 0ffffa4 + brief 1de4bfb + a56aa0f + plan + decisions)
+  git log --oneline 58009fa..pre-integration-2026-09-25 | wc -l                   # 12 (6 fork commits + merge 0ffffa4 + brief 1de4bfb + a56aa0f + plan + decisions + count fix); the tag is 09395e0
   git merge-base --is-ancestor pre-integration-2026-09-25 HEAD && echo fork-kept
   git merge-base --is-ancestor 8351aa1 HEAD && echo lcp-kept
   ```
