@@ -16,6 +16,11 @@ logger = logging.getLogger(__name__)
 
 THINK_BLOCK_RE = re.compile(r"<think\b[^>]*>[\s\S]*?</think>", re.IGNORECASE)
 UNCLOSED_THINK_RE = re.compile(r"<think\b[^>]*>[\s\S]*$", re.IGNORECASE)
+# Capturing patterns used to extract thinking segments for display.
+_THINK_BLOCK_PATTERNS = (
+    re.compile(r"<think\b[^>]*>([\s\S]*?)</think>", re.IGNORECASE),
+    re.compile(r"<thinking\b[^>]*>([\s\S]*?)</thinking>", re.IGNORECASE),
+)
 
 
 from .providers.openai import OpenAIProvider
@@ -140,6 +145,131 @@ def strip_thinking_blocks(text: Any) -> str:
     cleaned = THINK_BLOCK_RE.sub("", cleaned)
     cleaned = UNCLOSED_THINK_RE.sub("", cleaned)
     return cleaned.strip()
+
+
+def strip_thinking_tags(text: Any) -> str:
+    """Fork variant of strip_thinking_blocks for prompt-safe reuse.
+
+    Applies upstream's strip_thinking_blocks, then also removes the fork's extra
+    patterns (_THINK_BLOCK_PATTERNS, e.g. <thinking>...</thinking>).
+    """
+    cleaned = strip_thinking_blocks(text)
+    for pattern in _THINK_BLOCK_PATTERNS:
+        cleaned = pattern.sub("\n\n", cleaned)
+    # Collapse accidental large gaps after stripping blocks.
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    return cleaned.strip()
+
+
+def _to_text(value: Any) -> str:
+    """Convert arbitrary value to a safe string."""
+    if isinstance(value, str):
+        return value
+    if value is None:
+        return ""
+    return str(value)
+
+
+def _extract_thinking_segments(text: str) -> List[str]:
+    """Extract existing think/thinking blocks from response text."""
+    segments: List[str] = []
+    text = _to_text(text)
+    for pattern in _THINK_BLOCK_PATTERNS:
+        for match in pattern.findall(text):
+            segment = _to_text(match).strip()
+            if segment:
+                segments.append(segment)
+    return segments
+
+
+def _reasoning_details_to_text(reasoning_details: Any) -> str:
+    """Convert provider-specific reasoning_details payloads to readable text."""
+    if isinstance(reasoning_details, str):
+        return reasoning_details.strip()
+    if isinstance(reasoning_details, dict):
+        # Handle single-object payloads.
+        reasoning_details = [reasoning_details]
+    if not isinstance(reasoning_details, list):
+        return ""
+
+    lines: List[str] = []
+    for item in reasoning_details:
+        if isinstance(item, str):
+            if item.strip():
+                lines.append(item.strip())
+            continue
+        if not isinstance(item, dict):
+            continue
+        text_value = item.get("text")
+        summary_value = item.get("summary")
+        if isinstance(summary_value, list):
+            for part in summary_value:
+                if isinstance(part, str) and part.strip():
+                    lines.append(part.strip())
+        elif isinstance(summary_value, str) and summary_value.strip():
+            lines.append(summary_value.strip())
+        if isinstance(text_value, str) and text_value.strip():
+            lines.append(text_value.strip())
+
+    return "\n\n".join(lines).strip()
+
+
+def normalize_thinking_content(
+    content: Any,
+    reasoning: Any = None,
+    reasoning_details: Any = None,
+) -> Dict[str, str]:
+    """
+    Return both user-display text (with think block) and prompt-safe text (stripped).
+
+    Display text gets a single <think> block when thinking content exists from either:
+    - existing tags in content
+    - provider reasoning/reasoning_details fields
+    """
+    content_text = _to_text(content)
+    prompt_safe_text = strip_thinking_tags(content_text)
+
+    thinking_segments: List[str] = []
+    thinking_segments.extend(_extract_thinking_segments(content_text))
+
+    reasoning_text = _to_text(reasoning).strip()
+    reasoning_details_text = _reasoning_details_to_text(reasoning_details)
+    if reasoning_text:
+        thinking_segments.append(reasoning_text)
+    if reasoning_details_text:
+        thinking_segments.append(reasoning_details_text)
+
+    # Deduplicate while preserving order.
+    deduped_segments: List[str] = []
+    seen = set()
+    for seg in thinking_segments:
+        key = seg.strip()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        deduped_segments.append(key)
+
+    if deduped_segments:
+        joined_thinking = "\n\n".join(deduped_segments).strip()
+        display_text = f"<think>\n{joined_thinking}\n</think>"
+        if prompt_safe_text:
+            display_text = f"{display_text}\n\n{prompt_safe_text}"
+    else:
+        display_text = prompt_safe_text
+
+    return {
+        "display_text": display_text.strip(),
+        "prompt_safe_text": prompt_safe_text,
+    }
+
+
+def _prompt_safe_field(result: Dict[str, Any], field: str) -> str:
+    """Return a stage result's text for reuse in a later prompt, without thinking markup.
+
+    Prefers the stored `<field>_prompt_safe` copy (fork results keep thinking in
+    the display text) and falls back to stripping the display text.
+    """
+    return result.get(f"{field}_prompt_safe") or strip_thinking_tags(result.get(field))
 
 
 def clean_generated_short_text(text: str, fallback: str = "Untitled Conversation", max_length: int = 50) -> str:
@@ -341,7 +471,7 @@ async def stage2_collect_rankings(
 
     # Build the ranking prompt
     responses_text = "\n\n".join([
-        f"Response {label}:\n{result['response']}"
+        f"Response {label}:\n{_prompt_safe_field(result, 'response')}"
         for label, result in zip(labels, successful_results)
     ])
 
@@ -481,12 +611,12 @@ def build_stage_texts(
 ) -> tuple:
     """Build formatted text summaries from stage results. Returns (stage1_text, stage2_text)."""
     stage1_text = "\n\n".join([
-        f"Model: {result['model']}\nResponse: {result.get('response', 'No response')}"
+        f"Model: {result['model']}\nResponse: {_prompt_safe_field(result, 'response')}"
         for result in stage1_results
         if result.get('response') is not None
     ])
     stage2_text = "\n\n".join([
-        f"Model: {result['model']}\nRanking: {result.get('ranking', 'No ranking')}"
+        f"Model: {result['model']}\nRanking: {_prompt_safe_field(result, 'ranking')}"
         for result in stage2_results
         if result.get('ranking') is not None
     ])

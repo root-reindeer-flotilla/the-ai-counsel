@@ -54,6 +54,16 @@ def test_normalize_thinking_content_combines_reasoning_and_sanitizes_prompt():
     assert normalized["prompt_safe_text"] == "Visible answer"
 
 
+def test_strip_thinking_tags_also_removes_thinking_blocks():
+    text = "Intro\n<thinking>hidden reasoning</thinking>\nAnswer"
+    assert council.strip_thinking_tags(text) == "Intro\n\nAnswer"
+
+    normalized = council.normalize_thinking_content(text)
+    assert "hidden reasoning" not in normalized["prompt_safe_text"]
+    assert "<thinking>" not in normalized["prompt_safe_text"]
+    assert normalized["prompt_safe_text"] == "Intro\n\nAnswer"
+
+
 @pytest.mark.anyio
 async def test_stage2_prompt_uses_prompt_safe_stage1_text(monkeypatch):
     stage1_results = [
@@ -72,7 +82,7 @@ async def test_stage2_prompt_uses_prompt_safe_stage1_text(monkeypatch):
     ]
     captured_prompts = []
 
-    async def _fake_query_model(model, messages, timeout=120.0, temperature=0.7):
+    async def _fake_query_model(model, messages, timeout=120.0, temperature=0.7, *, conversation_id=None):
         captured_prompts.append(messages[0]["content"])
         return {
             "content": "FINAL RANKING:\n1. Response A\n2. Response B",
@@ -115,7 +125,7 @@ async def test_stage3_prompt_strips_thinking_from_stage1_and_stage2_inputs(monke
     ]
     captured_messages = []
 
-    async def _fake_query_model(model, messages, timeout=120.0, temperature=0.7):
+    async def _fake_query_model(model, messages, timeout=120.0, temperature=0.7, *, conversation_id=None):
         captured_messages.extend(messages)
         return {
             "content": "Final answer",
@@ -133,7 +143,8 @@ async def test_stage3_prompt_strips_thinking_from_stage1_and_stage2_inputs(monke
     )
 
     assert result["error"] is False
-    assert "<think>" in result["response"]
+    # Upstream hides chairman reasoning (a22d748; test_title_generation.py::test_stage3_synthesis_*).
+    assert "<think>" not in result["response"]
     assert captured_messages
     prompt_blob = "\n\n".join(msg.get("content", "") for msg in captured_messages)
     assert "s1 hidden" not in prompt_blob
