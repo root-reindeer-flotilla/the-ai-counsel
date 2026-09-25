@@ -1269,8 +1269,9 @@ Found after the Step B merge (`$SCRATCH/stepB-fork-failures.txt`). These fork te
 - Modify: `the_ai_counsel_mcp/tools/council.py:124`: use `MAX_COUNCIL_MEMBERS`, and update the tool description text `1-8` → `1-12`.
 - Modify: `the_ai_counsel_mcp/tests/test_tools_council.py:132,141`: `"1-8"` → `"1-12"`.
 - Modify: `frontend/src/components/CouncilSetup.jsx:8`: `MAX_MEMBERS = 12`.
-- Modify: `frontend/src/components/settings/CouncilConfig.jsx`: disable "add" at `MAX_MEMBERS`, imported from a shared constant.
+- ~~Modify: `frontend/src/components/settings/CouncilConfig.jsx`~~ (not applicable in v0.13.1; see execution notes).
 - Create: `frontend/src/constants/council.js`
+- Test: `backend/tests/test_main_api_routes.py`, `backend/tests/test_council_presets.py` (12 kept / 13th trimmed), `the_ai_counsel_mcp/tests/test_tools_council.py` (13 rejected, 12 accepted).
 - Modify: `README.md:242`, `docs/mcp/TOOLS.md:72,225`: `1 to 8`/`1–8` → `1 to 12`/`1–12`.
 
 **Interfaces:**
@@ -1345,7 +1346,7 @@ Found after the Step B merge (`$SCRATCH/stepB-fork-failures.txt`). These fork te
 
 ---
 
-**Task 11 execution notes (2026-09-25).** `CouncilConfig.jsx` in v0.13.1 has no add-member control (members are chosen in `CouncilSetup.jsx`), so its step did not apply. `test_configure_council_too_many_models` now sends 13 models instead of 9, so it still exercises the limit. The MCP package does not import from `backend`, so `the_ai_counsel_mcp/tools/council.py` has its own `MAX_COUNCIL_MEMBERS = 12` with a sync comment. The lineup grid layout (`councilGridUtils.js` `layout-8-members`, `EditableCouncilGrid.jsx` `maxMembers = 8` default) still tops out at 8 seats: Task 12 adds the 9–12 layouts, so councils of 9–12 look cramped until then. After Task 11 the backend and MCP suites are fully green; the 3 failing frontend tests (`Stage2.test.js`, `api.test.js`) belong to Task 12.
+**Task 11 execution notes (2026-09-25).** `CouncilConfig.jsx` in v0.13.1 has no add-member control (members are chosen in `CouncilSetup.jsx`), so its step did not apply. `test_configure_council_too_many_models` now sends 13 models instead of 9, so it still exercises the limit. The MCP package does not import from `backend`, so `the_ai_counsel_mcp/tools/council.py` has its own `MAX_COUNCIL_MEMBERS = 12` with a sync comment. The lineup grid still tops out at 8 seats, and that is more than cosmetic until Task 12: `getAddSlot` (`councilGridUtils.js`) returns `null` at 8 members, so the setup UI cannot add a 9th member; and a council of 9–12 that arrives another way (MCP `council_settings`, a preset, a config import) gets several members on the same `getMemberSlot` cell, so the covered cards cannot be clicked to edit or remove. Nothing is lost or rejected: the backend keeps and runs all 12. Task 12 Step 3b fixes the grid. After Task 11 the backend and MCP suites are fully green; the frontend failures (3 tests in `Stage2.test.js`, and `api.test.js` failing to load) belong to Task 12. Review follow-up: the MCP constant moved below the imports (ruff E402), and tests were added for preset trimming at 12/13 and the MCP tool accepting exactly 12.
 
 ---
 
@@ -1357,6 +1358,8 @@ Found after the Step B merge (`$SCRATCH/stepB-fork-failures.txt`). These fork te
 - Modify: `frontend/src/components/settings/ProviderSettings.jsx`, `frontend/src/components/Settings.jsx`: add the Requesty section, mirroring NVIDIA/OpenRouter.
 - Modify: `frontend/src/utils/councilGridUtils.js`, `frontend/src/components/CouncilSetup.jsx`, `frontend/src/components/settings/CouncilConfig.jsx`, `frontend/src/components/AdvisorSetup.jsx`: `requesty` provider meta and `requesty_api_key_set`.
 - Modify: `frontend/src/components/Stage2.jsx`: per-evaluator de-anonymization.
+- Modify: `frontend/src/utils/councilGridUtils.js`, `frontend/src/components/EditableCouncilGrid.jsx`, `frontend/src/components/CouncilGrid.jsx`: lineup and read-only grid layouts for 9–12 members (Step 3b).
+- Test: `frontend/src/utils/councilGridUtils.test.js` (new).
 - Modify: `frontend/src/utils/modelHelpers.js`: fork helpers still required by `modelHelpers.test.js`.
 - Test: `frontend/src/api.test.js`, `frontend/src/components/Stage2.test.js`, `frontend/src/utils/modelHelpers.test.js`.
 - Create (if missing): `frontend/src/assets/icons/requesty.svg`, a simple monochrome glyph (the fork had none, so follow `openai-compatible.svg`'s style).
@@ -1410,6 +1413,10 @@ Found after the Step B merge (`$SCRATCH/stepB-fork-failures.txt`). These fork te
   - Stage 2 display: de-anonymize with each Stage 2 result's own `stage2_label_map` (falling back to the conversation's `label_to_model` for old results).
   - Leaderboard (optional): aggregate ranking rows carry `generation_time_ms`, `generation_time_seconds`, `generation_total_tokens` and `generation_total_cost`, so the fork's leaderboard time/token/cost columns (`agg.generation_time_seconds`, `agg.generation_total_tokens`) can be ported.
   - Reference from the parallel attempt (`backup/local-step-a-8d67949`): `App.jsx` `createCouncilEventHandler`/`attachToRun` (Stop calls `cancelRun`; switching conversation or unmount only aborts the stream; lost stream keeps partial results with a "reload to resume" error), `api.js` `sendMessageRun`/`streamRun(runId, onEvent, signal, fromEvent)`, and the 12-slot layout in `EditableCouncilGrid.jsx`/`councilGridUtils.js`. Adapt to v0.13.1's components; do not copy wholesale.
+
+- [ ] **Step 3b: Grid layouts for up to 12 members (from Task 11).**
+
+  In `councilGridUtils.js`, derive the lineup rows from the shared constant (`LINEUP_ROWS = Math.ceil(MAX_COUNCIL_MEMBERS / LINEUP_COLS)`), make `getMemberSlot` give every member of an n-member council (n = 1..12) a distinct slot, make `getAddSlot` return a free slot while n < `MAX_COUNCIL_MEMBERS` and `null` at the cap, and make `getCouncilLayoutClass` return `layout-${n}-members` up to 12 (the `layout-9..12-members` CSS already exists in `CouncilGrid.css`). Default `EditableCouncilGrid`'s `maxMembers` to `MAX_COUNCIL_MEMBERS`. For n ≤ 8, keep upstream's exact slot positions. Reference: `git show origin/backup/local-step-a-8d67949:frontend/src/utils/councilGridUtils.js`. Add `councilGridUtils.test.js`: no duplicate slots for n = 1..12, an add slot for n < 12, none at 12, and upstream's positions unchanged for n ≤ 8.
 
 - [ ] **Step 4: Run all frontend checks.**
 

@@ -33,6 +33,22 @@ def test_normalize_council_presets_validates_and_limits():
     assert normalized[0]["council_models"] == ["openai:gpt-4.1", "anthropic:claude-3.5-sonnet"]
 
 
+def test_normalize_council_presets_keeps_twelve_members_and_trims_the_thirteenth():
+    from backend.settings import MAX_COUNCIL_MEMBERS, _normalize_council_presets
+
+    assert MAX_COUNCIL_MEMBERS == 12
+    twelve = [f"openrouter:m/{i}" for i in range(12)]
+    raw = [
+        {"id": "p12", "name": "Twelve", "council_models": twelve},
+        {"id": "p13", "name": "Thirteen", "council_models": twelve + ["openrouter:m/12"]},
+    ]
+
+    normalized = _normalize_council_presets(raw)
+
+    assert normalized[0]["council_models"] == twelve
+    assert normalized[1]["council_models"] == twelve
+
+
 def test_settings_loader_normalizes_council_presets(tmp_path, monkeypatch):
     from backend import settings as settings_module
 

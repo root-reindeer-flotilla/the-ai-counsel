@@ -156,6 +156,19 @@ async def test_configure_council_no_args(server):
 
 
 @pytest.mark.asyncio
+async def test_configure_council_accepts_twelve_models(server):
+    models = [f"openai:model-{i}" for i in range(12)]
+    with respx.mock:
+        route = respx.put("http://test:8001/api/settings").mock(
+            return_value=httpx.Response(200, json={"success": True})
+        )
+        result = await server.call_tool("council_settings", {"action": "update", "models": models})
+        data = get_json(result)
+    assert data["status"] == "updated"
+    assert json.loads(route.calls.last.request.content)["council_models"] == models
+
+
+@pytest.mark.asyncio
 async def test_configure_council_success(server):
     with respx.mock:
         respx.put("http://test:8001/api/settings").mock(

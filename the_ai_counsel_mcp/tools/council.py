@@ -6,10 +6,10 @@ import json
 from typing import Any
 
 from ..client import CouncilClient
+from .. import presets as preset_ops
 
 # Keep in sync with backend.settings.MAX_COUNCIL_MEMBERS.
 MAX_COUNCIL_MEMBERS = 12
-from .. import presets as preset_ops
 
 
 def register(server, base_url: str) -> None:
