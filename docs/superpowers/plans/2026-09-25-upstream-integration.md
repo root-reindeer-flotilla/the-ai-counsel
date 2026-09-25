@@ -25,6 +25,7 @@
 - Package manager is npm. Do not add bun files.
 - Never skip, `xfail`, or delete a test to get green. A fork test may be edited only to follow an upstream API change (a new import path or keyword argument), and it must still check the same behavior.
 - Secrets never go in `data/settings.json`. API keys go through `backend/credentials` (`api:<provider>`).
+- **Task 16 is gated.** Never start Task 16 (cleanup) on your own, even when Task 15 is done. Start it only when the owner explicitly says "start task 16" (owner instruction, 2026-09-25).
 - Scratch notes go in `$SCRATCH` (`export SCRATCH=$(mktemp -d)` once per shell). Never commit them.
 
 ## Adapting This Plan As You Go
@@ -1540,3 +1541,43 @@ Found after the Step B merge (`$SCRATCH/stepB-fork-failures.txt`). These fork te
   ```
 
   Expected: an ordinary merge, with no graft needed.
+
+---
+
+### Task 16: Cleanup of backup branches and integration files (owner-triggered only)
+
+**Gate: do not start this task until the owner explicitly says "start task 16".** Finishing Task 15, a merged PR, or anything else is not a trigger. Deleting branches cannot be undone from this repo, so confirm the exact list with the owner before each deletion step, even after the trigger.
+
+**Precondition:** the PR `integrate/ai-counsel` → `main` is merged with a merge commit, and the owner has finished Task 15 on the local machine.
+
+**Files:**
+- Delete: `docs/superpowers/plans/2026-09-25-upstream-integration.md`, `docs/superpowers/specs/2026-09-25-upstream-integration-design.md` (this plan and its spec; they stay in git history). Keep upstream's own `docs/superpowers/*accessible-font-size*` files.
+- Delete, if Task 13 has not already: `INTEGRATION_PLAN.md`.
+- Modify: `README.md`/`AGENTS.md` "Fork additions" sections, only to drop links to the deleted spec (point to the merge commit or the CHANGELOG instead).
+
+- [ ] **Step 1: Inventory and confirm.** List what exists now and show it to the owner for a yes/no per item:
+
+  ```bash
+  git fetch origin --prune
+  git ls-remote --heads origin
+  git tag -l 'pre-integration*'
+  git ls-files docs/superpowers INTEGRATION_PLAN.md
+  ```
+
+  Candidates (as of 2026-09-25): remote branches `backup/pre-integration` and `fork-main` (both `0ffffa4`), `backup/pre-integration-2026-09-25` (`09395e0`), `backup/local-step-a-8d67949` (the parallel Step A attempt), `claude/laughing-cori-wxbb2c` (plan conversion), and `integrate/ai-counsel` once merged; the local tag `pre-integration-2026-09-25` if it was pushed; on the owner's machine, `backup/*` branches, the `pre-integration` stash, `~/llm-council-plus-pre-integration.bundle` and `~/llm-council-plus-data-backup` (the owner deletes those himself). Check each branch is fully merged into `main` or intentionally abandoned: `git branch -r --merged origin/main`, `git log --oneline origin/main..origin/<branch>`.
+
+- [ ] **Step 2: Remove the integration files.** Only after the owner confirms:
+
+  ```bash
+  git switch -c chore/post-integration-cleanup origin/main
+  git rm -q docs/superpowers/plans/2026-09-25-upstream-integration.md docs/superpowers/specs/2026-09-25-upstream-integration-design.md
+  git rm -q --ignore-unmatch INTEGRATION_PLAN.md
+  grep -rn "2026-09-25-upstream-integration" README.md AGENTS.md CHANGELOG.md docs || echo clean
+  ```
+
+  Fix any remaining links, run `uv run pytest backend/tests the_ai_counsel_mcp/tests -q` and `npm test --prefix frontend`, commit `chore: remove upstream-integration plan and spec`, push, and open a PR to `main` for the owner.
+
+- [ ] **Step 3: Delete the confirmed remote branches.** One command per branch the owner approved, for example `git push origin --delete backup/local-step-a-8d67949`. Do not delete `main`. Delete `integrate/ai-counsel` only if the PR is merged. Record what was deleted, with each branch's last commit hash, in the PR description from Step 2 so it can be restored with `git push origin <hash>:refs/heads/<name>`.
+
+- [ ] **Step 4: Confirm.** `git ls-remote --heads origin` shows only the branches the owner chose to keep.
+
