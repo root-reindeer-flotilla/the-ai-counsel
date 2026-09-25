@@ -42,4 +42,3 @@ DESIGN_SESSION_CONTEXT.md
 .security-key
 logs/security/
 .coverage
-uv.lock
