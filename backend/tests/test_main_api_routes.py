@@ -104,6 +104,22 @@ def test_put_settings_valid_update_path(monkeypatch):
     assert body["council_models"] == ["a", "b"]
 
 
+def test_put_settings_accepts_requesty_key(monkeypatch):
+    # PUT routes key fields through credentials.apply_settings_secret_updates,
+    # which calls store.set_secret; the key never reaches update_settings.
+    saved = {}
+    monkeypatch.setattr("backend.credentials.store.set_secret", lambda sid, v: saved.__setitem__(sid, v))
+    resp = client.put("/api/settings", json={"requesty_api_key": "rq-x"})
+    assert resp.status_code == 200
+    assert saved.get("api:requesty") == "rq-x"
+
+
+def test_get_settings_reports_requesty_key_set():
+    body = client.get("/api/settings").json()
+    assert "requesty_api_key_set" in body
+    assert "requesty_api_key" not in body
+
+
 def test_put_settings_invalid_provider_returns_400():
     resp = client.put("/api/settings", json={"search_provider": "not-a-provider"})
     assert resp.status_code == 400

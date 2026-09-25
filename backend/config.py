@@ -23,12 +23,10 @@ def get_openrouter_api_key() -> str:
 
 
 def get_requesty_api_key() -> str:
-    """Get Requesty API key from settings or environment."""
-    from .settings import get_settings
-    settings = get_settings()
-    if settings.requesty_api_key:
-        return settings.requesty_api_key
-    return os.getenv("REQUESTY_API_KEY", "")
+    """Get Requesty API key from the credential store (env REQUESTY_API_KEY via ENV_OVERRIDES)."""
+    from .credentials import get_api_key
+
+    return get_api_key("requesty")
 
 
 def get_ollama_base_url() -> str:

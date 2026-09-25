@@ -28,7 +28,7 @@ def create_server(
         # and result shapes are already carried by each tool's own description.
         instructions=(
             "The AI Counsel — multi-model deliberation, debate and chat tools. "
-            "Model IDs are `provider:model`; supported prefixes: openrouter, ollama, groq, "
+            "Model IDs are `provider:model`; supported prefixes: openrouter, requesty, ollama, groq, "
             "openai, anthropic, google, mistral, deepseek, nvidia, custom, opencode-zen, opencode-go. "
             "Deliberation, debate and chat tools accept an optional `documents` list; pass extracted "
             "text or base64 source files, which are extracted before model calls. "

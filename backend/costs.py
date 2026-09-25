@@ -31,6 +31,7 @@ _catalog_cache: Optional[Dict[str, Any]] = None
 _catalog_failure_until = 0.0
 _SUPPORTED_PROVIDER_PREFIXES = {
     "openrouter",
+    "requesty",
     "ollama",
     "openai",
     "openai-oauth",
@@ -344,6 +345,9 @@ def _catalog_platform(provider: str, native_id: str) -> Optional[str]:
     if provider == "custom":
         # A custom endpoint can expose upstream model IDs. Use those only as a
         # low-confidence estimate unless the endpoint itself is known-free.
+        return None
+    if provider == "requesty":
+        # Router over upstream model IDs: estimate from any platform's price.
         return None
     return provider or None
 

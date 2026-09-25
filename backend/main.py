@@ -1719,6 +1719,7 @@ class UpdateSettingsRequest(BaseModel):
     brave_api_key: Optional[str] = None
     tinyfish_api_key: Optional[str] = None
     openrouter_api_key: Optional[str] = None
+    requesty_api_key: Optional[str] = None
     openai_api_key: Optional[str] = None
     anthropic_api_key: Optional[str] = None
     google_api_key: Optional[str] = None
@@ -1957,6 +1958,8 @@ async def update_app_settings(request: UpdateSettingsRequest):
 
     if request.openrouter_api_key is not None:
         updates["openrouter_api_key"] = request.openrouter_api_key
+    if request.requesty_api_key is not None:
+        updates["requesty_api_key"] = request.requesty_api_key
         
     # Direct Provider Keys
     if request.openai_api_key is not None:
@@ -2180,8 +2183,8 @@ async def get_direct_models():
     
     # Iterate over all providers
     for provider_id, provider in PROVIDERS.items():
-        # Skip OpenRouter and Ollama as they are handled separately
-        if provider_id in ["openrouter", "ollama", "hybrid"]:
+        # Skip OpenRouter, Requesty, and Ollama as they are handled separately
+        if provider_id in ["openrouter", "requesty", "ollama", "hybrid"]:
             continue
             
         try:
@@ -2342,6 +2345,11 @@ async def test_tinyfish_api(request: TestTinyfishRequest):
 
 class TestOpenRouterRequest(BaseModel):
     """Request to test OpenRouter API key."""
+    api_key: Optional[str] = None
+
+
+class TestRequestyRequest(BaseModel):
+    """Request to test Requesty API key."""
     api_key: Optional[str] = None
 
 
@@ -2601,6 +2609,23 @@ async def test_openrouter_api(request: TestOpenRouterRequest):
         return {"success": False, "message": "Request timed out"}
     except Exception as e:
         return {"success": False, "message": str(e)}
+
+
+@app.get("/api/models/requesty")
+async def get_requesty_models():
+    """Fetch available models from Requesty API (ids prefixed `requesty:`)."""
+    return {"models": await PROVIDERS["requesty"].get_models()}
+
+
+@app.post("/api/settings/test-requesty")
+async def test_requesty_api(request: TestRequestyRequest):
+    """Test Requesty API key; falls back to the saved key when none is given."""
+    from .config import get_requesty_api_key
+
+    api_key = request.api_key if request.api_key else get_requesty_api_key()
+    if not api_key:
+        return {"success": False, "message": "No API key provided or configured"}
+    return await PROVIDERS["requesty"].validate_key(api_key)
 
 
 # ---------- MCP server (mounted on same port as REST API) ----------

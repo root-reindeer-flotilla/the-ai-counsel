@@ -152,6 +152,7 @@ class _FakeSettings:
         self.mistral_api_key = None
         self.deepseek_api_key = None
         self.nvidia_api_key = None
+        self.requesty_api_key = None
         self.opencode_api_key = None
 
 

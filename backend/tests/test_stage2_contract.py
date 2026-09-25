@@ -246,3 +246,43 @@ async def test_debate_requests_one_label_space_every_round():
 
     assert len(stage2_calls) == 2
     assert all(call.get("balanced_order") is False for call in stage2_calls)
+
+
+@pytest.mark.anyio
+async def test_requesty_overflow_reply_is_not_retried_with_middle_out(monkeypatch):
+    """Middle-out is an OpenRouter transform; a Requesty evaluator gets one call."""
+    # What backend/openrouter.py returns for an HTTP 400 context overflow.
+    overflow = {
+        "content": None,
+        "error": "bad_request",
+        "error_message": "Model returned error: Prompt exceeds model context length. "
+        "Please reduce the length or enable middle-out compression.",
+        "error_code": "context_length_exceeded",
+        "is_context_overflow": True,
+    }
+    calls = []
+
+    async def _fake_query_model(model, messages, timeout=None, temperature=0.7, *, conversation_id=None, transforms=None):
+        calls.append((model, transforms))
+        if transforms is None:
+            return dict(overflow)
+        return {"content": "FINAL RANKING:\n1. Response A\n2. Response B", "error": None}
+
+    monkeypatch.setattr(council, "get_settings", _settings)
+    monkeypatch.setattr(council, "query_model", _fake_query_model)
+    stage1 = [
+        {"model": "requesty:openai/gpt-4o-mini", "response": "answer 0", "error": None},
+        {"model": "openrouter:openai/gpt-4o-mini", "response": "answer 1", "error": None},
+    ]
+    _, results = await _collect(stage1)
+    by_model = {r["model"]: r for r in results}
+
+    assert [c for c in calls if c[0].startswith("requesty:")] == [("requesty:openai/gpt-4o-mini", None)]
+    assert by_model["requesty:openai/gpt-4o-mini"]["stage2_transform_applied"] is False
+    assert by_model["requesty:openai/gpt-4o-mini"]["stage2_retry_reason"] is None
+    # Control: the same reply from an OpenRouter evaluator is retried once.
+    assert [c for c in calls if c[0].startswith("openrouter:")] == [
+        ("openrouter:openai/gpt-4o-mini", None),
+        ("openrouter:openai/gpt-4o-mini", ["middle-out"]),
+    ]
+    assert by_model["openrouter:openai/gpt-4o-mini"]["stage2_transform_applied"] is True

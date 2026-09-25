@@ -30,6 +30,7 @@ RELAY_API_MAP = {
     "groq": ("api:groq", "Groq API key"),
     "nvidia": ("api:nvidia", "NVIDIA API key"),
     "openrouter": ("api:openrouter", "OpenRouter API key"),
+    "requesty": ("api:requesty", "Requesty API key"),
 }
 
 RELAY_OAUTH_MAP = {
@@ -298,9 +299,9 @@ def _enable_providers_for_imported(relay_ids: List[str]) -> None:
                 enabled[rid] = True
                 changed = True
             continue
-        if rid == "openrouter":
-            if not enabled.get("openrouter"):
-                enabled["openrouter"] = True
+        if rid in ("openrouter", "requesty"):  # aggregator toggles, not direct providers
+            if not enabled.get(rid):
+                enabled[rid] = True
                 changed = True
             continue
         if rid == "groq":

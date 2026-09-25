@@ -36,6 +36,7 @@ from .providers.google import GoogleProvider
 from .providers.mistral import MistralProvider
 from .providers.deepseek import DeepSeekProvider
 from .providers.openrouter import OpenRouterProvider
+from .providers.requesty import RequestyProvider
 from .providers.ollama import OllamaProvider
 from .providers.groq import GroqProvider
 from .providers.custom_openai import CustomOpenAIProvider
@@ -55,6 +56,7 @@ PROVIDERS = {
     "groq": GroqProvider(),
     "nvidia": NvidiaProvider(),
     "openrouter": OpenRouterProvider(),
+    "requesty": RequestyProvider(),
     "ollama": OllamaProvider(),
     "custom": CustomOpenAIProvider(),
     "opencode-zen": OpenCodeProvider(product="zen"),

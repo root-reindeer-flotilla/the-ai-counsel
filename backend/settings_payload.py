@@ -57,6 +57,7 @@ def build_settings_response(settings=None) -> Dict[str, Any]:
         "brave_api_key_set": _key_set("api:brave"),
         "tinyfish_api_key_set": _key_set("api:tinyfish"),
         "openrouter_api_key_set": _key_set("api:openrouter"),
+        "requesty_api_key_set": _key_set("api:requesty"),
         "openai_api_key_set": _key_set("api:openai"),
         "anthropic_api_key_set": _key_set("api:anthropic"),
         "google_api_key_set": _key_set("api:google"),
