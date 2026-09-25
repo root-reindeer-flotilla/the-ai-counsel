@@ -10,6 +10,7 @@ import deepseekIcon from '../../assets/icons/deepseek.svg';
 import nvidiaIcon from '../../assets/icons/nvidia.svg';
 import customEndpointIcon from '../../assets/icons/openai-compatible.svg';
 import opencodeIcon from '../../assets/icons/opencode.svg';
+import requestyIcon from '../../assets/icons/requesty.svg';
 import SubscriptionOAuth from './SubscriptionOAuth';
 
 const PROVIDER_ICONS = {
@@ -49,6 +50,8 @@ export default function ProviderSettings({
     handleTestRequesty,
     isTestingRequesty,
     requestyTestResult,
+    requestyAvailableModels = [],
+    onDisconnectRequesty,
     // Groq
     groqApiKey,
     setGroqApiKey,
@@ -247,7 +250,7 @@ export default function ProviderSettings({
             {/* Requesty */}
             <form className="api-key-section" onSubmit={e => e.preventDefault()}>
                 <label>
-                    <img src={customEndpointIcon} alt="" className="provider-icon" />
+                    <img src={requestyIcon} alt="" className="provider-icon" />
                     Requesty API Key
                 </label>
                 <div className="api-key-input-row">
@@ -267,7 +270,19 @@ export default function ProviderSettings({
                     </button>
                 </div>
                 {settings?.requesty_api_key_set && !requestyApiKey && (
-                    <div className="key-status set">✓ API key configured</div>
+                    <div className="key-status set key-status-row">
+                        <span>
+                            ✓ API key configured
+                            {requestyAvailableModels.length > 0 && ` · ${requestyAvailableModels.length} models available`}
+                        </span>
+                        <button
+                            type="button"
+                            className="test-button danger"
+                            onClick={onDisconnectRequesty}
+                        >
+                            Disconnect
+                        </button>
+                    </div>
                 )}
                 {requestyTestResult && (
                     <div className={`test-result ${requestyTestResult.success ? 'success' : 'error'}`}>

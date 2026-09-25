@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import { api } from '../api';
+import { loadRequestyModels } from '../utils/requesty';
 import CouncilGrid from './CouncilGrid';
 import EditableCouncilGrid, { NEW_MEMBER_INDEX } from './EditableCouncilGrid';
 import { filterOAuthModels, OAUTH_PROVIDERS } from '../constants/oauthProviders';
@@ -153,7 +154,7 @@ export default function CouncilSetup({
         const loadSources = getConfiguredModelSources(settings);
         const ollamaUrl = settings.ollama_base_url || 'http://localhost:11434';
 
-        const [orModels, ollamaModels, directModels, customModels, oauthModels] = await Promise.all([
+        const [orModels, ollamaModels, directModels, customModels, oauthModels, requestyModels] = await Promise.all([
           loadSources.openrouter
             ? api.getModels().then((d) => d.models || []).catch(() => [])
             : [],
@@ -178,11 +179,12 @@ export default function CouncilSetup({
               .then((d) => filterOAuthModels(Array.isArray(d) ? d : (d.models || []), settings))
               .catch(() => [])
             : [],
+          loadRequestyModels(settings),
         ]);
 
         if (cancelled) return;
 
-        const combined = [...orModels, ...ollamaModels, ...directModels, ...customModels, ...oauthModels];
+        const combined = [...orModels, ...ollamaModels, ...directModels, ...customModels, ...oauthModels, ...requestyModels];
         const unique = new Map();
         combined.forEach((m) => unique.set(m.id, m));
         setModels(Array.from(unique.values()).sort((a, b) => (a.name || '').localeCompare(b.name || '')));

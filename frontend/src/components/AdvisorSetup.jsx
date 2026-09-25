@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import { api, buildAvailableSearchProviders } from '../api';
+import { loadRequestyModels } from '../utils/requesty';
 import SearchableModelSelect from './SearchableModelSelect';
 import { getShortModelName } from '../utils/modelHelpers';
 import { filterOAuthModels, OAUTH_PROVIDERS } from '../constants/oauthProviders';
@@ -225,7 +226,7 @@ export default function AdvisorSetup({
         const loadSources = getAdvisorModelSources(settings);
         const ollamaUrl = settings.ollama_base_url || 'http://localhost:11434';
 
-        const [orModels, ollamaModels, directModels, customModels, oauthModels] = await Promise.all([
+        const [orModels, ollamaModels, directModels, customModels, oauthModels, requestyModels] = await Promise.all([
           loadSources.openrouter
             ? api.getModels().then(d => d.models || []).catch(() => [])
             : [],
@@ -250,9 +251,10 @@ export default function AdvisorSetup({
               .then(d => filterOAuthModels(Array.isArray(d) ? d : (d.models || []), settings))
               .catch(() => [])
             : [],
+          loadRequestyModels(settings),
         ]);
 
-        const combined = [...orModels, ...ollamaModels, ...directModels, ...customModels, ...oauthModels];
+        const combined = [...orModels, ...ollamaModels, ...directModels, ...customModels, ...oauthModels, ...requestyModels];
         const unique = new Map();
         combined.forEach(m => unique.set(m.id, m));
         const sorted = Array.from(unique.values())
