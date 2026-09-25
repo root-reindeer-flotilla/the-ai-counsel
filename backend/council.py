@@ -8,6 +8,7 @@ from .config import get_council_models, get_chairman_model
 from .costs import attach_cost
 from .settings import get_settings
 from .prompts import apply_response_language
+from .providers.temperature import resolve_temperature
 from .providers.timeouts import request_timeout
 
 logger = logging.getLogger(__name__)
@@ -78,6 +79,7 @@ async def query_model(
     `timeout=None` resolves the configured per-provider timeout. Callers that
     pass an explicit value keep it -- preflight deliberately uses a short one.
     """
+    temperature = resolve_temperature(model, temperature)
     provider = get_provider_for_model(model)
     if timeout is None:
         timeout = request_timeout(get_provider_name_for_model(model))
