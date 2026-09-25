@@ -1345,6 +1345,10 @@ Found after the Step B merge (`$SCRATCH/stepB-fork-failures.txt`). These fork te
 
 ---
 
+**Task 11 execution notes (2026-09-25).** `CouncilConfig.jsx` in v0.13.1 has no add-member control (members are chosen in `CouncilSetup.jsx`), so its step did not apply. `test_configure_council_too_many_models` now sends 13 models instead of 9, so it still exercises the limit. The MCP package does not import from `backend`, so `the_ai_counsel_mcp/tools/council.py` has its own `MAX_COUNCIL_MEMBERS = 12` with a sync comment. The lineup grid layout (`councilGridUtils.js` `layout-8-members`, `EditableCouncilGrid.jsx` `maxMembers = 8` default) still tops out at 8 seats: Task 12 adds the 9–12 layouts, so councils of 9–12 look cramped until then. After Task 11 the backend and MCP suites are fully green; the 3 failing frontend tests (`Stage2.test.js`, `api.test.js`) belong to Task 12.
+
+---
+
 ### Task 12: Frontend: Requesty UI, resumable runs, Stage 2 display, fork tests
 
 **Files:**
