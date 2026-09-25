@@ -945,14 +945,13 @@ Found after the Step B merge (`$SCRATCH/stepB-fork-failures.txt`). These fork te
 ### Task 9: F1: Requesty provider on upstream's wiring
 
 **Files:**
-- Modify: `backend/requesty.py`: read the key through `get_api_key("requesty")`, and add `usage` to responses like upstream's `openrouter.py`.
-- Modify: `backend/providers/requesty.py`: keep it as it is (the query/get_models/validate_key surface already matches `LLMProvider`).
-- Modify: `backend/config.py`: `REQUESTY_API_URL`, `get_requesty_api_key()` via the credential store.
+- Unchanged (already on HEAD in the needed shape, see execution notes): `backend/requesty.py` (reads the key through `config.get_requesty_api_key`, returns `usage`), `backend/providers/requesty.py`, `backend/settings.py` (`"requesty": False` toggle and `requesty_api_key` field).
+- Modify: `backend/config.py`: `get_requesty_api_key()` returns `get_api_key("requesty")` only (`REQUESTY_API_URL` already there).
 - Modify: `backend/credentials/ids.py`: `KNOWN_SECRET_IDS`, `SETTINGS_FIELD_TO_SECRET_ID`, `ENV_OVERRIDES`.
-- Modify: `backend/credentials/relay_import.py`: add the `"requesty"` entry.
-- Modify: `backend/settings.py`: `"requesty": False` in `DEFAULT_ENABLED_PROVIDERS`, and `requesty_api_key: Optional[str] = None`.
+- Modify: `backend/credentials/relay_import.py`: add the `"requesty"` entry, and treat it as an aggregator toggle (like `openrouter`) in `_enable_providers_for_imported`.
 - Modify: `backend/settings_payload.py`: `requesty_api_key_set`.
-- Modify: `backend/main.py`: `UpdateSettingsRequest.requesty_api_key`, the update handler, `/api/models/requesty`, `/api/settings/test-requesty`.
+- Modify: `backend/main.py`: `UpdateSettingsRequest.requesty_api_key`, the update handler, `"requesty"` in the `/api/models/direct` skip list, `/api/models/requesty`, `/api/settings/test-requesty`.
+- Modify: `backend/tests/test_stage2_contract.py`: Requesty overflow is not retried with middle-out (Task 8 carry-forward).
 - Modify: `backend/council.py`: `"requesty": RequestyProvider()` in `PROVIDERS`.
 - Modify: `backend/costs.py`: `"requesty"` in `_SUPPORTED_PROVIDER_PREFIXES`, and `_catalog_platform` returns `None` for it.
 - Modify: `the_ai_counsel_mcp/server.py`: add `requesty` to the provider list in the instructions string.
@@ -1116,6 +1115,17 @@ Found after the Step B merge (`$SCRATCH/stepB-fork-failures.txt`). These fork te
   git add backend/requesty.py backend/providers/requesty.py backend/config.py backend/credentials/ids.py backend/credentials/relay_import.py backend/settings.py backend/settings_payload.py backend/main.py backend/council.py backend/costs.py backend/tests/conftest.py backend/tests/test_requesty_provider.py backend/tests/test_main_api_routes.py the_ai_counsel_mcp/server.py
   git commit -m "feat(fork): wire Requesty provider into credential store, settings, costs and routing"
   ```
+
+**Task 9 execution notes (2026-09-25).** Done in `d8eadea`. Changes from the steps above:
+
+- `backend/requesty.py`, `backend/providers/requesty.py`, and the `settings.py` toggle and field came through the merges unchanged from the fork and already had the needed shape: `requesty.py` gets its key from `config.get_requesty_api_key()` and already returns `usage`. Only `get_requesty_api_key()` changed.
+- `get_requesty_api_key()` returns `get_api_key("requesty")` with no `or os.getenv("REQUESTY_API_KEY")`. The env var is still read, through `ENV_OVERRIDES` in the store. With the extra `os.getenv`, "Disconnect All Providers" could not stop the env var from bringing the key back, because `disabled_secret_ids` only applies inside the store. This follows NVIDIA's wiring (D6). A test covers it.
+- `/api/models/direct` walks `PROVIDERS`. Without `"requesty"` in its skip list, every Requesty model would also show up as a direct model. The fork skipped it too.
+- `relay_import._enable_providers_for_imported` sends any id in `RELAY_API_MAP` it doesn't special-case to the direct-provider branch, which turns on `direct` and adds a direct toggle. `requesty` now takes the `openrouter` branch (`if rid in ("openrouter", "requesty")`), so it turns on `enabled_providers["requesty"]`.
+- `/api/models/requesty` returns `PROVIDERS["requesty"].get_models()` and doesn't repeat the prefix and sort code. `test-requesty` checks through `PROVIDERS["requesty"].validate_key`, as in the fork.
+- Extra tests in `test_requesty_provider.py`: a fork-style `settings.json` with a plaintext key migrates on the first `GET /api/settings` (the key goes to the store and `settings.json` is rewritten without it); Disconnect All wipes `api:requesty`, turns off the toggle, and the env var stays blocked; relay import; the two routes; the direct-models skip.
+- Not changed: `costs` confidence is `"medium"` only for `custom`. Requesty estimates get `cost_status: "estimated"` and `is_estimate: True`, but `pricing_confidence: "high"` when the catalog matches.
+- Upstream's migration is lazy. `ensure_credentials_upgraded()` runs from `build_settings_response` (`GET`/`PUT /api/settings`) and the admin export, not at process start. A council run before the first settings load finds no Requesty key (or any other migrated key). Task 15's cutover checklist should open the UI (or `GET /api/settings`) once before the first run.
 
 ---
 
