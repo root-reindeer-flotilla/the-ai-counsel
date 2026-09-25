@@ -67,7 +67,14 @@ def test_plaintext_key_in_settings_is_not_read_by_config(cred_file):
     """settings.json is never a key source; the store (after migration) is."""
     from backend.config import get_requesty_api_key
 
-    settings_mod.update_settings(requesty_api_key="rq-plain-unmigrated")
+    # Written directly: update_settings would redact the field before the
+    # getter could see it, which would make this test pass vacuously.
+    settings_mod.SETTINGS_FILE.write_text(
+        json.dumps({"requesty_api_key": "rq-plain", "credentials_migrated": True})
+    )
+    settings_mod._settings_cache = None
+    settings_mod._settings_mtime = 0.0
+    assert settings_mod.get_settings().requesty_api_key == "rq-plain"
     assert get_requesty_api_key() == ""
 
 
@@ -217,3 +224,103 @@ def test_test_requesty_falls_back_to_stored_key(cred_file, monkeypatch):
     resp = client.post("/api/settings/test-requesty", json={"api_key": "rq-typed"})
     assert resp.json()["success"] is True
     assert fake.validated == ["rq-saved", "rq-typed"]
+
+
+# --- Review follow-up: request payload, errors, key test, costs -------------
+
+import httpx
+import respx
+
+from backend import requesty
+
+
+def _ok_reply():
+    return httpx.Response(200, json={"choices": [{"message": {"content": "hi"}}], "usage": {}})
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "model_id, expected",
+    [
+        ("openai/gpt-5", None),
+        ("azure/gpt-5", None),
+        ("openai/o3:flex", None),
+        ("openai/o1:medium", None),
+        ("bedrock/claude-sonnet-4-5@us-east-1", None),
+        ("vertex/gemini-2.5-flash@us-south1", 1.0),
+        ("google/gemini-3-pro-preview:flex", 1.0),
+        ("meta-llama/llama-3.1-8b:free", 0.3),
+        ("openai/gpt-4o-mini", 0.3),
+    ],
+)
+async def test_requesty_payload_follows_upstream_temperature_rules(monkeypatch, model_id, expected):
+    monkeypatch.setattr(requesty, "get_requesty_api_key", lambda: "rq-test")
+    with respx.mock(assert_all_called=True) as mock:
+        route = mock.post(requesty.REQUESTY_API_URL).mock(return_value=_ok_reply())
+        result = await requesty.query_model(f"requesty:{model_id}", [{"role": "user", "content": "q"}], temperature=0.3)
+    payload = json.loads(route.calls.last.request.content)
+    assert payload["model"] == model_id
+    assert payload.get("temperature") == expected
+    assert result["content"] == "hi"
+
+
+@pytest.mark.anyio
+async def test_requesty_exception_without_message_is_an_error(monkeypatch):
+    monkeypatch.setattr(requesty, "get_requesty_api_key", lambda: "rq-test")
+    with respx.mock() as mock:
+        mock.post(requesty.REQUESTY_API_URL).mock(side_effect=httpx.ReadError(""))
+        result = await requesty.query_model("openai/gpt-4o-mini", [{"role": "user", "content": "q"}])
+    assert result["content"] is None
+    assert result["error"]
+    assert result["error_message"]
+
+
+@pytest.mark.anyio
+async def test_requesty_string_error_body_is_reported(monkeypatch):
+    monkeypatch.setattr(requesty, "get_requesty_api_key", lambda: "rq-test")
+    with respx.mock() as mock:
+        mock.post(requesty.REQUESTY_API_URL).mock(
+            return_value=httpx.Response(400, json={"error": "temperature is not supported"})
+        )
+        result = await requesty.query_model("openai/gpt-4o-mini", [{"role": "user", "content": "q"}])
+    assert result["error"] == "temperature is not supported"
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("status", [401, 403])
+async def test_validate_key_reports_rejected_key_as_invalid(status):
+    with respx.mock() as mock:
+        mock.get(requesty.REQUESTY_MODELS_URL).mock(return_value=httpx.Response(status))
+        result = await RequestyProvider().validate_key("rq-bad")
+    assert result == {"success": False, "message": "Invalid API key"}
+
+
+@pytest.mark.anyio
+async def test_requesty_cost_is_a_medium_confidence_estimate(monkeypatch):
+    catalog = {"data": {"models": [{
+        "model_id": "gpt-4o-mini",
+        "aliases": {"openai": "openai/gpt-4o-mini"},
+        "pricing": [{"platform": "openai", "modality": "text", "tier": "standard",
+                     "input_per_1m_tokens": 0.15, "output_per_1m_tokens": 0.6}],
+    }]}}
+
+    async def _catalog():
+        return catalog
+
+    monkeypatch.setattr(costs, "_get_pricing_catalog", _catalog)
+    call = await costs.estimate_call_cost("requesty:openai/gpt-4o-mini", {"input_tokens": 1000, "output_tokens": 500})
+    assert call["pricing_confidence"] == "medium"
+    assert call["cost_status"] == "estimated" and call["is_estimate"] is True
+    assert any("Requesty" in note for note in call["notes"])
+
+
+@pytest.mark.anyio
+async def test_requesty_zero_price_match_is_not_reported_as_free(monkeypatch):
+    async def _zero(provider, native_id, input_tokens):
+        return {"input_cost_per_1m": 0.0, "output_cost_per_1m": 0.0, "cached_input_cost_per_1m": None,
+                "source": "catalog:test", "source_url": "https://pricing.example.test", "confidence": "medium"}
+
+    monkeypatch.setattr(costs, "_resolve_catalog_pricing", _zero)
+    call = await costs.estimate_call_cost("requesty:bedrock/some-model@eu", {"input_tokens": 10, "output_tokens": 5})
+    assert call["cost_status"] == "estimated"
+    assert call["is_estimate"] is True

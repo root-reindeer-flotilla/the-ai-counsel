@@ -39,7 +39,8 @@ class RequestyProvider(LLMProvider):
                 )
                 if response.status_code == 200:
                     return {"success": True, "message": "API key is valid"}
-                if response.status_code == 401:
+                # Requesty answers 403 (not 401) for an unknown key.
+                if response.status_code in (401, 403):
                     return {"success": False, "message": "Invalid API key"}
                 return {"success": False, "message": f"API error: {response.status_code}"}
         except Exception as e:

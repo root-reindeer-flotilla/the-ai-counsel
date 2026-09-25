@@ -1,9 +1,12 @@
 """Requesty.ai API client for making LLM requests."""
 
 import asyncio
+import re
 import httpx
 from typing import List, Dict, Any, Optional
 from .config import get_requesty_api_key, REQUESTY_API_URL
+from .providers.errors import describe_exception
+from .providers.temperature import add_temperature_if_supported, resolve_temperature
 
 MAX_RETRIES = 2
 INITIAL_RETRY_DELAY = 1.0
@@ -16,6 +19,28 @@ def _strip_requesty_prefix(model_id: str) -> str:
     if not model_id:
         return model_id
     return model_id.removeprefix("requesty:")
+
+
+def _temperature_probe_id(model: str) -> str:
+    """Bare model name for upstream's temperature rules.
+
+    Requesty IDs look like "<host>/<model>[@region][:tier]", e.g.
+    "bedrock/claude-opus-4-7@eu-central-1" -> "claude-opus-4-7",
+    "openai/o3:flex" -> "o3".
+    """
+    return re.split(r"[@:]", model.rsplit("/", 1)[-1], maxsplit=1)[0]
+
+
+def _error_detail(response: httpx.Response) -> str:
+    """Provider error message from a non-200 response, else "HTTP <status>"."""
+    fallback = f"HTTP {response.status_code}"
+    try:
+        err = response.json().get("error")
+    except Exception:
+        return fallback
+    if isinstance(err, dict):
+        err = err.get("message")
+    return err if isinstance(err, str) and err.strip() else fallback
 
 
 async def query_model(
@@ -42,11 +67,13 @@ async def query_model(
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
     }
-    payload = {
-        "model": model,
-        "messages": messages,
-        "temperature": temperature,
-    }
+    probe_id = _temperature_probe_id(model)
+    payload = add_temperature_if_supported(
+        {"model": model, "messages": messages},
+        probe_id,
+        "requesty",
+        resolve_temperature(probe_id, temperature),
+    )
 
     last_error = None
     for attempt in range(MAX_RETRIES):
@@ -77,27 +104,22 @@ async def query_model(
                         "total_tokens": usage.get("total_tokens"),
                     }
 
-                last_error = f"HTTP {response.status_code}"
-                if response.text:
-                    try:
-                        err = response.json()
-                        last_error = err.get("error", {}).get("message", last_error)
-                    except Exception:
-                        pass
+                last_error = _error_detail(response)
                 print(f"Requesty error for {model}: {last_error}")
                 break
 
-        except httpx.TimeoutException:
+        except httpx.TimeoutException as e:
             print(f"Requesty timeout for {model}")
-            last_error = "timeout"
+            last_error = describe_exception(e, timeout)
         except Exception as e:
-            print(f"Requesty error for {model}: {e}")
-            last_error = str(e)
+            # str(e) is often "" for httpx errors; an empty error would read as success.
+            last_error = describe_exception(e, timeout)
+            print(f"Requesty error for {model}: {last_error}")
             break
 
     return {
         "content": None,
-        "error": last_error,
+        "error": last_error or "unknown_error",
         "error_message": last_error or "Unknown error",
     }
 
