@@ -2,8 +2,10 @@
 
 from typing import List, Dict, Any, Optional
 import asyncio
+import hashlib
 import logging
 import re
+from . import openrouter
 from .config import get_council_models, get_chairman_model
 from .costs import attach_cost
 from .settings import get_settings
@@ -12,6 +14,11 @@ from .providers.temperature import resolve_temperature
 from .providers.timeouts import request_timeout
 
 logger = logging.getLogger(__name__)
+
+# Stage 2 aggregation policy:
+# - Hard cap: discard ballots with completion below 25%
+# - Soft cap: weight retained ballots by completion ratio
+STAGE2_HARD_CAP_MIN_COMPLETION = 0.25
 
 
 THINK_BLOCK_RE = re.compile(r"<think\b[^>]*>[\s\S]*?</think>", re.IGNORECASE)
@@ -440,6 +447,62 @@ async def stage1_collect_responses(
         raise
 
 
+def _canonical_candidate_id(index: int) -> str:
+    """Return stable candidate id like candidate_01."""
+    return f"candidate_{index + 1:02d}"
+
+
+def _build_stage2_candidates(successful_results: List[Dict[str, Any]]) -> List[Dict[str, str]]:
+    """Convert successful Stage 1 results into canonical Stage 2 candidates."""
+    candidates: List[Dict[str, str]] = []
+    for index, result in enumerate(successful_results):
+        prompt_safe_text = result.get("response_prompt_safe") or strip_thinking_tags(result.get("response", ""))
+        candidates.append(
+            {
+                "candidate_id": _canonical_candidate_id(index),
+                "model": result["model"],
+                "text": prompt_safe_text,
+            }
+        )
+    return candidates
+
+
+def _deterministic_cyclic_orders(
+    candidates: List[Dict[str, str]],
+    evaluator_models: List[str],
+    seed_key: str,
+) -> Dict[str, List[Dict[str, str]]]:
+    """Assign each evaluator a cyclic permutation of canonical candidates."""
+    if not candidates:
+        return {}
+
+    candidate_count = len(candidates)
+    seed_hex = hashlib.sha256(seed_key.encode("utf-8")).hexdigest()[:8]
+    base_offset = int(seed_hex, 16) % candidate_count
+    orders: Dict[str, List[Dict[str, str]]] = {}
+
+    for evaluator_index, evaluator_model in enumerate(evaluator_models):
+        shift = (base_offset + evaluator_index) % candidate_count
+        ordered = candidates[shift:] + candidates[:shift]
+        orders[evaluator_model] = ordered
+
+    return orders
+
+
+def _dedupe_valid_order(values: List[str], valid_values: set) -> List[str]:
+    """Preserve order and keep first occurrence of valid values only."""
+    seen = set()
+    normalized = []
+    for value in values:
+        if value not in valid_values:
+            continue
+        if value in seen:
+            continue
+        seen.add(value)
+        normalized.append(value)
+    return normalized
+
+
 async def stage2_collect_rankings(
     user_query: str,
     stage1_results: List[Dict[str, Any]],
@@ -448,91 +511,123 @@ async def stage2_collect_rankings(
     prompt_override: "str | None" = None,
     *,
     conversation_id: Optional[str] = None,
+    balanced_order: bool = True,
 ) -> Any: # Returns an async generator
     """
     Stage 2: Collect peer rankings from all council models.
-    
+
+    With `balanced_order` (the default) each evaluator sees the candidates in
+    its own cyclic order, so position bias is spread evenly. A caller-built
+    `prompt_override` already fixes the label order, so it implies canonical
+    order for every evaluator.
+
     Yields:
-        - First yield: label_to_model mapping (dict)
-        - Subsequent yields: Individual model results (dict)
+        - First yield: label_to_model mapping (dict), canonical order
+        - Subsequent yields: Individual model results (dict). Each carries its
+          own `stage2_label_map` (local label -> model); `parsed_ranking` holds
+          global labels (the first yield's label space).
     """
     settings = get_settings()
 
     # Filter to only successful responses for ranking
     successful_results = [r for r in stage1_results if not r.get('error')]
-
-    # Create anonymized labels for responses (Response A, Response B, etc.)
-    labels = [chr(65 + i) for i in range(len(successful_results))]  # A, B, C, ...
-
-    # Create mapping from label to model name
-    label_to_model = {
-        f"Response {label}": result['model']
-        for label, result in zip(labels, successful_results)
-    }
-    
-    # Yield the mapping first so the caller has it
-    yield label_to_model
-
-    # Build the ranking prompt
-    responses_text = "\n\n".join([
-        f"Response {label}:\n{_prompt_safe_field(result, 'response')}"
-        for label, result in zip(labels, successful_results)
-    ])
-
-    if prompt_override:
-        ranking_prompt = prompt_override
-    else:
-        search_context_block = ""
-        if search_context:
-            search_context_block = f"Context from Web Search:\n{search_context}\n"
-
-        try:
-            # Ensure prompt is not None
-            prompt_template = settings.stage2_prompt
-            if not prompt_template:
-                from .prompts import STAGE2_PROMPT_DEFAULT
-                prompt_template = STAGE2_PROMPT_DEFAULT
-
-            ranking_prompt = prompt_template.format(
-                user_query=user_query,
-                responses_text=responses_text,
-                search_context_block=search_context_block
-            )
-            valid_label_list = ", ".join(label_to_model.keys())
-            ranking_prompt += (
-                f"\n\nCRITICAL: Your FINAL RANKING must include ONLY these labels, "
-                f"each exactly once: {valid_label_list}. "
-                f"Do not invent or reference any other response labels."
-            )
-        except (KeyError, AttributeError, TypeError) as e:
-            logger.warning(f"Error formatting Stage 2 prompt: {e}. Using fallback.")
-            valid_label_list = ", ".join(label_to_model.keys())
-            ranking_prompt = (
-                f"Question: {user_query}\n\n{responses_text}\n\n"
-                f"Rank these responses. FINAL RANKING must include ONLY: {valid_label_list}."
-            )
-
-    ranking_prompt = apply_response_language(ranking_prompt, settings.response_language)
-
-    messages = [{"role": "user", "content": ranking_prompt}]
-
     # Only use models that successfully responded in Stage 1
     # (no point asking failed models to rank - they'll just fail again)
     successful_models = [r['model'] for r in successful_results]
+    candidates = _build_stage2_candidates(successful_results)
+    label_keys = [f"Response {chr(65 + i)}" for i in range(len(candidates))]
+
+    # Global (canonical) label space: upstream contract, yielded first.
+    label_to_model = {label: c["model"] for label, c in zip(label_keys, candidates)}
+    model_to_global_label = {model: label for label, model in label_to_model.items()}
+
+    # Yield the mapping first so the caller has it
+    yield label_to_model
+
+    if balanced_order and not prompt_override:
+        seed_key = f"{conversation_id or ''}|{user_query}"
+        orders = _deterministic_cyclic_orders(candidates, successful_models, seed_key)
+    else:
+        orders = {m: candidates for m in successful_models}
+
+    valid_label_list = ", ".join(label_keys)
+
+    def build_prompt(responses_text: str) -> str:
+        if prompt_override:
+            ranking_prompt = prompt_override
+        else:
+            search_context_block = ""
+            if search_context:
+                search_context_block = f"Context from Web Search:\n{search_context}\n"
+
+            try:
+                # Ensure prompt is not None
+                prompt_template = settings.stage2_prompt
+                if not prompt_template:
+                    from .prompts import STAGE2_PROMPT_DEFAULT
+                    prompt_template = STAGE2_PROMPT_DEFAULT
+
+                ranking_prompt = prompt_template.format(
+                    user_query=user_query,
+                    responses_text=responses_text,
+                    search_context_block=search_context_block
+                )
+                ranking_prompt += (
+                    f"\n\nCRITICAL: Your FINAL RANKING must include ONLY these labels, "
+                    f"each exactly once: {valid_label_list}. "
+                    f"Do not invent or reference any other response labels."
+                )
+            except (KeyError, AttributeError, TypeError) as e:
+                logger.warning(f"Error formatting Stage 2 prompt: {e}. Using fallback.")
+                ranking_prompt = (
+                    f"Question: {user_query}\n\n{responses_text}\n\n"
+                    f"Rank these responses. FINAL RANKING must include ONLY: {valid_label_list}."
+                )
+
+        return apply_response_language(ranking_prompt, settings.response_language)
+
+    label_maps: Dict[str, Dict[str, str]] = {}
+    candidate_maps: Dict[str, Dict[str, str]] = {}
+    messages_by_evaluator: Dict[str, List[Dict[str, str]]] = {}
+    for evaluator in successful_models:
+        ordered = orders.get(evaluator, candidates)
+        local_labels = label_keys[: len(ordered)]
+        label_maps[evaluator] = {lbl: c["model"] for lbl, c in zip(local_labels, ordered)}
+        candidate_maps[evaluator] = {lbl: c["candidate_id"] for lbl, c in zip(local_labels, ordered)}
+        responses_text = "\n\n".join(f"{lbl}:\n{c['text']}" for lbl, c in zip(local_labels, ordered))
+        messages_by_evaluator[evaluator] = [{"role": "user", "content": build_prompt(responses_text)}]
 
     # Use dedicated Stage 2 temperature (lower for consistent ranking output)
     stage2_temp = settings.stage2_temperature
 
-    async def _query_safe(m: str):
-        try:
-            return m, await query_model(
+    async def _query_one(m: str, meta: Dict[str, Any]):
+        msgs = messages_by_evaluator[m]
+        response = await query_model(m, msgs, temperature=stage2_temp, conversation_id=conversation_id)
+        if (
+            isinstance(get_provider_for_model(m), OpenRouterProvider)
+            and openrouter.is_context_overflow_response(response)
+        ):
+            # One retry with OpenRouter's middle-out compression.
+            meta.update(stage2_transform_applied=True, stage2_retry_reason="context_overflow")
+            response = await query_model(
                 m,
-                messages,
+                msgs,
                 temperature=stage2_temp,
                 conversation_id=conversation_id,
+                transforms=["middle-out"],
             )
+        return response
+
+    async def _query_safe(m: str):
+        meta = {
+            "stage2_transform_applied": False,
+            "stage2_retry_reason": None,
+            "stage2_middle_out_mode": "retry_on_overflow",
+        }
+        try:
+            return m, await _query_one(m, meta), meta
         except Exception as e:
-            return m, {"error": True, "error_message": str(e)}
+            return m, {"error": True, "error_message": str(e)}, meta
 
     # Create tasks
     tasks = [asyncio.create_task(_query_safe(m)) for m in successful_models]
@@ -553,8 +648,10 @@ async def stage2_collect_rankings(
 
             for task in done:
                 try:
-                    model, response = await task
-                    
+                    model, response, meta = await task
+
+                    local_map = label_maps.get(model, {})
+                    local_candidates = candidate_maps.get(model, {})
                     result = None
                     if response is not None:
                         if response.get('error'):
@@ -563,10 +660,16 @@ async def stage2_collect_rankings(
                                 "model": model,
                                 "ranking": None,
                                 "parsed_ranking": [],
+                                "parsed_ranking_local": [],
+                                "parsed_ranking_candidate_ids": [],
+                                "parsed_ranking_models": [],
+                                "stage2_label_map": local_map,
+                                "stage2_candidate_label_map": local_candidates,
                                 "error": response.get('error'),
                                 "error_message": response.get('error_message', 'Unknown error'),
                                 "usage": response.get('usage'),
                                 "cost": response.get('cost'),
+                                **meta,
                             }
                         else:
                             # Ensure content is always a string before parsing
@@ -575,7 +678,7 @@ async def stage2_collect_rankings(
                                 # Handle case where API returns non-string content (array, object, etc.)
                                 full_text = str(full_text) if full_text is not None else ''
                             full_text = strip_thinking_blocks(full_text)
-                            
+
                             # Parse with expected count to avoid duplicates
                             expected_count = len(successful_results)
                             valid_labels = list(label_to_model.keys())
@@ -584,16 +687,26 @@ async def stage2_collect_rankings(
                                 expected_count=expected_count,
                                 valid_labels=valid_labels,
                             )
-                            
+                            # The evaluator wrote its own (local) labels; map them
+                            # through its label map back to the global label space.
+                            parsed_local = _dedupe_valid_order(parsed, set(local_map))
+                            parsed_models = [local_map[lbl] for lbl in parsed_local]
+
                             result = {
                                 "model": model,
                                 "ranking": full_text,
-                                "parsed_ranking": parsed,
+                                "parsed_ranking": [model_to_global_label[m] for m in parsed_models],
+                                "parsed_ranking_local": parsed_local,
+                                "parsed_ranking_candidate_ids": [local_candidates[lbl] for lbl in parsed_local],
+                                "parsed_ranking_models": parsed_models,
+                                "stage2_label_map": local_map,
+                                "stage2_candidate_label_map": local_candidates,
                                 "error": None,
                                 "usage": response.get('usage'),
                                 "cost": response.get('cost'),
+                                **meta,
                             }
-                    
+
                     if result:
                         yield result
                 except asyncio.CancelledError:
@@ -609,18 +722,55 @@ async def stage2_collect_rankings(
         raise
 
 
+_RESPONSE_LABEL_RE = re.compile(r"\bResponse ([A-Z])\b")
+
+
+def _relabel_ranking_to_global(
+    text: str,
+    local_label_map: Dict[str, str],
+    model_to_global_label: Dict[str, str],
+) -> str:
+    """Rewrite an evaluator's local "Response X" labels into the global label space.
+
+    Done in a single regex pass so rotations like A->B, B->C, C->A never chain.
+    Labels this evaluator was not shown are left as written.
+    """
+    if not local_label_map or not model_to_global_label:
+        return text
+    local_to_global = {
+        local: model_to_global_label[model]
+        for local, model in local_label_map.items()
+        if model in model_to_global_label
+    }
+    return _RESPONSE_LABEL_RE.sub(lambda m: local_to_global.get(m.group(0), m.group(0)), text)
+
+
 def build_stage_texts(
     stage1_results: List[Dict[str, Any]],
     stage2_results: List[Dict[str, Any]],
 ) -> tuple:
-    """Build formatted text summaries from stage results. Returns (stage1_text, stage2_text)."""
+    """Build formatted text summaries from stage results. Returns (stage1_text, stage2_text).
+
+    Stage 2 ranking text is converted from each evaluator's local labels
+    (`stage2_label_map`) to the global labels, which follow the order of the
+    successful Stage 1 results, exactly as stage2_collect_rankings assigns them.
+    """
     stage1_text = "\n\n".join([
         f"Model: {result['model']}\nResponse: {_prompt_safe_field(result, 'response')}"
         for result in stage1_results
         if result.get('response') is not None
     ])
+    successful_models = [r['model'] for r in stage1_results if not r.get('error')]
+    model_to_global_label = {
+        model: f"Response {chr(65 + i)}" for i, model in enumerate(successful_models)
+    }
     stage2_text = "\n\n".join([
-        f"Model: {result['model']}\nRanking: {_prompt_safe_field(result, 'ranking')}"
+        f"Model: {result['model']}\nRanking: "
+        + _relabel_ranking_to_global(
+            _prompt_safe_field(result, 'ranking'),
+            result.get('stage2_label_map') or {},
+            model_to_global_label,
+        )
         for result in stage2_results
         if result.get('ranking') is not None
     ])
@@ -817,54 +967,131 @@ def parse_ranking_from_text(
 
 def calculate_aggregate_rankings(
     stage2_results: List[Dict[str, Any]],
-    label_to_model: Dict[str, str]
-) -> List[Dict[str, Any]]:
+    label_to_model: Dict[str, str],
+    return_diagnostics: bool = False
+) -> Any:
     """
     Calculate aggregate rankings across all models.
 
+    Each ballot is read from parsed_ranking_models first, then from
+    parsed_ranking_local through its own stage2_label_map, and only legacy
+    ballots are re-parsed from text against the global label_to_model.
+
     Args:
         stage2_results: Rankings from each model
-        label_to_model: Mapping from anonymous labels to model names
+        label_to_model: Mapping from global anonymous labels to model names
+        return_diagnostics: Also return ballot usage diagnostics
 
     Returns:
-        List of dicts with model name and average rank, sorted best to worst
+        By default: List of dicts with model name and average rank, sorted best to worst.
+        If return_diagnostics=True: Tuple[List[Dict[str, Any]], Dict[str, Any]].
     """
     from collections import defaultdict
 
-    # Track positions for each model
-    model_positions = defaultdict(list)
+    expected_count = len(label_to_model)
+    valid_labels = set(label_to_model.keys())
+    valid_models = set(label_to_model.values())
+
+    # Track weighted sums for each model
+    model_rank_sum = defaultdict(float)
+    model_weight_sum = defaultdict(float)
+    model_rankings_count = defaultdict(int)
+
+    diagnostics = {
+        "ballots_total": len(stage2_results),
+        "ballots_used": 0,
+        "ballots_dropped_hard_cap": 0,
+        "hard_cap_min_completion": STAGE2_HARD_CAP_MIN_COMPLETION,
+    }
+
+    def _dedupe_valid_labels(labels: List[str]) -> List[str]:
+        """Preserve order, keep first occurrence, and ignore invalid labels."""
+        seen = set()
+        deduped = []
+        for label in labels:
+            if label not in valid_labels:
+                continue
+            if label in seen:
+                continue
+            seen.add(label)
+            deduped.append(label)
+        return deduped
 
     for ranking in stage2_results:
-        ranking_text = ranking['ranking']
+        ranking_text = ranking.get("ranking")
+        if not ranking_text:
+            diagnostics["ballots_dropped_hard_cap"] += 1
+            continue
 
-        # Parse the ranking from the structured format
-        expected_count = len(label_to_model)
-        valid_labels = list(label_to_model.keys())
-        parsed_ranking = parse_ranking_from_text(
-            ranking_text,
-            expected_count=expected_count,
-            valid_labels=valid_labels,
-        )
+        parsed_models = []
+        if isinstance(ranking.get("parsed_ranking_candidate_ids"), list):
+            parsed_models = [
+                model_name
+                for model_name in ranking.get("parsed_ranking_models", [])
+                if model_name in valid_models
+            ]
 
-        for position, label in enumerate(parsed_ranking, start=1):
-            if label in label_to_model:
-                model_name = label_to_model[label]
-                model_positions[model_name].append(position)
+        if not parsed_models and isinstance(ranking.get("parsed_ranking_local"), list):
+            local_map = ranking.get("stage2_label_map") or {}
+            parsed_models = [
+                local_map.get(label)
+                for label in ranking["parsed_ranking_local"]
+                if local_map.get(label) in valid_models
+            ]
+
+        if not parsed_models:
+            # Backward-compatible fallback for legacy ballots.
+            parsed_ranking = parse_ranking_from_text(
+                ranking_text,
+                expected_count=expected_count,
+                valid_labels=list(label_to_model),
+            )
+            parsed_ranking = _dedupe_valid_labels(parsed_ranking)
+            parsed_models = [label_to_model[label] for label in parsed_ranking]
+
+        # Dedupe models in case malformed ballots repeat the same candidate/model.
+        seen_models = set()
+        deduped_models = []
+        for model_name in parsed_models:
+            if model_name in seen_models:
+                continue
+            seen_models.add(model_name)
+            deduped_models.append(model_name)
+
+        ranked_count = len(deduped_models)
+        completion_ratio = (ranked_count / expected_count) if expected_count > 0 else 0.0
+
+        # Hard cap: discard very incomplete ballots
+        if completion_ratio < STAGE2_HARD_CAP_MIN_COMPLETION:
+            diagnostics["ballots_dropped_hard_cap"] += 1
+            continue
+
+        # Soft cap: retained ballots weighted by completion ratio
+        ballot_weight = completion_ratio
+        diagnostics["ballots_used"] += 1
+
+        for position, model_name in enumerate(deduped_models, start=1):
+            model_rank_sum[model_name] += ballot_weight * position
+            model_weight_sum[model_name] += ballot_weight
+            model_rankings_count[model_name] += 1
 
     # Calculate average position for each model
     aggregate = []
-    for model, positions in model_positions.items():
-        if positions:
-            avg_rank = sum(positions) / len(positions)
+    for model, weighted_sum in model_rank_sum.items():
+        total_weight = model_weight_sum[model]
+        if total_weight > 0:
+            avg_rank = weighted_sum / total_weight
             aggregate.append({
                 "model": model,
                 "average_rank": round(avg_rank, 2),
-                "rankings_count": len(positions)
+                "rankings_count": model_rankings_count[model]
             })
 
     # Sort by average rank (lower is better)
     aggregate.sort(key=lambda x: x['average_rank'])
 
+    if return_diagnostics:
+        return aggregate, diagnostics
     return aggregate
 
 

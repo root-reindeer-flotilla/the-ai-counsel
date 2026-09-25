@@ -31,13 +31,14 @@ async def _collect_stage2_results(query_model_mock):
     settings = SimpleNamespace(
         stage2_prompt="{responses_text}\n\nFINAL RANKING:",
         stage2_temperature=0.3,
+        response_language=None,
     )
     stage1_results = [
         {"model": "openrouter:test-model", "response": "Alpha response", "error": None},
     ]
 
     with patch("backend.council.get_settings", return_value=settings):
-        with patch("backend.council.openrouter.query_model", query_model_mock):
+        with patch("backend.council.query_model", query_model_mock):
             generator = council.stage2_collect_rankings("Which is best?", stage1_results)
             _ = await generator.__anext__()  # label_to_model
             result = await generator.__anext__()
@@ -92,6 +93,7 @@ async def test_non_openrouter_model_does_not_apply_middle_out():
     settings = SimpleNamespace(
         stage2_prompt="{responses_text}\n\nFINAL RANKING:",
         stage2_temperature=0.3,
+        response_language=None,
     )
     stage1_results = [
         {"model": "requesty:test-model", "response": "Alpha response", "error": None},

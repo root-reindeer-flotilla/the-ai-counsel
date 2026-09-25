@@ -40,6 +40,7 @@ async def test_stage2_uses_per_evaluator_label_maps_and_normalizes_to_canonical(
     settings = SimpleNamespace(
         stage2_prompt="{responses_text}\n\nFINAL RANKING:",
         stage2_temperature=0.3,
+        response_language=None,
     )
     stage1_results = [
         {"model": "requesty:model-a", "response_prompt_safe": "Alpha", "error": None},
@@ -47,7 +48,7 @@ async def test_stage2_uses_per_evaluator_label_maps_and_normalizes_to_canonical(
         {"model": "requesty:model-c", "response_prompt_safe": "Charlie", "error": None},
     ]
 
-    async def _fake_query_model(model, messages, timeout=120.0, temperature=0.7):
+    async def _fake_query_model(model, messages, timeout=None, temperature=0.7, *, conversation_id=None, transforms=None):
         return {
             "content": "FINAL RANKING:\n1. Response A\n2. Response B\n3. Response C",
             "error": False,
@@ -62,7 +63,7 @@ async def test_stage2_uses_per_evaluator_label_maps_and_normalizes_to_canonical(
 
     init_payload = items[0]
     results = items[1:]
-    stage2_candidate_maps = init_payload["stage2_candidate_maps_by_evaluator"]
+    stage2_candidate_maps = {r["model"]: r["stage2_candidate_label_map"] for r in results}
 
     # Response A should not always map to the same candidate across evaluators.
     response_a_candidates = {
@@ -75,7 +76,7 @@ async def test_stage2_uses_per_evaluator_label_maps_and_normalizes_to_canonical(
         assert len(result["parsed_ranking_candidate_ids"]) == 3
         assert len(result["parsed_ranking_models"]) == 3
 
-    aggregate = council.calculate_aggregate_rankings(results, init_payload["label_to_model"])
+    aggregate = council.calculate_aggregate_rankings(results, init_payload)
     # Under cyclic permutations with all evaluators ranking local A,B,C, all candidates tie.
     by_model = {item["model"]: item for item in aggregate}
     assert by_model["requesty:model-a"]["average_rank"] == 2.0
