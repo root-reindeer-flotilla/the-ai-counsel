@@ -67,6 +67,7 @@ from .documents import (
     to_attachment_metadata,
     validate_documents_for_request,
 )
+from .runs import RunManager, build_chat_history
 
 logger = logging.getLogger(__name__)
 
@@ -74,6 +75,9 @@ logger = logging.getLogger(__name__)
 # Key: conversation_id, Value: progress snapshot updated as stages complete.
 # NOTE: process-local — only valid for single-worker deployments.
 _active_runs: Dict[str, Dict[str, Any]] = {}
+
+# Fork: resumable background runs (/runs routes); they report progress into _active_runs.
+RUN_MANAGER = RunManager(progress=_active_runs)
 
 
 def _register_run(conversation_id: str, execution_mode: str) -> None:
@@ -549,24 +553,8 @@ async def _fetch_search_context(
 
 def _build_chat_history(conversation: Dict[str, Any]) -> List[Dict[str, str]]:
     """Extract prior turns from a conversation into [{role, content}, ...] for multi-turn context."""
-    history = []
-    for msg in conversation.get("messages", []):
-        if msg["role"] == "user":
-            history.append({"role": "user", "content": msg["content"]})
-        elif msg["role"] == "assistant":
-            # Prefer chairman synthesis (stage3), fall back to first stage1 response
-            content = None
-            if msg.get("stage3") and msg["stage3"].get("response"):
-                content = msg["stage3"]["response"]
-            elif msg.get("stage1") and len(msg["stage1"]) > 0:
-                first_success = next(
-                    (r for r in msg["stage1"] if not r.get("error")),
-                    msg["stage1"][0]
-                )
-                content = first_success.get("response", "")
-            if content:
-                history.append({"role": "assistant", "content": content})
-    return history
+    # Fork: shared with RunManager, and strips thinking blocks from prior answers.
+    return build_chat_history(conversation)
 
 
 def _build_council_preflight_models(body: SendMessageRequest) -> List[str]:
@@ -777,7 +765,7 @@ async def get_conversation_progress(conversation_id: str):
         }
     s1 = run.get("stage1_responses") or []
     s2 = run.get("stage2_responses") or []
-    return {
+    response = {
         "active": True,
         "mode": "council",
         "stage": run["stage"],
@@ -791,6 +779,87 @@ async def get_conversation_progress(conversation_id: str):
         "stage3": run.get("stage3_response"),
         "stage4": run.get("stage4_response"),
     }
+    # Fork: a background run (/runs) can be re-attached with streamRun(run_id, from_event).
+    if run.get("run_id"):
+        response["run_id"] = run["run_id"]
+        response["event_count"] = run.get("event_count", 0)
+    return response
+
+
+# --- Fork: resumable runs (backend/runs.py) ---------------------------------
+
+
+@app.post("/api/conversations/{conversation_id}/runs")
+async def start_conversation_run(conversation_id: str, body: SendMessageRequest):
+    """Start a background deliberation run and return its snapshot."""
+    try:
+        run = await RUN_MANAGER.start_run(
+            conversation_id=conversation_id,
+            content=body.content,
+            web_search=body.web_search,
+            execution_mode=body.execution_mode,
+            search_provider=body.search_provider,
+            council_models=body.council_models,
+            chairman_model=body.chairman_model,
+            documents=body.documents,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    return await RUN_MANAGER.snapshot(run)
+
+
+@app.get("/api/conversations/{conversation_id}/runs/active")
+async def get_active_conversation_run(conversation_id: str):
+    """Get the active run for a conversation, or {"active_run": null}."""
+    conversation = storage.get_conversation(conversation_id)
+    if conversation is None:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    run = await RUN_MANAGER.get_active_run_for_conversation(conversation_id)
+    if run is None:
+        return {"active_run": None}
+    return {"active_run": await RUN_MANAGER.snapshot(run)}
+
+
+@app.get("/api/runs/{run_id}")
+async def get_run(run_id: str):
+    """Get a run snapshot."""
+    run = await RUN_MANAGER.get_run(run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="Run not found")
+    return await RUN_MANAGER.snapshot(run)
+
+
+@app.get("/api/runs/{run_id}/stream")
+async def stream_run(run_id: str, from_event: int = 0):
+    """Stream events for a run (supports reconnect/replay)."""
+    run = await RUN_MANAGER.get_run(run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="Run not found")
+    return StreamingResponse(
+        RUN_MANAGER.stream_events(run_id, from_event=from_event),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+        },
+    )
+
+
+@app.post("/api/runs/{run_id}/cancel")
+async def cancel_run(run_id: str):
+    """Force-stop a running deliberation."""
+    run = await RUN_MANAGER.cancel_run(run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="Run not found")
+    return {"run_id": run.run_id, "status": run.status}
+
+
+# --- End fork: resumable runs -----------------------------------------------
 
 
 @app.post("/api/conversations/{conversation_id}/message/stream")

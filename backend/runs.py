@@ -1,4 +1,12 @@
-"""In-memory run manager for resumable council deliberations."""
+"""In-memory run manager for resumable council deliberations.
+
+Runs execute in a background task, independent of any HTTP request, and keep
+their events so a client can re-attach with ``from_event``. Runs do not survive
+a backend restart (spec D7).
+
+This module must not import ``main``: ``main`` passes its ``_active_runs``
+progress map in as ``RunManager(progress=...)``.
+"""
 
 from __future__ import annotations
 
@@ -11,7 +19,10 @@ from dataclasses import dataclass, field
 from typing import Any, AsyncGenerator, Dict, List, Optional
 
 from . import storage
+from .config import get_chairman_model, get_council_models
+from .costs import build_council_cost_report
 from .council import (
+    _prompt_safe_field,
     calculate_aggregate_rankings,
     generate_conversation_title,
     generate_search_query,
@@ -19,12 +30,66 @@ from .council import (
     stage2_collect_rankings,
     stage3_synthesize_final,
 )
+from .credentials import get_api_key
+from .documents import build_effective_query, to_attachment_metadata, validate_documents_for_request
+from .model_preflight import build_preflight_error_message, preflight_models
 from .search import SearchProvider, perform_web_search
 from .settings import get_settings
 
 
 VALID_EXECUTION_MODES = ["chat_only", "chat_ranking", "full"]
 TERMINAL_STATUSES = {"completed", "cancelled", "failed"}
+RANKING_MODES = ("chat_ranking", "full")
+STAGE1_ALL_FAILED_MESSAGE = (
+    "All models failed to respond in Stage 1, likely due to rate limits or API errors. "
+    "Please try again or adjust your model selection."
+)
+
+# Search providers that need an API key in the environment, as in main._apply_search_env.
+_SEARCH_API_KEY_ENV = {
+    SearchProvider.SERPER: ("serper", "SERPER_API_KEY"),
+    SearchProvider.TAVILY: ("tavily", "TAVILY_API_KEY"),
+    SearchProvider.BRAVE: ("brave", "BRAVE_API_KEY"),
+    SearchProvider.TINYFISH: ("tinyfish", "TINYFISH_API_KEY"),
+}
+
+
+def _apply_search_env(settings: Any, provider_override: Optional[str] = None) -> SearchProvider:
+    """Set the env var for the active search provider and return it.
+
+    Mirrors main._apply_search_env; kept here because runs.py must not import main.
+    """
+    provider = SearchProvider(provider_override or settings.search_provider)
+    key_spec = _SEARCH_API_KEY_ENV.get(provider)
+    if key_spec:
+        key = get_api_key(key_spec[0])
+        if key:
+            os.environ[key_spec[1]] = key
+    return provider
+
+
+def build_chat_history(conversation: Dict[str, Any]) -> List[Dict[str, str]]:
+    """Extract prior turns as [{role, content}, ...] for multi-turn context.
+
+    Assistant turns use the chairman synthesis, else the first successful
+    Stage 1 response, always without thinking blocks. main._build_chat_history
+    delegates here.
+    """
+    history: List[Dict[str, str]] = []
+    for msg in conversation.get("messages", []):
+        role = msg.get("role")
+        if role == "user":
+            history.append({"role": "user", "content": msg.get("content") or ""})
+        elif role == "assistant":
+            content = ""
+            if msg.get("stage3") and msg["stage3"].get("response"):
+                content = _prompt_safe_field(msg["stage3"], "response")
+            elif msg.get("stage1"):
+                first_success = next((r for r in msg["stage1"] if not r.get("error")), msg["stage1"][0])
+                content = _prompt_safe_field(first_success, "response")
+            if content:
+                history.append({"role": "assistant", "content": content})
+    return history
 
 
 @dataclass
@@ -35,6 +100,13 @@ class RunState:
     web_search: bool
     execution_mode: str
     is_first_message: bool
+    # Upstream SendMessageRequest options.
+    search_provider: Optional[str] = None
+    council_models: Optional[List[str]] = None
+    chairman_model: Optional[str] = None
+    history: List[Dict[str, str]] = field(default_factory=list)
+    # What the stages see: content plus any attached documents.
+    query: str = ""
     status: str = "queued"
     started_at: Optional[float] = None
     ended_at: Optional[float] = None
@@ -65,10 +137,13 @@ class RunState:
 class RunManager:
     """Tracks and executes deliberation runs independent from HTTP request lifetime."""
 
-    def __init__(self):
+    def __init__(self, progress: Optional[Dict[str, Dict[str, Any]]] = None):
         self._runs: Dict[str, RunState] = {}
         self._active_by_conversation: Dict[str, str] = {}
         self._lock = asyncio.Lock()
+        # main's _active_runs map (conversation_id -> progress entry), so that
+        # GET /api/conversations/{id}/progress also reports background runs.
+        self._progress: Dict[str, Dict[str, Any]] = progress if progress is not None else {}
 
     async def start_run(
         self,
@@ -76,9 +151,23 @@ class RunManager:
         content: str,
         web_search: bool = False,
         execution_mode: str = "full",
+        search_provider: Optional[str] = None,
+        council_models: Optional[List[str]] = None,
+        chairman_model: Optional[str] = None,
+        history: Optional[List[Dict[str, str]]] = None,
+        documents: Optional[List[Dict[str, Any]]] = None,
     ) -> RunState:
+        """Store the user message and start a background run.
+
+        Raises ValueError (bad mode or documents), LookupError (no such
+        conversation) or RuntimeError (a run or stream is already active).
+        ``history`` defaults to the conversation's turns before this message.
+        """
         if execution_mode not in VALID_EXECUTION_MODES:
             raise ValueError(f"Invalid execution_mode. Must be one of: {VALID_EXECUTION_MODES}")
+        validated_documents = validate_documents_for_request(documents)  # DocumentError is a ValueError
+        query = build_effective_query(content, validated_documents)
+        attachments = to_attachment_metadata(validated_documents)
 
         async with self._lock:
             conversation = storage.get_conversation(conversation_id)
@@ -90,20 +179,31 @@ class RunManager:
                 existing = self._runs.get(existing_run_id)
                 if existing and existing.status not in TERMINAL_STATUSES:
                     raise RuntimeError("Conversation already has an active run")
+            if conversation_id in self._progress:
+                # An upstream /message/stream or advisor debate is running here.
+                raise RuntimeError("Conversation already has an active run")
 
             is_first_message = len(conversation["messages"]) == 0
-            storage.add_user_message(conversation_id, content)
+            if history is None:
+                history = build_chat_history(conversation)
+            storage.add_user_message(conversation_id, content, conversation=conversation, attachments=attachments)
 
             run = RunState(
                 run_id=str(uuid.uuid4()),
                 conversation_id=conversation_id,
                 content=content,
-                web_search=web_search,
+                web_search=bool(web_search or search_provider),
                 execution_mode=execution_mode,
                 is_first_message=is_first_message,
+                search_provider=search_provider or None,
+                council_models=council_models or None,
+                chairman_model=chairman_model or None,
+                history=history,
+                query=query,
             )
             self._runs[run.run_id] = run
             self._active_by_conversation[conversation_id] = run.run_id
+            self._start_progress(run)
             run.task = asyncio.create_task(self._execute_run(run))
             return run
 
@@ -128,7 +228,9 @@ class RunManager:
         if run.status in TERMINAL_STATUSES:
             return run
         run.cancel_event.set()
-        if run.task and not run.task.done():
+        # A task cancelled before its first step never enters _execute_run's
+        # try/finally, so a queued run is left to see cancel_event instead.
+        if run.status != "queued" and run.task and not run.task.done():
             run.task.cancel()
         return run
 
@@ -187,20 +289,84 @@ class RunManager:
             "event_count": len(run.events),
         }
 
+    # --- Progress map (main._active_runs) -------------------------------------
+
+    def _start_progress(self, run: RunState) -> None:
+        """Register the run in the same shape as main._register_run, plus re-attach info."""
+        self._progress[run.conversation_id] = {
+            "mode": "council",
+            "stage": "initializing",
+            "execution_mode": run.execution_mode,
+            "progress": {
+                "stage1": {"total": 0},
+                "stage2": {"total": 0},
+            },
+            # Live lists: the /progress route counts them as results arrive.
+            "stage1_responses": run.stage1_results,
+            "stage2_responses": run.stage2_results,
+            "run_id": run.run_id,
+            "event_count": len(run.events),
+        }
+
+    def _progress_entry(self, run: RunState) -> Optional[Dict[str, Any]]:
+        entry = self._progress.get(run.conversation_id)
+        if entry is None or entry.get("run_id") != run.run_id:
+            return None
+        return entry
+
+    def _set_stage(self, run: RunState, stage: str, **updates: Any) -> None:
+        """Set the progress stage; ``stage1_total``/``stage2_total`` set totals, other keys are stored."""
+        entry = self._progress_entry(run)
+        if entry is None:
+            return
+        entry["stage"] = stage
+        for key, value in updates.items():
+            if key in ("stage1_total", "stage2_total"):
+                entry["progress"][key.split("_")[0]]["total"] = value
+            else:
+                entry[key] = value
+
+    def _finish_progress(self, run: RunState) -> None:
+        if self._progress_entry(run) is not None:
+            self._progress.pop(run.conversation_id, None)
+
+    # --------------------------------------------------------------------------
+
     async def _emit(self, run: RunState, event: Dict[str, Any]):
         run.events.append(event)
+        entry = self._progress_entry(run)
+        if entry is not None:
+            entry["event_count"] = len(run.events)
         async with run.event_condition:
             run.event_condition.notify_all()
+
+    async def _fail_with_error_message(self, run: RunState, message: str):
+        """End the run the way upstream records a failed turn: an error message, no stages."""
+        run.error_message = message
+        run.status = "failed"
+        storage.add_error_message(run.conversation_id, message)
+        run.assistant_message_saved = True
+        await self._emit(run, {"type": "error", "message": message})
 
     def _raise_if_cancelled(self, run: RunState):
         if run.cancel_event.is_set():
             raise asyncio.CancelledError("Run cancelled")
 
-    async def _save_assistant_message(self, run: RunState):
+    async def _save_assistant_message(self, run: RunState, partial: bool = False):
+        """Save through upstream's storage.add_assistant_message, with its metadata keys."""
         if run.assistant_message_saved:
             return
-        metadata: Dict[str, Any] = {"execution_mode": run.execution_mode}
-        if run.execution_mode in ["chat_ranking", "full"]:
+        metadata: Dict[str, Any] = {
+            "execution_mode": run.execution_mode,
+            "cost_report": build_council_cost_report(
+                run.stage1_results,
+                run.stage2_results,
+                run.stage3_result,
+            ),
+        }
+        if partial:
+            metadata["incomplete"] = True
+        if run.execution_mode in RANKING_MODES:
             metadata["label_to_model"] = run.label_to_model
             metadata["stage2_label_maps_by_evaluator"] = run.stage2_label_maps_by_evaluator
             metadata["stage2_candidate_maps_by_evaluator"] = run.stage2_candidate_maps_by_evaluator
@@ -210,6 +376,7 @@ class RunManager:
             metadata["generation_time_seconds"] = run.generation_time_seconds
         if run.search_context:
             metadata["search_context"] = run.search_context
+            metadata["web_search"] = True
         if run.search_query:
             metadata["search_query"] = run.search_query
         if run.aborted:
@@ -221,22 +388,23 @@ class RunManager:
         if not conversation:
             return
 
+        stage2 = None
+        if run.execution_mode in RANKING_MODES and (run.stage2_results or not partial):
+            stage2 = run.stage2_results
         storage.add_assistant_message(
             run.conversation_id,
             run.stage1_results,
-            run.stage2_results if run.execution_mode in ["chat_ranking", "full"] else None,
+            stage2,
             run.stage3_result if run.execution_mode == "full" else None,
             metadata,
+            conversation=conversation,
         )
 
         # Mark as aborted on persisted message if needed.
         if run.aborted:
-            conversation = storage.get_conversation(run.conversation_id)
-            if conversation and conversation["messages"]:
-                last = conversation["messages"][-1]
-                if last.get("role") == "assistant":
-                    last["aborted"] = True
-                    storage.save_conversation(conversation)
+            last = conversation["messages"][-1]
+            last["aborted"] = True
+            storage.save_conversation(conversation)
 
         run.assistant_message_saved = True
 
@@ -313,23 +481,39 @@ class RunManager:
             return total if has_tokens else None
 
         try:
+            self._raise_if_cancelled(run)
             run.status = "running"
             run.started_at = time.perf_counter()
 
+            # Same checks as upstream's /message/stream: the council, plus the chairman in full mode.
+            preflight_targets = list(run.council_models or get_council_models())
+            if run.execution_mode == "full":
+                preflight_targets.append(run.chairman_model or get_chairman_model())
+            preflight_result = await preflight_models(preflight_targets, conversation_id=run.conversation_id)
+            if not preflight_result.ok:
+                await self._fail_with_error_message(run, build_preflight_error_message(preflight_result))
+                return
+            self._raise_if_cancelled(run)
+
             if run.is_first_message:
-                title_task = asyncio.create_task(generate_conversation_title(run.content))
+                title_task = asyncio.create_task(
+                    generate_conversation_title(run.content, conversation_id=run.conversation_id)
+                )
 
             if run.web_search:
                 settings = get_settings()
-                provider = SearchProvider(settings.search_provider)
-                if settings.serper_api_key and provider == SearchProvider.SERPER:
-                    os.environ["SERPER_API_KEY"] = settings.serper_api_key
-                if settings.tavily_api_key and provider == SearchProvider.TAVILY:
-                    os.environ["TAVILY_API_KEY"] = settings.tavily_api_key
-                if settings.brave_api_key and provider == SearchProvider.BRAVE:
-                    os.environ["BRAVE_API_KEY"] = settings.brave_api_key
+                provider = _apply_search_env(settings, run.search_provider)
+                self._set_stage(run, "search")
                 await self._emit(run, {"type": "search_start", "data": {"provider": provider.value}})
-                run.search_query = generate_search_query(run.content)
+                # LLM query generation only when selected and not DuckDuckGo (upstream's rule).
+                if settings.search_keyword_extraction == "llm" and provider != SearchProvider.DUCKDUCKGO:
+                    run.search_query = await generate_search_query(
+                        run.content,
+                        conversation_id=run.conversation_id,
+                    )
+                else:
+                    run.search_query = run.content
+                self._raise_if_cancelled(run)
                 search_result = await perform_web_search(
                     run.search_query,
                     settings.search_result_count,
@@ -355,11 +539,20 @@ class RunManager:
                 self._raise_if_cancelled(run)
 
             stage1_started_at = time.perf_counter()
+            self._set_stage(run, "stage1")
             await self._emit(run, {"type": "stage1_start"})
-            async for item in stage1_collect_responses(run.content, run.search_context, None):
+            async for item in stage1_collect_responses(
+                run.query,
+                run.search_context,
+                None,
+                models_override=run.council_models,
+                history=run.history,
+                conversation_id=run.conversation_id,
+            ):
                 self._raise_if_cancelled(run)
                 if isinstance(item, int):
                     run.stage1_total_models = item
+                    self._set_stage(run, "stage1", stage1_total=item)
                     await self._emit(run, {"type": "stage1_init", "total": item})
                     continue
                 run.stage1_results.append(item)
@@ -408,34 +601,38 @@ class RunManager:
             await self._emit(run, {"type": "stage1_complete", "data": run.stage1_results})
 
             if not any(r for r in run.stage1_results if not r.get("error")):
-                run.error_message = (
-                    "All models failed to respond in Stage 1, likely due to rate limits or API errors. "
-                    "Please try again or adjust your model selection."
-                )
-                run.status = "failed"
-                await self._save_assistant_message(run)
-                await self._emit(run, {"type": "error", "message": run.error_message})
+                await self._fail_with_error_message(run, STAGE1_ALL_FAILED_MESSAGE)
                 return
 
-            if run.execution_mode in ["chat_ranking", "full"]:
+            if run.execution_mode in RANKING_MODES:
                 stage2_started_at = time.perf_counter()
+                self._set_stage(run, "stage2")
                 await self._emit(run, {"type": "stage2_start"})
-                async for item in stage2_collect_rankings(run.content, run.stage1_results, run.search_context, None):
+                # Stage 2 gets the same stage1_results list that Stage 3 gets below.
+                async for item in stage2_collect_rankings(
+                    run.query,
+                    run.stage1_results,
+                    run.search_context,
+                    None,
+                    conversation_id=run.conversation_id,
+                ):
                     self._raise_if_cancelled(run)
-                    if isinstance(item, dict) and item.get("type") == "stage2_init_data":
-                        run.label_to_model = item.get("label_to_model", {})
-                        run.stage2_label_maps_by_evaluator = item.get("stage2_label_maps_by_evaluator", {})
-                        run.stage2_candidate_maps_by_evaluator = item.get("stage2_candidate_maps_by_evaluator", {})
-                        run.stage2_total_models = len(run.label_to_model)
-                        await self._emit(run, {"type": "stage2_init", "total": run.stage2_total_models})
-                        continue
                     if isinstance(item, dict) and not item.get("model"):
-                        # Backward compatibility for older stage2 generator format.
+                        # Upstream contract (spec D3): the first item is the flat global label map.
                         run.label_to_model = item
                         run.stage2_total_models = len(item)
+                        self._set_stage(run, "stage2", stage2_total=run.stage2_total_models)
                         await self._emit(run, {"type": "stage2_init", "total": run.stage2_total_models})
                         continue
                     run.stage2_results.append(item)
+                    # Snapshot convenience only, keyed by model: a model sitting in the
+                    # council twice collapses here. Each result's own stage2_label_map
+                    # is authoritative, and aggregation below reads that.
+                    evaluator = item.get("model")
+                    if isinstance(item.get("stage2_label_map"), dict):
+                        run.stage2_label_maps_by_evaluator[evaluator] = item["stage2_label_map"]
+                    if isinstance(item.get("stage2_candidate_label_map"), dict):
+                        run.stage2_candidate_maps_by_evaluator[evaluator] = item["stage2_candidate_label_map"]
                     stage2_usage = item.get("stage2_usage")
                     stage2_input_tokens_value = _usage_tokens_for_log(stage2_usage, ["input_tokens", "prompt_tokens"])
                     stage2_output_tokens_value = _usage_tokens_for_log(stage2_usage, ["output_tokens", "completion_tokens"])
@@ -612,14 +809,18 @@ class RunManager:
                 )
 
             if run.execution_mode == "full":
+                self._set_stage(run, "stage3")
                 await self._emit(run, {"type": "stage3_start"})
                 self._raise_if_cancelled(run)
                 run.stage3_result = await stage3_synthesize_final(
-                    run.content,
+                    run.query,
                     run.stage1_results,
                     run.stage2_results,
                     run.search_context,
+                    chairman_override=run.chairman_model,
+                    conversation_id=run.conversation_id,
                 )
+                self._set_stage(run, "stage3", stage3_response=run.stage3_result)
                 await self._emit(run, {"type": "stage3_complete", "data": run.stage3_result})
 
             if title_task:
@@ -632,7 +833,8 @@ class RunManager:
 
             await self._save_assistant_message(run)
             run.status = "completed"
-            await self._emit(run, {"type": "complete"})
+            cost_report = build_council_cost_report(run.stage1_results, run.stage2_results, run.stage3_result)
+            await self._emit(run, {"type": "complete", "metadata": {"cost_report": cost_report}})
         except asyncio.CancelledError:
             run.aborted = True
             run.status = "cancelled"
@@ -642,15 +844,22 @@ class RunManager:
                     storage.update_conversation_title(run.conversation_id, run.title)
                 except Exception:
                     pass
-            await self._save_assistant_message(run)
+            try:
+                await self._save_assistant_message(run, partial=True)
+            except Exception as save_exc:
+                print(f"Could not save partial results for run {run.run_id}: {save_exc}")
             await self._emit(run, {"type": "cancelled"})
         except Exception as exc:
-            run.error_message = str(exc)
+            run.error_message = str(exc) or exc.__class__.__name__
             run.status = "failed"
             try:
-                await self._save_assistant_message(run)
-            except Exception:
-                pass
+                if run.stage1_results:
+                    await self._save_assistant_message(run, partial=True)
+                elif not run.assistant_message_saved:
+                    storage.add_error_message(run.conversation_id, f"Error: {run.error_message}")
+                    run.assistant_message_saved = True
+            except Exception as save_exc:
+                print(f"Could not save failed run {run.run_id}: {save_exc}")
             await self._emit(run, {"type": "error", "message": run.error_message})
         finally:
             run.ended_at = time.perf_counter()
@@ -658,5 +867,6 @@ class RunManager:
                 active_run_id = self._active_by_conversation.get(run.conversation_id)
                 if active_run_id == run.run_id:
                     self._active_by_conversation.pop(run.conversation_id, None)
+                self._finish_progress(run)
             async with run.event_condition:
                 run.event_condition.notify_all()

@@ -181,3 +181,93 @@ def test_openrouter_generation_error(monkeypatch):
     resp = client.get("/api/openrouter/generation?id=g1")
     assert resp.status_code == 200
     assert resp.json() == {"success": False, "error": "boom"}
+
+
+def test_active_run_after_restart_reports_no_active_run(monkeypatch):
+    # Runs live in memory, so a fresh manager is what the backend has after a restart.
+    # The fork's contract (kept): 200 {"active_run": null} for a known conversation
+    # with no live run, 404 only when the conversation itself is missing. Never 500.
+    monkeypatch.setattr(
+        main.storage,
+        "get_conversation",
+        lambda cid: {"id": cid, "messages": [{"role": "user", "content": "hi"}]},
+    )
+    monkeypatch.setattr(main, "RUN_MANAGER", main.RunManager())
+    resp = client.get("/api/conversations/c1/runs/active")
+    assert resp.status_code == 200
+    assert resp.json() == {"active_run": None}
+
+    monkeypatch.setattr(main.storage, "get_conversation", lambda _cid: None)
+    resp = client.get("/api/conversations/missing/runs/active")
+    assert resp.status_code == 404
+    assert resp.json()["detail"] == "Conversation not found"
+
+
+def test_unknown_run_routes_are_404(monkeypatch):
+    monkeypatch.setattr(main, "RUN_MANAGER", main.RunManager())
+    for method, path in [
+        ("get", "/api/runs/nope"),
+        ("get", "/api/runs/nope/stream"),
+        ("post", "/api/runs/nope/cancel"),
+    ]:
+        resp = getattr(client, method)(path)
+        assert resp.status_code == 404, path
+        assert resp.json()["detail"] == "Run not found"
+
+
+def test_start_run_rejects_bad_mode(monkeypatch):
+    monkeypatch.setattr(main.storage, "get_conversation", lambda cid: {"id": cid, "messages": []})
+    resp = client.post("/api/conversations/c1/runs", json={"content": "q", "execution_mode": "bogus"})
+    # The body is upstream's SendMessageRequest, whose Literal execution_mode yields 422.
+    assert resp.status_code == 422
+    assert any("execution_mode" in err.get("loc", []) for err in resp.json()["detail"])
+
+
+def test_start_run_passes_request_options_and_maps_errors(monkeypatch):
+    calls = []
+
+    class _Manager:
+        def __init__(self, error=None):
+            self.error = error
+
+        async def start_run(self, **kwargs):
+            calls.append(kwargs)
+            if self.error:
+                raise self.error
+            return "run-object"
+
+        async def snapshot(self, run):
+            return {"run_id": "r1", "status": "queued", "wrapped": run}
+
+    monkeypatch.setattr(main, "RUN_MANAGER", _Manager())
+    body = {
+        "content": "q",
+        "execution_mode": "chat_ranking",
+        "search_provider": "tavily",
+        "council_models": ["openai:a", "requesty:openai/b"],
+        "chairman_model": "anthropic:c",
+        "documents": [{"name": "n.txt", "mime_type": "text/plain", "text": "t"}],
+    }
+    resp = client.post("/api/conversations/c1/runs", json=body)
+    assert resp.status_code == 200
+    assert resp.json() == {"run_id": "r1", "status": "queued", "wrapped": "run-object"}
+    assert calls[-1] == {
+        "conversation_id": "c1",
+        "content": "q",
+        "web_search": False,
+        "execution_mode": "chat_ranking",
+        "search_provider": "tavily",
+        "council_models": ["openai:a", "requesty:openai/b"],
+        "chairman_model": "anthropic:c",
+        "documents": [{"name": "n.txt", "mime_type": "text/plain", "text": "t"}],
+    }
+
+    for error, status in [
+        (ValueError("bad document"), 400),
+        (LookupError("Conversation not found"), 404),
+        (RuntimeError("Conversation already has an active run"), 409),
+    ]:
+        monkeypatch.setattr(main, "RUN_MANAGER", _Manager(error))
+        resp = client.post("/api/conversations/c1/runs", json={"content": "q"})
+        assert resp.status_code == status
+        assert resp.json()["detail"] == str(error)
