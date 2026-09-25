@@ -1138,7 +1138,7 @@ Found after the Step B merge (`$SCRATCH/stepB-fork-failures.txt`). These fork te
 
 **Files:**
 - Modify: `backend/runs.py`: move to upstream's stage signatures, the flat Stage 2 contract, and the `_active_runs` progress map.
-- Modify: `backend/main.py`: `RUN_MANAGER = RunManager(progress=_active_runs)`, the five run routes, `run_id`/`event_count` in `/progress`, and `_build_chat_history` delegating to `runs.build_chat_history`.
+- Modify: `backend/main.py`: in the marked fork block, `RUN_MANAGER = RunManager(progress=_active_runs, fetch_search_context=_fetch_search_context)`, the run-guard middleware and the five run routes; outside it, `run_id`/`event_count` in `/progress` and `_build_chat_history` delegating to `runs.build_chat_history`.
 - Test: `backend/tests/test_runs_resume.py` (fork) and new cases in `backend/tests/test_main_api_routes.py`.
 
 **Interfaces:**
@@ -1148,10 +1148,14 @@ Found after the Step B merge (`$SCRATCH/stepB-fork-failures.txt`). These fork te
   - `GET /api/conversations/{id}/runs/active` → `{"active_run": snapshot}`, or `{"active_run": null}` when none (the fork's contract, kept); 404 `"Conversation not found"`.
   - `GET /api/runs/{run_id}` → snapshot, or 404.
   - `GET /api/runs/{run_id}/stream?from_event=N` → SSE (`text/event-stream`), or 404.
-  - `POST /api/runs/{run_id}/cancel` → snapshot, or 404.
+  - `POST /api/runs/{run_id}/cancel` → `{"run_id": …, "status": …}` (the fork's shape, not a full snapshot), or 404. A second cancel while the run is stopping is a no-op.
+  - Upstream's `POST …/message`, `…/message/stream`, `…/message/debate` and `…/debate/stream` → `409 {"detail": "Conversation already has an active run"}` while a `/runs` run is live on that conversation (fork middleware; upstream's handlers are unchanged).
   - Snapshot keys are the fork's `RunManager.snapshot()` keys, unchanged.
+  - Aggregate ranking rows carry `generation_time_ms`, `generation_time_seconds`, `generation_total_tokens` and `generation_total_cost` (the fork leaderboard's columns).
 
 - [ ] **Step 1: Add the restart and route tests.**
+
+  *Superseded by the execution notes below:* the first test's 404 and the bad-mode 400 in this code block are not what shipped (the route answers `200 {"active_run": null}` and 422).
 
   Append to `backend/tests/test_main_api_routes.py`, using that file's module-level `client` and its `monkeypatch` conventions for `main.storage`:
 
@@ -1237,10 +1241,23 @@ Found after the Step B merge (`$SCRATCH/stepB-fork-failures.txt`). These fork te
 - Saved metadata gains upstream's `cost_report` and `web_search: True`; the `complete` event carries `{"metadata": {"cost_report": …}}` like upstream's.
 - `start_run` refuses (409) while `_active_runs` already holds an entry for the conversation (an upstream `/message/stream` or advisor debate), and the run only pops its own entry. Otherwise the two would overwrite and pop each other's progress.
 - Fixed a fork bug: `cancel_run` on a run whose task had not started yet cancelled the task before `_execute_run` entered its `try`, so the run stayed `queued` and kept the conversation locked. A queued run now only gets `cancel_event`, which `_execute_run` checks first.
-- `runs.py` mirrors upstream's `_apply_search_env` (same four providers, keys through `get_api_key`) because it must not import `main`. If upstream adds a search provider, update `_SEARCH_API_KEY_ENV` too.
+- ~~`runs.py` mirrors upstream's `_apply_search_env`~~ Superseded by the review fixes below: `main` injects its own `_fetch_search_context`.
 - `build_chat_history` lives in `runs.py`; `main._build_chat_history` delegates to it, so `/message/stream`, debate and `/message` also stop sending thinking blocks back as context.
 - Fork tests edited for upstream API drift only: stage and title fakes accept upstream's keyword arguments (`**_kwargs`), and an autouse fixture stubs `preflight_models` (and title generation) so no test calls a real model.
 - `run.stage2_label_maps_by_evaluator` / `stage2_candidate_maps_by_evaluator` stay keyed by model for the snapshot shape. A model listed twice collapses there; nothing in `runs.py` reads them. Aggregation reads each result's own `stage2_label_map`.
+
+**Task 10 review fixes (2026-09-25).** Done in `55171ec` (`fix(fork): address Task 10 review findings in resumable runs`), each test-first:
+
+- Stop while a finished first-message run waits for its title no longer loses the turn: the title is awaited through `asyncio.shield`, and the cancel handler waits for it with `asyncio.wait` (up to 2 s) after saving the partial turn.
+- The terminal status is set immediately before the final event on every path (`_emit_final`), so a stream that attaches during finalization still gets `complete`/`cancelled`/`error`. `cancel_run` is a no-op once `cancel_event` is set. A task interrupted inside a handler (e.g. at shutdown) still ends as `cancelled` and releases the conversation.
+- Guard in the other direction: upstream's per-conversation turn routes answer 409 while a `/runs` run is live (pure ASGI middleware in the fork block, inside `CORSMiddleware` so the browser can read the 409).
+- Leaderboard metrics read upstream's result shape (the old `stage1_duration_ms`/`stage1_total_tokens`/`stage1_usage`/`stage1_response_id` fields never exist upstream): per-model time is arrival time within each stage, tokens come from `usage` (total, else input + output, either naming), cost from the `cost` record's `total_cost`. Rows carry `generation_time_ms`, `generation_time_seconds`, `generation_total_tokens`, `generation_total_cost`. The ~250 lines of print helpers are replaced by one `logger.info` per stage. `test_stage2_aggregate_rows_include_generation_time_and_tokens` was rewritten against upstream result shapes (API drift) and still checks time, tokens and cost on the rows.
+- A failure after partial progress saves the turn with a top-level `error: "Error: …"` (the UI reads `msg.error`), alongside `metadata.error_message`.
+- A cancel before any Stage 1 result saves no assistant turn (upstream's rule); only the user message stays. `test_cancel_before_run_starts_releases_conversation` now asserts that and that the conversation is free for the next run.
+- The title task is cancelled in `finally` if it is still pending (early failure, all-failed Stage 1, or a title that outlives the cancel wait).
+- Search goes through main's `_fetch_search_context`, injected as `RunManager(fetch_search_context=…)`; `runs.py` only derives the provider for `search_start`. `RunManager()` without it fails a web-search run with a clear error. `RUN_MANAGER` moved into the fork block, after `_fetch_search_context` is defined.
+- `start_run` keeps at most the 20 most recent finished runs (never a live one), and a finished run drops its `history` and document-expanded `query` (neither is in the snapshot).
+- Added tests: SSE replay from `from_event`, progress-entry ownership in `_finish_progress`, and the Review Focus 4 restart case on real tmp storage.
 
 ---
 
@@ -1385,6 +1402,9 @@ Found after the Step B merge (`$SCRATCH/stepB-fork-failures.txt`). These fork te
   - `App.jsx`: for council modes (`chat_only`, `chat_ranking`, `full`) call `api.startRun` then `api.streamRun`, feeding events into the handler upstream's `sendMessageStream` uses. `startRun` sends the same body upstream's `sendMessageStream` sends (`search_provider`, `council_models`, `chairman_model`, `documents`). Debate keeps `sendMessageStream`/debate endpoints. On selecting a conversation, call `api.getActiveRun(id)`. When `active_run` is a snapshot, `streamRun(active_run.run_id, handler, signal, 0)` (or rebuild from the snapshot and pass `from_event = active_run.event_count`). When `active_run` is `null` (no live run, including after a backend restart), clear the loading state; a 404 means the conversation is gone. `GET /progress` for a `/runs` run also carries `run_id` and `event_count`. For Stage 2 de-anonymization, use each result's `stage2_label_map`, not `metadata.stage2_label_maps_by_evaluator` (keyed by model, so a duplicated model collapses).
   - Requesty UI: mirror the NVIDIA entries in `councilGridUtils.js` (`requesty: { color: '#6d5dfc', label: 'Requesty', logo: requestyLogo }` and `['requesty:', 'requesty']`), `CouncilSetup.jsx` (`requesty: 'requesty_api_key_set'` and the `||` availability check), `CouncilConfig.jsx`, `AdvisorSetup.jsx`, and `Settings.jsx`. In `ProviderSettings.jsx`, add a Requesty section cloned from the OpenRouter one (key field, Test button → `api.testRequestyKey`, enable toggle bound to `enabled_providers.requesty`).
   - `modelHelpers.js`: add back only the functions `modelHelpers.test.js` imports that upstream lacks (`git show pre-integration-2026-09-25:frontend/src/utils/modelHelpers.js`).
+  - 409 handling (from Task 10's review fixes): `startRun` can answer `409 {"detail": "Conversation already has an active run"}` (a `/runs` run, an upstream stream or an advisor debate is live on the conversation); show it and re-attach through `getActiveRun`/`/progress` instead of leaving a stuck spinner. While a `/runs` run is live, do not start a debate (`/message/debate`) or advisor debate (`/debate/stream`) stream on that conversation; the backend now refuses those (and `/message`, `/message/stream`) with the same 409, so handle it there too.
+  - Stage 2 display: de-anonymize with each Stage 2 result's own `stage2_label_map` (falling back to the conversation's `label_to_model` for old results).
+  - Leaderboard (optional): aggregate ranking rows carry `generation_time_ms`, `generation_time_seconds`, `generation_total_tokens` and `generation_total_cost`, so the fork's leaderboard time/token/cost columns (`agg.generation_time_seconds`, `agg.generation_total_tokens`) can be ported.
   - Reference from the parallel attempt (`backup/local-step-a-8d67949`): `App.jsx` `createCouncilEventHandler`/`attachToRun` (Stop calls `cancelRun`; switching conversation or unmount only aborts the stream; lost stream keeps partial results with a "reload to resume" error), `api.js` `sendMessageRun`/`streamRun(runId, onEvent, signal, fromEvent)`, and the 12-slot layout in `EditableCouncilGrid.jsx`/`councilGridUtils.js`. Adapt to v0.13.1's components; do not copy wholesale.
 
 - [ ] **Step 4: Run all frontend checks.**
@@ -1516,6 +1536,8 @@ Found after the Step B merge (`$SCRATCH/stepB-fork-failures.txt`). These fork te
 - [ ] **Step 3: Drop the stash.** Run `git stash show -p stash@{0}`. The `uv.lock` tweak is superseded by the relock in Task 4, and the `.vscode` workspace is personal. Then run `git stash drop` (or `git stash pop` and keep only the `.vscode` file, untracked).
 
 - [ ] **Step 4: Check that data migrated.** Back up `data/settings.json` first. Run `./start.sh` and open the UI (or `curl localhost:8001/api/settings`) **before** any council run, MCP call or settings change: upstream's credential upgrade is lazy and runs on that first settings load (Review Focus 3); a settings write before it would drop the plaintext key without migrating it. Confirm old conversations load and the Requesty key shows as set. Run `grep -c requesty_api_key data/settings.json`. Expected: `0`, or the field is `null`.
+
+  Expect one visible change in new turns: a turn where every model failed in Stage 1 (or model preflight failed) now reloads as a single error line, as upstream records it, not as per-model error cards. Turns saved before the integration keep their old look.
 
 - [ ] **Step 5: Re-register MCP per `docs/MIGRATION.md`.**
 

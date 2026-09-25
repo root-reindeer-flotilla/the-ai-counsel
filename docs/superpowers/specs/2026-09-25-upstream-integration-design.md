@@ -142,11 +142,11 @@ Requesty is wired the same way as NVIDIA, the most recent upstream provider, wit
 `RunManager` keeps runs **in memory** (`backend/runs.py` line 1: "In-memory run manager"). A run survives the client going away (page reload, closed tab, dropped network) and can be re-attached through `GET /api/runs/{id}/stream?from_event=N`. A run **cannot** survive a backend restart. The brief's check "kill the backend mid-run and resume" cannot pass with this design. It is replaced by two checks:
 
 - Reloading the page mid-run re-attaches and finishes.
-- After a backend restart, the conversation keeps the user message, `GET …/runs/active` returns 404, and the UI shows the conversation without a stuck spinner.
+- After a backend restart, the conversation keeps the user message, `GET …/runs/active` returns `200 {"active_run": null}` (the fork's contract; 404 only when the conversation itself is missing), and the UI shows the conversation without a stuck spinner.
 
 Making runs survive a backend restart would be a new feature and is out of scope.
 
-`runs.py` is adapted to upstream: the new Stage 2 contract (D3), upstream's `stage1_collect_responses`/`stage2_collect_rankings`/`stage3_synthesize_final` signatures (including `conversation_id=`), and upstream's `_active_runs` progress map, so `GET /api/conversations/{id}/progress` also reports runs started through `/runs`. The existing `/message/stream` and `/message/debate` endpoints stay as they are. Debate (Stage 4) keeps its own endpoints and does not go through `RunManager`.
+`runs.py` is adapted to upstream: the new Stage 2 contract (D3), upstream's `stage1_collect_responses`/`stage2_collect_rankings`/`stage3_synthesize_final` signatures (including `conversation_id=`), and upstream's `_active_runs` progress map, so `GET /api/conversations/{id}/progress` also reports runs started through `/runs`. The existing `/message/stream` and `/message/debate` endpoints stay as they are. Debate (Stage 4) keeps its own endpoints and does not go through `RunManager`. The two paths exclude each other per conversation: `POST …/runs` answers 409 while an upstream stream or advisor debate holds the conversation's `_active_runs` entry, and a small middleware in `main.py`'s fork block answers 409 to upstream's per-conversation turn routes (`/message`, `/message/stream`, `/message/debate`, `/debate/stream`) while a `/runs` run is live, without editing their bodies.
 
 ### D8. Council member cap is 12 everywhere
 
