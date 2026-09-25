@@ -8,12 +8,14 @@
 
 **Tech Stack:** Git (`replace --graft`, merge), Python 3.10+/FastAPI/pytest (+pytest-asyncio, anyio), uv, React 19/Vite, vitest, `node:test`, npm.
 
-**Spec:** `docs/superpowers/specs/2026-09-25-upstream-integration-design.md`. Read it first. Decisions D1–D10 and features F1–F9 referenced below are defined there.
+**Spec:** `docs/superpowers/specs/2026-09-25-upstream-integration-design.md`. Read it first. Decisions D1–D10 and features F1–F9 referenced below are defined there. The spec's "Confirmed decisions" section (1–9) records the owner's answers to this plan's open questions and wins over anything below that disagrees.
+
+**Execution:** subagent-driven (decision 5). Automated checks run in the execution session. Manual UI checks and the local cutover (Task 15) are the owner's (decisions 4 and 8).
 
 ## Global Constraints
 
 - Work in a **full** clone of `root-reindeer-flotilla/the-ai-counsel` (`git fetch --unshallow` if shallow), on branch `integrate/ai-counsel`. Remotes: `origin` (this repo), `lcp` = `https://github.com/jacob-bd/llm-council-plus.git`, `upstream` = `https://github.com/jacob-bd/the-ai-counsel.git`.
-- Fixed commits: fork head `1de4bfb`; fork backup `0ffffa4` (`origin/backup/pre-integration`); llm-council-plus final `8351aa1`; The AI Counsel root `31c21d8`; The AI Counsel v0.13.1 `614dfb9`. If `upstream/main` has moved past `614dfb9`, merge the newer head and expect extra conflicts, resolved by the same rules.
+- Fixed commits: fork head `a56aa0f` before the plan cherry-pick (the brief is `1de4bfb`; `a56aa0f` only un-ignores `uv.lock`); fork backup `0ffffa4` (`origin/backup/pre-integration`); llm-council-plus final `8351aa1`; The AI Counsel root `31c21d8`; The AI Counsel v0.13.1 `614dfb9`. If `upstream/main` has moved past `614dfb9`, merge the newer head and expect extra conflicts, resolved by the same rules.
 - The graft is temporary: create it only for the Step B merge, delete it right after (`git replace -d 31c21d8`), and never push `refs/replace/*`.
 - Never rebase, amend, or force-push `integrate/ai-counsel`. Both merge commits must keep their two parents.
 - Merge commits contain conflict resolution only. Feature code goes in the follow-up task commits.
@@ -54,7 +56,7 @@ The Global Constraints and the "never" rules (no skipped tests, no history rewri
 **Files:** none in the repo (git refs and an off-repo bundle only).
 
 **Interfaces:**
-- Produces: remotes `lcp` and `upstream` fetched; tag `pre-integration-2026-09-25` at `1de4bfb`; bundle `$HOME/the-ai-counsel-pre-integration.bundle`; local branch `integrate/ai-counsel` checked out at `1de4bfb`.
+- Produces: remotes `lcp` and `upstream` fetched; tag `pre-integration-2026-09-25` at the branch head just before the Step A merge (after the plan cherry-pick and the decisions commit), pushed to `origin`; optional bundle; local branch `integrate/ai-counsel` checked out.
 
 - [ ] **Step 1: Get a full clone and the branch.**
 
@@ -63,7 +65,7 @@ The Global Constraints and the "never" rules (no skipped tests, no history rewri
   cd ~/projects/the-ai-counsel-integration
   git rev-parse --is-shallow-repository   # must print false; if true: git fetch --unshallow origin
   git switch integrate/ai-counsel
-  git rev-parse --short HEAD               # expect 1de4bfb
+  git log --oneline -4                     # a56aa0f, then the cherry-picked plan and the decisions commit on top
   ```
 
 - [ ] **Step 2: Add and fetch the two upstream remotes.**
@@ -89,9 +91,9 @@ The Global Constraints and the "never" rules (no skipped tests, no history rewri
 - [ ] **Step 4: Create backups.**
 
   ```bash
-  git tag pre-integration-2026-09-25 1de4bfb
-  git push origin pre-integration-2026-09-25
-  git bundle create "$HOME/the-ai-counsel-pre-integration.bundle" --all
+  git tag pre-integration-2026-09-25 HEAD
+  git push origin pre-integration-2026-09-25    # required (decision 6): the pushed tag is the durable backup
+  git bundle create "$HOME/the-ai-counsel-pre-integration.bundle" --all   # optional; not durable in a cloud container
   git bundle verify "$HOME/the-ai-counsel-pre-integration.bundle"   # expect "is okay"
   ```
 
@@ -1188,7 +1190,7 @@ The Global Constraints and the "never" rules (no skipped tests, no history rewri
       assert "12" in resp.json()["detail"]
   ```
 
-  The fork's `test_put_settings_invalid_council_model_count_returns_400` asserts a **minimum** of two models ("At least two council models"). Upstream has no minimum check and documents councils of 1 model. Per spec D8 the minimum follows upstream, so rename that test to `test_put_settings_accepts_single_council_model` and assert `status_code == 200` for `["only-one"]`. **Stop and confirm with your human partner before making this change.** It drops a fork rule, which is a judgment call under "Adapting This Plan As You Go".
+  The fork's `test_put_settings_invalid_council_model_count_returns_400` asserts a **minimum** of two models ("At least two council models"). Upstream has no minimum check and documents councils of 1 model. Per spec D8 the minimum follows upstream, so rename that test to `test_put_settings_accepts_single_council_model` and assert `status_code == 200` for `["only-one"]`. The owner confirmed this change (decision 2), so make it without stopping.
 
 - [ ] **Step 2: Run them and confirm they fail.**
 
@@ -1375,14 +1377,14 @@ The Global Constraints and the "never" rules (no skipped tests, no history rewri
   git replace -l                                                                  # empty
   test "$(git merge-base HEAD upstream/main)" = "$(git rev-parse upstream/main)" && echo linked
   git log --graph --oneline -25
-  git log --oneline 58009fa..pre-integration-2026-09-25 | wc -l                   # 8 (7 fork + merge 0ffffa4)
+  git log --oneline 58009fa..pre-integration-2026-09-25 | wc -l                   # 12 (7 fork + merge 0ffffa4 + brief + uv.lock + plan + decisions)
   git merge-base --is-ancestor pre-integration-2026-09-25 HEAD && echo fork-kept
   git merge-base --is-ancestor 8351aa1 HEAD && echo lcp-kept
   ```
 
   Expected: `linked`, `fork-kept`, `lcp-kept`, and a graph showing both merge commits.
 
-- [ ] **Step 3: Manual checks (spec success criterion 5).**
+- [ ] **Step 3: Manual checks (spec success criterion 5). The owner runs these locally (decision 4); the execution session puts this list in the PR body and hands it over.**
 
   Run `./start.sh`, then `curl -s localhost:8001/api/health`. Expected: `"status"` ok and `"mcp": {"tools": 10}`. Check in the UI:
   1. Existing conversations from `data/` open and render, including Stage 2 of an old conversation.
@@ -1398,13 +1400,13 @@ The Global Constraints and the "never" rules (no skipped tests, no history rewri
   git push origin integrate/ai-counsel
   ```
 
-  Open a PR `integrate/ai-counsel` → `main` titled "Integrate fork features onto The AI Counsel v0.13.1". Use a merge commit, not squash or rebase, so both merge commits and the fork history reach `main`. Paste the Step 1 and Step 2 output into the PR body.
+  Open a PR `integrate/ai-counsel` → `main` titled "Integrate fork features onto The AI Counsel v0.13.1". Use a merge commit, not squash or rebase, so both merge commits and the fork history reach `main`. Paste the Step 1 and Step 2 output into the PR body. Leave the PR open for the owner (decision 7).
 
 ---
 
 ### Task 15: Local machine cutover (`~/projects/llm-council-plus`)
 
-**Files:** none in the repo. Run this on the original machine after the PR merges.
+**Files:** none in the repo. The owner runs this on the original machine after the PR merges (decision 8). The execution session only supplies these commands.
 
 - [ ] **Step 1: Back up the local state.**
 

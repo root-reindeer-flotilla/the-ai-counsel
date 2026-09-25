@@ -2,6 +2,20 @@
 
 **Source brief:** `INTEGRATION_PLAN.md` on branch `integrate/ai-counsel` (commit `1de4bfb`). This spec keeps that brief's goal and two-step merge, verifies its facts against the repository, and records the decisions and corrections found while checking it.
 
+## Confirmed decisions (2026-09-25)
+
+The repository owner confirmed these before execution started. They override anything below that disagrees.
+
+1. **Branch.** Work happens on `integrate/ai-counsel` and is pushed there. Commit `399e044` (this spec and its plan, from `claude/laughing-cori-wxbb2c`) is cherry-picked onto it first. The branch head before the cherry-pick was `a56aa0f` ("chore: stop ignoring uv.lock"), one commit past the brief's `1de4bfb`.
+2. **Minimum council size is 1**, following upstream. Task 11 rewrites the fork's minimum-2 test without further confirmation (D8).
+3. **Council maximum is 12 everywhere** (D8). **npm only:** `frontend/bun.lock` and the bun launcher in `start.sh` are dropped (D9).
+4. **Verification split.** All automated tests, lint and build run in the execution session. The manual UI checks (success criterion 5, which need real API keys and an existing `data/`) are done by the owner locally, from a checklist delivered before the PR merges.
+5. **Execution method:** subagent-driven development (one implementer subagent per task, then a spec-compliance review and a code-quality review).
+6. **Backup tag.** Tag `pre-integration-2026-09-25` is pushed to `origin` before the first merge. It points at the branch head just before the Step A merge. The off-repo bundle is optional, because a cloud container is not durable.
+7. **Pull request.** `integrate/ai-counsel` → `main`, merged with a merge commit (no squash or rebase). The PR is opened and left open for the owner.
+8. **Local cutover (Task 15)** is the owner's. The execution session supplies the commands and does not run them.
+9. **Upstream head.** If `upstream/main` has moved past v0.13.1 (`614dfb9`), merge the newer head and update the plan. At execution start (2026-09-25) upstream `main` was still `614dfb9`.
+
 ## Goal
 
 Move the fork to The AI Counsel v0.13.1, keep every local feature, and keep history in a form where future upstream updates are a plain `git fetch upstream && git merge upstream/main`.
@@ -128,7 +142,7 @@ Making runs survive a backend restart would be a new feature and is out of scope
 
 Upstream caps council size at 8 in six places: `backend/main.py:1988`, `backend/settings.py` `MAX_COUNCIL_MEMBERS`, `frontend/src/components/CouncilSetup.jsx` `MAX_MEMBERS`, `the_ai_counsel_mcp/tools/council.py:124`, `the_ai_counsel_mcp/tests/test_tools_council.py`, and the docs (`README.md`, `docs/mcp/TOOLS.md`). The fork's feature is 12. All six places move to one value, `MAX_COUNCIL_MEMBERS = 12`, from `backend.settings`. The frontend uses one constant. Advisor limits (2–4) do not change.
 
-The fork also required a **minimum** of 2 council models (`test_put_settings_invalid_council_model_count_returns_400` asserts "At least two council models"). Upstream has no minimum check and documents councils of 1 model. The default here is to follow upstream (minimum 1), but this drops a fork rule, so it needs confirmation before Task 11 changes that test.
+The fork also required a **minimum** of 2 council models (`test_put_settings_invalid_council_model_count_returns_400` asserts "At least two council models"). Upstream has no minimum check and documents councils of 1 model. The integration follows upstream (minimum 1). This was confirmed by the owner (decision 2), so Task 11 rewrites that test.
 
 ### D9. Tooling
 
