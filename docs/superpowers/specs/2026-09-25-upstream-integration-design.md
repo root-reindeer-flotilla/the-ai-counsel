@@ -16,6 +16,7 @@ The repository owner confirmed these before execution started. They override any
 8. **Local cutover (Task 15)** is the owner's. The execution session supplies the commands and does not run them.
 9. **Upstream head.** If `upstream/main` has moved past v0.13.1 (`614dfb9`), merge the newer head and update the plan. At execution start (2026-09-25) upstream `main` was still `614dfb9`.
 10. **Ollama scheduling follows upstream** (confirmed 2026-09-25, during execution). The fork ran Ollama models one at a time in Stages 1 and 2 (`_is_ollama_model`, `_run_ollama_sequential`), a feature the F1–F9 list missed. The owner does not use Ollama and chose to stay in sync with upstream to keep the code simple, so it is dropped: all council models run in parallel, as in v0.13.1. Docs must not describe sequential Ollama execution.
+11. **Re-attaching to a running council polls; it does not replay the stream** (confirmed 2026-09-25, after the Task 12 reviews). A send from this tab streams its run live (`startRun`, then `streamRun` from event 0). A tab that reloads or switches back to a conversation with a live run follows it through upstream's existing `/progress` polling (about every 3 s), which reports the run's `run_id`, so Stop can still cancel it. Upstream's council event handler stays inline in `App.jsx`, and the fork hooks into it with one-line calls (the stream method for council turns, an early return in the send `catch`, Stop, delete, and guards so a stale `/progress` answer for one conversation never touches another). `GET /api/runs/{id}/stream?from_event=N` stays in the API but the UI does not use it to re-attach.
 
 ## Goal
 
@@ -145,6 +146,8 @@ Requesty is wired the same way as NVIDIA, the most recent upstream provider, wit
 - After a backend restart, the conversation keeps the user message, `GET …/runs/active` returns `200 {"active_run": null}` (the fork's contract; 404 only when the conversation itself is missing), and the UI shows the conversation without a stuck spinner.
 
 Making runs survive a backend restart would be a new feature and is out of scope.
+
+Re-attaching in the UI (decision 11): a live send streams through `/runs/{id}/stream`; after a reload or on switching back, the UI follows the run through upstream's `/progress` polling, which carries `run_id` for Stop, instead of replaying the stream with `from_event`. Deleting a conversation cancels its live run, even one this tab no longer follows (`GET …/runs/active`, then cancel).
 
 `runs.py` is adapted to upstream: the new Stage 2 contract (D3), upstream's `stage1_collect_responses`/`stage2_collect_rankings`/`stage3_synthesize_final` signatures (including `conversation_id=`), and upstream's `_active_runs` progress map, so `GET /api/conversations/{id}/progress` also reports runs started through `/runs`. The existing `/message/stream` and `/message/debate` endpoints stay as they are. Debate (Stage 4) keeps its own endpoints and does not go through `RunManager`. The two paths exclude each other per conversation: `POST …/runs` answers 409 while an upstream stream or advisor debate holds the conversation's `_active_runs` entry, and a small middleware in `main.py`'s fork block answers 409 to upstream's per-conversation turn routes (`/message`, `/message/stream`, `/message/debate`, `/debate/stream`) while a `/runs` run is live, without editing their bodies.
 

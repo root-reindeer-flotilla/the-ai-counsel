@@ -1,32 +1,18 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 
 import {
-  compactRunMetadata,
+  advisorConflictMessage,
+  classifySendError,
+  interruptedRunMessage,
   isRunTurn,
   patchRunTurn,
+  polledRunId,
   readStoredConversationId,
+  runProgressState,
+  RUN_GONE_MESSAGE,
+  RUN_STREAM_LOST_MESSAGE,
   writeStoredConversationId,
 } from './councilRuns';
-
-describe('compactRunMetadata', () => {
-  it('keeps only non-empty values', () => {
-    expect(compactRunMetadata({
-      label_to_model: { 'Response A': 'm/a' },
-      stage2_label_maps_by_evaluator: {},
-      aggregate_rankings: [],
-      search_query: '',
-      search_context: 'ctx',
-      aborted: false,
-      error_message: null,
-      generation_time_ms: 0,
-    })).toEqual({
-      label_to_model: { 'Response A': 'm/a' },
-      search_context: 'ctx',
-      generation_time_ms: 0,
-    });
-    expect(compactRunMetadata(undefined)).toEqual({});
-  });
-});
 
 describe('isRunTurn / patchRunTurn', () => {
   const conv = {
@@ -79,5 +65,87 @@ describe('stored conversation id', () => {
     delete globalThis.sessionStorage;
     expect(readStoredConversationId()).toBe(null);
     expect(() => writeStoredConversationId('abc')).not.toThrow();
+  });
+});
+
+// Review Focus 4 (frontend): how a council send ends, and a backend restart.
+describe('classifySendError', () => {
+  const abort = () => new DOMException('Aborted', 'AbortError');
+  const httpError = (status) => Object.assign(new Error('x'), { status });
+
+  it('detaches when the user leaves while the run goes on', () => {
+    expect(classifySendError({ error: abort(), runStarted: true })).toBe('detach');
+  });
+
+  it('never marks a conversation that is no longer on screen', () => {
+    expect(classifySendError({ error: abort(), runStarted: false, isCurrent: false })).toBe('detach');
+    expect(classifySendError({ error: abort(), stopRequested: true, isCurrent: false })).toBe('detach');
+    // Upstream's catch would patch or trim whichever conversation is shown now.
+    expect(classifySendError({ error: httpError(409), isCurrent: false })).toBe('detach');
+    expect(classifySendError({ error: httpError(500), isCurrent: false })).toBe('detach');
+    expect(classifySendError({ error: new Error('dropped'), runStarted: true, isCurrent: false })).toBe('detach');
+  });
+
+  it('marks the turn stopped on Stop, on a server-side cancel, and before a run existed', () => {
+    expect(classifySendError({ error: abort(), runStarted: true, stopRequested: true })).toBe('stopped');
+    expect(classifySendError({ error: abort(), runStarted: true, serverCancelled: true })).toBe('stopped');
+    expect(classifySendError({ error: abort(), runStarted: false })).toBe('stopped');
+  });
+
+  it('reports a busy conversation (409) as a conflict', () => {
+    expect(classifySendError({ error: httpError(409) })).toBe('conflict');
+    expect(classifySendError({ error: httpError(409), runStarted: false })).toBe('conflict');
+  });
+
+  it('keeps the partial turn when a started run loses its stream', () => {
+    const dropped = Object.assign(new Error('dropped'), { code: 'RUN_STREAM_DROPPED' });
+    expect(classifySendError({ error: dropped, runStarted: true })).toBe('interrupted');
+    expect(classifySendError({ error: httpError(404), runStarted: true })).toBe('interrupted');
+  });
+
+  it("leaves other failures to upstream's optimistic-turn removal", () => {
+    expect(classifySendError({ error: httpError(500) })).toBe('remove-optimistic');
+    expect(classifySendError({ error: new TypeError('Failed to fetch') })).toBe('remove-optimistic');
+  });
+});
+
+describe('interruptedRunMessage', () => {
+  it('does not claim a run the server no longer has is still going', () => {
+    expect(interruptedRunMessage(Object.assign(new Error('x'), { status: 404 }))).toBe(RUN_GONE_MESSAGE);
+    expect(RUN_GONE_MESSAGE).not.toMatch(/still running|keeps running/i);
+    expect(interruptedRunMessage(new Error('dropped'))).toBe(RUN_STREAM_LOST_MESSAGE);
+  });
+});
+
+describe('runProgressState', () => {
+  it('is not loading when /progress reports no run (e.g. after a backend restart)', () => {
+    expect(runProgressState({ active: false })).toEqual({ loading: false, runId: null });
+    expect(runProgressState(null)).toEqual({ loading: false, runId: null });
+  });
+
+  it('carries the run id of a live /runs run, and none for upstream streams or advisors', () => {
+    expect(runProgressState({ active: true, mode: 'council', run_id: 'r1' })).toEqual({ loading: true, runId: 'r1' });
+    expect(runProgressState({ active: true, mode: 'council' })).toEqual({ loading: true, runId: null });
+    expect(runProgressState({ active: true, mode: 'advisors', run_id: 'r1' })).toEqual({ loading: true, runId: null });
+  });
+});
+
+describe('polledRunId', () => {
+  it('returns the run id of a turn followed through /progress polling', () => {
+    const conv = {
+      id: 'c1',
+      messages: [{ role: 'user', content: 'q' }, { role: 'assistant', externalRun: true, runId: 'r1' }],
+    };
+    expect(polledRunId(conv, 'c1')).toBe('r1');
+    expect(polledRunId(conv, 'c2')).toBe(null);
+    const streamed = { id: 'c1', messages: [{ role: 'user' }, { role: 'assistant' }] };
+    expect(polledRunId(streamed, 'c1')).toBe(null);
+  });
+});
+
+describe('advisorConflictMessage', () => {
+  it('explains a 409 and leaves other errors to upstream', () => {
+    expect(advisorConflictMessage(Object.assign(new Error('x'), { status: 409 }))).toMatch(/still running or finishing/);
+    expect(advisorConflictMessage(new Error('x'))).toBe(null);
   });
 });

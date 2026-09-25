@@ -1,8 +1,8 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 
-import { createForkApi, isRunConflictError } from './forkApi';
+import { createForkApi, isRunConflictError, parseSseDataChunk } from './forkApi';
 import { api } from './api';
-import { isRequestySourceEnabled } from './utils/requesty';
+import { isRequestySourceEnabled, loadRequestyModels } from './utils/requesty';
 
 const BASE = 'http://backend';
 
@@ -126,5 +126,43 @@ describe('cancelRun / getActiveRun / Requesty', () => {
     expect(isRequestySourceEnabled({ requesty_api_key_set: true, enabled_providers: { requesty: false } })).toBe(false);
     expect(isRequestySourceEnabled({ requesty_api_key_set: false, enabled_providers: { requesty: true } })).toBe(false);
     expect(isRequestySourceEnabled(null)).toBe(false);
+    // One rule with Settings.jsx and the backend default: off unless saved as true.
+    expect(isRequestySourceEnabled({ requesty_api_key_set: true, enabled_providers: {} })).toBe(false);
+    expect(isRequestySourceEnabled({ requesty_api_key_set: true })).toBe(false);
+  });
+});
+
+describe('loadRequestyModels', () => {
+  it('does not call the backend without a saved key or with the source off', async () => {
+    const fetchMock = vi.fn(async () => jsonResponse({ models: [{ id: 'requesty:x' }] }));
+    vi.stubGlobal('fetch', fetchMock);
+    await expect(loadRequestyModels({ requesty_api_key_set: false, enabled_providers: { requesty: true } })).resolves.toEqual([]);
+    await expect(loadRequestyModels({ requesty_api_key_set: true, enabled_providers: {} })).resolves.toEqual([]);
+    await expect(loadRequestyModels(null)).resolves.toEqual([]);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('loads the models with a saved key and the source on, and gives [] when the call fails', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => jsonResponse({ models: [{ id: 'requesty:x' }] })));
+    const on = { requesty_api_key_set: true, enabled_providers: { requesty: true } };
+    await expect(loadRequestyModels(on)).resolves.toEqual([{ id: 'requesty:x' }]);
+    vi.stubGlobal('fetch', vi.fn(async () => jsonResponse({ detail: 'x' }, 500)));
+    await expect(loadRequestyModels(on)).resolves.toEqual([]);
+  });
+});
+
+describe('parseSseDataChunk handler errors', () => {
+  it('logs a throwing handler as a handler failure, not a parse error, and keeps reading', () => {
+    const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const seen = [];
+    const onEvent = (type) => {
+      seen.push(type);
+      if (type === 'boom') throw new Error('handler bug');
+    };
+    parseSseDataChunk('', 'data: {"type":"boom"}\ndata: {"type":"next"}\n', onEvent);
+    expect(seen).toEqual(['boom', 'next']);
+    expect(consoleSpy).toHaveBeenCalledOnce();
+    expect(consoleSpy.mock.calls[0][0]).toBe('SSE event handler failed:');
+    consoleSpy.mockRestore();
   });
 });

@@ -3,17 +3,7 @@ import Sidebar from './components/Sidebar';
 import { api, DEFAULT_EXECUTION_MODE, buildAvailableSearchProviders } from './api';
 import { hasConfiguredProviders } from './constants/oauthProviders';
 import { applyFontSize, normalizeFontSize } from './utils/fontSize';
-import { isRunConflictError } from './forkApi';
-import {
-  compactRunMetadata,
-  isRunTurn,
-  patchRunTurn,
-  readStoredConversationId,
-  RUN_CONFLICT_ADVISOR_MESSAGE,
-  RUN_CONFLICT_MESSAGE,
-  RUN_STREAM_LOST_MESSAGE,
-  writeStoredConversationId,
-} from './utils/councilRuns';
+import { advisorConflictMessage, useForkRuns } from './hooks/useForkRuns'; // fork: resumable council runs
 import './App.css';
 import './components/StageCopyButtons.css';
 import './ModeToggle.css';
@@ -168,11 +158,12 @@ function App() {
   const isInitialMount = useRef(true);
   const conversationVersionRef = useRef(0);
   const skipLoadForIdRef = useRef(null);
-  // Fork (resumable runs): the background run this tab streams, the request
-  // the user pressed Stop on, and whether the stored selection was restored.
-  const activeRunRef = useRef(null); // { conversationId, runId }
-  const stopRequestedRef = useRef(0);
-  const selectionRestoredRef = useRef(false);
+  // Fork: resumable council runs (hooks/useForkRuns.js).
+  const forkRuns = useForkRuns({
+    currentConversationId, setCurrentConversation, setCurrentConversationId, setAppMode, setIsLoading,
+    conversationVersionRef, idleLoading: IDLE_LOADING, finalizeTimers, getConversationMode,
+    app: () => ({ loadConversation, checkForActiveRun }),
+  });
 
   const computeCouncilConfigured = useCallback((models) => {
     const members = (models || []).filter((m) => m && m.trim());
@@ -383,13 +374,6 @@ function App() {
     }
   };
 
-  // Fork: remember the open conversation (per tab) so a reload reopens it and
-  // re-attaches its council run.
-  useEffect(() => {
-    if (currentConversationId === null && !selectionRestoredRef.current) return;
-    writeStoredConversationId(currentConversationId);
-  }, [currentConversationId]);
-
   // Load conversation details when selected, then check for active runs
   useEffect(() => {
     if (currentConversationId && currentConversationId !== 'draft') {
@@ -432,16 +416,7 @@ function App() {
           return updated;
         })
       );
-      // Fork: after a reload, reopen the conversation this tab had open.
-      if (!selectionRestoredRef.current) {
-        selectionRestoredRef.current = true;
-        const storedId = readStoredConversationId();
-        const stored = storedId ? convs.find((c) => c.id === storedId) : null;
-        if (stored) {
-          setCurrentConversationId((current) => current ?? stored.id);
-          setAppMode((current) => current ?? getConversationMode(stored));
-        }
-      }
+      forkRuns.restoreSelection(convs); // fork: reopen this tab's conversation after a reload
     } catch (error) {
       console.error('Failed to load conversations:', error);
       // Retry up to 3 times with increasing delays (1s, 2s, 3s)
@@ -455,7 +430,7 @@ function App() {
     try {
       const conv = await api.getConversation(id);
       // Only apply if no newer optimistic update has occurred since we started
-      if (conversationVersionRef.current === expectedVersion) {
+      if (conversationVersionRef.current === expectedVersion && forkRuns.isCurrent(id)) { // fork: isCurrent
         const normalized = { ...conv, mode: getConversationMode(conv) };
         setCurrentConversation(normalized);
         setAppMode(getConversationMode(normalized));
@@ -516,10 +491,11 @@ function App() {
   };
 
   const checkForActiveRun = async (conversationId) => {
+    if (!forkRuns.isCurrent(conversationId)) return; // fork: never touch another conversation's polling
     stopProgressPolling();
     try {
       const progress = await api.getConversationProgress(conversationId);
-      if (!progress.active) return;
+      if (!progress.active || !forkRuns.isCurrent(conversationId)) return; // fork: isCurrent
 
       if (progress.mode === 'advisors') {
         applyAdvisorProgress(conversationId, progress);
@@ -544,25 +520,21 @@ function App() {
                 stage4: progress.stage4 || null,
               },
               externalRun: true,
+              runId: progress.run_id || null, // fork: Stop cancels a /runs run by id
             });
           }
           return { ...prev, mode: 'council', messages };
         });
-
-        // Fork: a background run (/runs) is re-attached through its event
-        // stream, replayed from where /progress left off, instead of polled.
-        if (progress.run_id) {
-          attachToRun(conversationId, progress.run_id, progress.event_count || 0);
-          return;
-        }
       }
 
       let inFlight = false;
+      stopProgressPolling(); // fork: a second check (StrictMode) must not leak an interval
       progressPollRef.current = setInterval(async () => {
         if (inFlight) return;
         inFlight = true;
         try {
           const p = await api.getConversationProgress(conversationId);
+          if (!forkRuns.isCurrent(conversationId)) return; // fork: stale poll after a switch
           if (!p.active) {
             stopProgressPolling();
             setIsLoading(false);
@@ -622,8 +594,8 @@ function App() {
   };
 
   const handleSelectConversation = (id) => {
-    // Fork: re-selecting the open conversation keeps its attached run stream.
-    if (id === currentConversationId && activeRunRef.current?.conversationId === id) return;
+    // Fork: re-selecting the open conversation keeps following its run.
+    if (id === currentConversationId && (progressPollRef.current || forkRuns.hasLiveRun(id))) return;
     stopProgressPolling();
     if (abortControllerRef.current) {
       abortControllerRef.current.abort();
@@ -642,14 +614,8 @@ function App() {
 
   const handleDeleteConversation = async (id) => {
     try {
-      // Fork: deleting a conversation stops its background run.
-      if (activeRunRef.current?.conversationId === id) {
-        const { runId } = activeRunRef.current;
-        activeRunRef.current = null;
-        await api.cancelRun(runId).catch((err) => console.error('Failed to cancel run:', err));
-        abortControllerRef.current?.abort();
-        setIsLoading(false);
-      }
+      if (id === currentConversationId) handleAbort(); // fork: deleting a conversation stops its run
+      await forkRuns.cancelBeforeDelete(id);
       await api.deleteConversation(id);
       // Remove from local state
       setConversations(conversations.filter(c => c.id !== id));
@@ -664,14 +630,7 @@ function App() {
   };
 
   const handleAbort = () => {
-    // Fork: Stop cancels the council run on the server. Leaving a conversation
-    // (or closing the tab) only detaches the stream and the run continues.
-    stopRequestedRef.current = requestIdRef.current;
-    const run = activeRunRef.current;
-    if (run && run.conversationId === currentConversationId) {
-      activeRunRef.current = null;
-      api.cancelRun(run.runId).catch((error) => console.error('Failed to cancel run:', error));
-    }
+    forkRuns.stop(currentConversationId, currentConversation); // fork: Stop cancels the council run
     stopProgressPolling();
     if (advisorAbortControllerRef.current) {
       advisorAbortControllerRef.current.abort();
@@ -930,9 +889,7 @@ function App() {
           messages[messages.length - 1] = {
             ...lastMsg,
             isRunning: false,
-            error: isRunConflictError(error)
-              ? RUN_CONFLICT_ADVISOR_MESSAGE
-              : (error.message || 'Failed to start debate. Please try again.'),
+            error: advisorConflictMessage(error) || error.message || 'Failed to start debate. Please try again.',
           };
         }
         return { ...prev, messages };
@@ -955,7 +912,6 @@ function App() {
 
     stopProgressPolling();
     const currentRequestId = ++requestIdRef.current;
-    let runStarted = false; // fork: a background run exists on the server
 
     // Create new AbortController for this request
     abortControllerRef.current = new AbortController();
@@ -1052,7 +1008,7 @@ function App() {
 
       // Send message with streaming
       const isDebate = debateRounds > 1 || critiqueMode !== 'freeform';
-      const streamMethod = isDebate ? api.streamDebateMessage.bind(api) : api.sendMessageStream.bind(api);
+      const streamMethod = isDebate ? api.streamDebateMessage.bind(api) : forkRuns.streamRun; // fork: resumable runs
       const streamOptions = {
         content,
         searchProvider,
@@ -1068,83 +1024,9 @@ function App() {
         streamOptions.convergenceThreshold = convergenceThreshold;
       }
 
-      // Fork: council turns run as resumable background runs (backend/runs.py);
-      // the multi-round debate keeps upstream's direct stream.
-      const handleEvent = createCouncilEventHandler(activeConversationId);
-      const signal = abortControllerRef.current?.signal;
-      if (isDebate) {
-        await streamMethod(activeConversationId, streamOptions, handleEvent, signal);
-      } else {
-        const run = await api.startRun(activeConversationId, streamOptions);
-        runStarted = true;
-        if (signal?.aborted) {
-          // Stop (or leaving the conversation) happened while the run was being created.
-          if (stopRequestedRef.current === currentRequestId) {
-            api.cancelRun(run.run_id).catch((err) => console.error('Failed to cancel run:', err));
-          }
-          throw new DOMException('Aborted', 'AbortError');
-        }
-        await streamCouncilRun(activeConversationId, run.run_id, 0, signal);
-      }
-    } catch (error) {
-      // Handle aborted requests - mark message as aborted
-      if (error.name === 'AbortError') {
-        // Fork: leaving the conversation only detaches from its background run.
-        if (runStarted && stopRequestedRef.current !== currentRequestId) return;
-        console.log('Request aborted');
-        // Mark the assistant message as aborted and stop timers
-        setCurrentConversation((prev) => {
-          if (!prev || prev.messages.length < 2) return prev;
-          const messages = [...prev.messages];
-          const lastMsg = messages[messages.length - 1];
-          if (lastMsg.role === 'assistant') {
-            messages[messages.length - 1] = {
-              ...lastMsg,
-              aborted: true,
-              loading: IDLE_LOADING,
-              timers: finalizeTimers(lastMsg.timers),
-            };
-          }
-          return { ...prev, messages };
-        });
-        setIsLoading(false);
-        return;
-      }
-      console.error('Failed to send message:', error);
-      // Fork: keep the turn when the conversation is busy (409) or when the run
-      // lives on while its stream dropped, and offer to reconnect.
-      if (runStarted || isRunConflictError(error)) {
-        markRunInterrupted(
-          activeConversationId,
-          isRunConflictError(error) ? RUN_CONFLICT_MESSAGE : RUN_STREAM_LOST_MESSAGE,
-        );
-        setIsLoading(false);
-        return;
-      }
-      // Remove optimistic messages on error
-      setCurrentConversation((prev) => ({
-        ...prev,
-        messages: prev.messages.slice(0, -2),
-      }));
-      setIsLoading(false);
-    } finally {
-      // Only clear the controller if this is still the current request
-      // This prevents race conditions if user rapidly sends multiple messages
-      if (requestIdRef.current === currentRequestId) {
-        abortControllerRef.current = null;
-      }
-      // Reload conversations to ensure title/messages are synced, even if aborted
-      loadConversations();
-    }
-  };
-
-  // Upstream's council event handler (from handleSendMessage), shared by the
-  // debate stream and by resumable runs (fork). The local setCurrentConversation
-  // only lets it patch this conversation's in-flight assistant turn, so a
-  // detached or replayed stream never touches another conversation.
-  const createCouncilEventHandler = (activeConversationId) => {
-    const setCurrentConversation = (updater) => updateRunTurn(activeConversationId, updater);
-    return (
+      await streamMethod(
+        activeConversationId,
+        streamOptions,
         (eventType, event) => {
           switch (eventType) {
             case 'search_start':
@@ -1675,102 +1557,47 @@ function App() {
             default:
               console.log('Unknown event type:', eventType);
           }
-        }
-    );
-  };
-
-  // --- Fork: resumable council runs (backend/runs.py) ------------------------
-
-  /** Run `updater` only while `conversationId`'s in-flight assistant turn is shown. */
-  const updateRunTurn = (conversationId, updater) => {
-    setCurrentConversation((prev) => (isRunTurn(prev, conversationId) ? updater(prev) : prev));
-  };
-
-  const markRunAborted = (conversationId) => {
-    setCurrentConversation((prev) => patchRunTurn(prev, conversationId, (msg) => ({
-      ...msg,
-      aborted: true,
-      loading: IDLE_LOADING,
-      timers: finalizeTimers(msg.timers),
-    })));
-  };
-
-  /** Keep the partial turn, show `message`, and offer to reconnect to the run. */
-  const markRunInterrupted = (conversationId, message) => {
-    setCurrentConversation((prev) => patchRunTurn(prev, conversationId, (msg) => ({
-      ...msg,
-      error: message,
-      resumable: true,
-      loading: IDLE_LOADING,
-      timers: finalizeTimers(msg.timers),
-    })));
-  };
-
-  /**
-   * Stream a background run into the conversation's in-flight turn, replaying
-   * from event index `fromEvent`. Resolves when the run ends; rejects with an
-   * AbortError on detach/Stop, or with an error if the stream is lost.
-   */
-  const streamCouncilRun = async (conversationId, runId, fromEvent, signal) => {
-    activeRunRef.current = { conversationId, runId };
-    const handleEvent = createCouncilEventHandler(conversationId);
-    try {
-      await api.streamRun(runId, (eventType, event) => {
-        if (eventType === 'cancelled') {
-          // Stopped on the server (Stop in another tab, or a shutdown).
-          markRunAborted(conversationId);
-          setIsLoading(false);
-          loadConversations();
-          return;
-        }
-        handleEvent(eventType, event);
-      }, signal, fromEvent);
-    } finally {
-      if (activeRunRef.current?.runId === runId) activeRunRef.current = null;
-    }
-  };
-
-  /** Re-attach this tab to a live background run (after a reload or on reopening). */
-  const attachToRun = async (conversationId, runId, fromEvent) => {
-    // One attached stream per tab (StrictMode loads a conversation twice).
-    if (abortControllerRef.current) abortControllerRef.current.abort();
-    const requestId = ++requestIdRef.current;
-    const controller = new AbortController();
-    abortControllerRef.current = controller;
-    setIsLoading(true);
-
-    // /progress carries no label maps, rankings or search context; the run snapshot does.
-    api.getRun(runId)
-      .then((run) => setCurrentConversation((prev) => patchRunTurn(prev, conversationId, (msg) => ({
-        ...msg,
-        metadata: { ...compactRunMetadata(run.metadata), ...(msg.metadata || {}) },
-      }))))
-      .catch(() => {});
-
-    try {
-      await streamCouncilRun(conversationId, runId, fromEvent, controller.signal);
+        }, abortControllerRef.current?.signal);
     } catch (error) {
+      if (forkRuns.handleSendError(error, { conversationId: activeConversationId, content })) return; // fork
+      // Handle aborted requests - mark message as aborted
       if (error.name === 'AbortError') {
-        if (stopRequestedRef.current === requestId) markRunAborted(conversationId);
-      } else {
-        console.error('Lost the council run stream:', error);
-        markRunInterrupted(conversationId, RUN_STREAM_LOST_MESSAGE);
-        if (requestIdRef.current === requestId) setIsLoading(false);
+        console.log('Request aborted');
+        // Mark the assistant message as aborted and stop timers
+        setCurrentConversation((prev) => {
+          if (!prev || prev.messages.length < 2) return prev;
+          const messages = [...prev.messages];
+          const lastMsg = messages[messages.length - 1];
+          if (lastMsg.role === 'assistant') {
+            messages[messages.length - 1] = {
+              ...lastMsg,
+              aborted: true,
+              loading: IDLE_LOADING,
+              timers: finalizeTimers(lastMsg.timers),
+            };
+          }
+          return { ...prev, messages };
+        });
+        setIsLoading(false);
+        return;
       }
+      console.error('Failed to send message:', error);
+      // Remove optimistic messages on error
+      setCurrentConversation((prev) => ({
+        ...prev,
+        messages: prev.messages.slice(0, -2),
+      }));
+      setIsLoading(false);
     } finally {
-      if (requestIdRef.current === requestId) abortControllerRef.current = null;
+      // Only clear the controller if this is still the current request
+      // This prevents race conditions if user rapidly sends multiple messages
+      if (requestIdRef.current === currentRequestId) {
+        abortControllerRef.current = null;
+      }
+      // Reload conversations to ensure title/messages are synced, even if aborted
+      loadConversations();
     }
   };
-
-  /** "Reconnect": reload the open conversation and re-attach its live run, if any. */
-  const handleResumeRun = () => {
-    const conversationId = currentConversationId;
-    if (!conversationId || conversationId === 'draft') return;
-    const version = ++conversationVersionRef.current;
-    loadConversation(conversationId, version).then(() => checkForActiveRun(conversationId));
-  };
-
-  // --- End fork: resumable council runs ---------------------------------------
 
   // Mobile sidebar handlers
   const handleMobileSelectConversation = (id) => {
@@ -1854,7 +1681,8 @@ function App() {
                 conversation={currentConversation}
                 onSendMessage={handleSendMessage}
                 onAbort={handleAbort}
-                onResumeRun={handleResumeRun}
+                onResumeRun={forkRuns.resume}
+                restoredInput={forkRuns.restoredInput}
                 isLoading={isLoading}
                 councilConfigured={councilConfigured}
                 providersConfigured={providersConfigured}

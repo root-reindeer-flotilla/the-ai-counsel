@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest';
+import { readFileSync } from 'node:fs';
 
 import {
   getAddSlot,
@@ -93,5 +94,20 @@ describe('getProviderInfo', () => {
   it('still maps OpenRouter and bare paths to OpenRouter', () => {
     expect(getProviderInfo('openrouter:openai/gpt-4o')).toBe(PROVIDER_CONFIG.openrouter);
     expect(getProviderInfo('meta-llama/llama-3-70b-instruct')).toBe(PROVIDER_CONFIG.openrouter);
+  });
+});
+
+describe('read-only grid CSS for 9–12 members', () => {
+  // Upstream's `grid-row: 1 / -1` collapses to row 1 (the grid has no explicit
+  // rows), so the fork stylesheet makes the chairman span the three member rows.
+  it('spans the chairman over three rows and is loaded by CouncilGrid.jsx', () => {
+    const css = readFileSync(new URL('../components/CouncilGrid.fork.css', import.meta.url), 'utf8');
+    for (let n = 9; n <= MAX_COUNCIL_MEMBERS; n += 1) {
+      expect(css).toContain(`.council-grid.layout-${n}-members .council-card.chairman.chairman`);
+    }
+    expect(css).toMatch(/grid-row:\s*1 \/ span 3;/);
+    expect(Math.ceil(MAX_COUNCIL_MEMBERS / LINEUP_COLS)).toBe(3);
+    const jsx = readFileSync(new URL('../components/CouncilGrid.jsx', import.meta.url), 'utf8');
+    expect(jsx).toContain("import './CouncilGrid.fork.css';");
   });
 });

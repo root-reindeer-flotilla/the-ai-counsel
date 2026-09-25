@@ -12,7 +12,8 @@ export const RUN_TERMINAL_EVENTS = new Set(['complete', 'cancelled', 'error']);
 /**
  * Parse Server-Sent Events text incrementally, one `data:` line at a time.
  * Returns the unparsed remainder to pass back in with the next chunk.
- * Comment lines (`: ping`) and other non-data lines are ignored.
+ * Comment lines (`: ping`) and other non-data lines are ignored. Malformed
+ * JSON and exceptions thrown by `onEvent` are logged separately.
  */
 export const parseSseDataChunk = (buffer, chunk, onEvent) => {
   const text = `${buffer}${chunk}`;
@@ -22,12 +23,18 @@ export const parseSseDataChunk = (buffer, chunk, onEvent) => {
   for (const line of lines) {
     if (!line.startsWith('data: ')) continue;
 
-    const data = line.slice(6);
+    let event;
     try {
-      const event = JSON.parse(data);
-      onEvent(event.type, event);
+      event = JSON.parse(line.slice(6));
     } catch (e) {
       console.error('Failed to parse SSE event:', e);
+      continue;
+    }
+    // A handler bug is not a parse error; like upstream, keep reading the stream.
+    try {
+      onEvent(event.type, event);
+    } catch (e) {
+      console.error('SSE event handler failed:', e);
     }
   }
 

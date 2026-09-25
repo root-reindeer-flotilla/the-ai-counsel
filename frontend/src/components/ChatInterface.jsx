@@ -14,6 +14,8 @@ import Stage4, { Stage4Skeleton } from './Stage4';
 import RoundNavigator from './RoundNavigator';
 import CostReport from './CostReport';
 import DocumentUpload from './DocumentUpload';
+import ReconnectRunButton from './ReconnectRunButton'; // fork: resumable council runs
+import { useRestoredInput } from '../hooks/useForkRuns';
 import './ChatInterface.css';
 
 function hasStage1Results(msg) {
@@ -107,6 +109,7 @@ export default function ChatInterface({
     onSendMessage,
     onAbort,
     onResumeRun,
+    restoredInput,
     isLoading,
     councilConfigured,
     providersConfigured = true,
@@ -127,6 +130,7 @@ export default function ChatInterface({
     convergenceThreshold = 2,
 }) {
     const [input, setInput] = useState('');
+    useRestoredInput(restoredInput, setInput); // fork: a 409 puts the unsent question back
     const [activeSearchProvider, setActiveSearchProvider] = useState(null);
     const [searchPopoverOpen, setSearchPopoverOpen] = useState(false);
     const [documentPayload, setDocumentPayload] = useState({ documents: [], attachments: [], warnings: [] });
@@ -525,12 +529,7 @@ function CouncilMessageRenderer({
                 <div className="council-error">
                     <span className="council-error-icon">⚠️</span>
                     <span className="council-error-text">{msg.error}</span>
-                    {/* Fork: reconnect to a background council run (resumable runs) */}
-                    {msg.resumable && onResumeRun && !isLoading && (
-                        <button type="button" className="council-error-action" onClick={onResumeRun}>
-                            Reconnect
-                        </button>
-                    )}
+                    {msg.resumable && onResumeRun && !isLoading && <ReconnectRunButton onReconnect={onResumeRun} />}
                 </div>
             )}
 

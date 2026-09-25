@@ -6,10 +6,10 @@ import { api } from '../api';
  * and it has its own toggle, enabled_providers.requesty.
  */
 
-/** Requesty models are offered when a key is saved and the source is not switched off. */
+/** Requesty models are offered when a key is saved and the source is switched on (off unless `true`, as the backend defaults). */
 export function isRequestySourceEnabled(settings) {
   const ep = settings?.enabled_providers || {};
-  return !!settings?.requesty_api_key_set && ep.requesty !== false;
+  return !!settings?.requesty_api_key_set && ep.requesty === true;
 }
 
 /** Requesty models for a model picker, or [] when the source is off or unreachable. */

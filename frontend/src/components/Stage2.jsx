@@ -3,7 +3,7 @@ import Skeleton from './common/Skeleton';
 import ThinkBlockRenderer from './ThinkBlockRenderer';
 import { getModelVisuals, getShortModelName } from '../utils/modelHelpers';
 import { getEvaluatorLabelMap, getRankedEntries, replaceResponseLabels } from '../utils/stage2Labels';
-import { formatUsd } from '../utils/formatCost';
+import LeaderboardMetrics from './LeaderboardMetrics';
 import RankingHeatmap from './RankingHeatmap';
 import { ClaimCardWithVerdicts } from './ClaimCards';
 import './Stage2.css';
@@ -173,22 +173,6 @@ export default function Stage2({ rankings, labelToModel, stage2LabelMapsByEvalua
                             {aggregateRankings.map((agg, index) => {
                                 const visuals = getModelVisuals(agg.model);
                                 const shortName = getShortModelName(agg.model);
-                                // Fork: per-model generation time, tokens and cost (backend/runs.py rows).
-                                const parsedRowSeconds = Number(agg?.generation_time_seconds);
-                                const safeRowSeconds = agg?.generation_time_seconds != null && Number.isFinite(parsedRowSeconds)
-                                    ? Math.max(0, Math.round(parsedRowSeconds))
-                                    : null;
-                                const generationTimeLabel = safeRowSeconds !== null ? `${safeRowSeconds}s` : null;
-                                const parsedRowTokens = Number(agg?.generation_total_tokens);
-                                const safeRowTokens = agg?.generation_total_tokens != null && Number.isFinite(parsedRowTokens)
-                                    ? Math.max(0, Math.round(parsedRowTokens))
-                                    : null;
-                                const generationTokensLabel = safeRowTokens !== null
-                                    ? safeRowTokens.toLocaleString('en-US')
-                                    : null;
-                                const generationCostLabel = typeof agg?.generation_total_cost === 'number'
-                                    ? formatUsd(agg.generation_total_cost)
-                                    : null;
 
                                 // Calculate bar width proportional to the rank value
                                 // Higher rank = longer bar (matches the number visually)
@@ -219,24 +203,7 @@ export default function Stage2({ rankings, labelToModel, stage2LabelMapsByEvalua
                                                         <span className="rank-score">
                                                             {agg.average_rank.toFixed(2)}
                                                         </span>
-                                                        {generationTimeLabel && (
-                                                            <span className="rank-score" title="Generation time (Stages 1 and 2)">
-                                                                {" | "}
-                                                                {generationTimeLabel}
-                                                            </span>
-                                                        )}
-                                                        {generationTokensLabel && (
-                                                            <span className="rank-score" title="Tokens used (Stages 1 and 2)">
-                                                                {" | "}
-                                                                {generationTokensLabel}
-                                                            </span>
-                                                        )}
-                                                        {generationCostLabel && (
-                                                            <span className="rank-score" title="Cost (Stages 1 and 2)">
-                                                                {" | "}
-                                                                {generationCostLabel}
-                                                            </span>
-                                                        )}
+                                                        <LeaderboardMetrics agg={agg} />
                                                         {index === 0 && <span className="trophy-icon">🏆</span>}
                                                     </div>
                                                 </div>

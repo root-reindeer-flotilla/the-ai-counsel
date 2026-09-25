@@ -2,7 +2,8 @@
  * API client for The AI Counsel backend.
  */
 
-import { createForkApi, parseSseDataChunk, responseError } from './forkApi';
+import { createForkApi, responseError } from './forkApi'; // fork: Requesty and resumable runs
+export { parseSseDataChunk } from './forkApi'; // fork: api.test.js tests it here
 
 // Dynamically determine API base URL based on current hostname
 // This allows the app to work on both localhost and network IPs
@@ -28,9 +29,6 @@ const getApiBase = () => {
 };
 
 const API_BASE = getApiBase();
-
-// Fork: Requesty and resumable-run calls live in forkApi.js.
-export { parseSseDataChunk };
 
 export function buildAvailableSearchProviders(settings) {
   const providers = [{ id: 'duckduckgo', name: 'DuckDuckGo' }];
@@ -159,7 +157,7 @@ export const api = {
       }
     );
     if (!response.ok) {
-      throw await responseError(response, 'Failed to send message');
+      throw new Error('Failed to send message');
     }
     return response.json();
   },
@@ -545,7 +543,7 @@ export const api = {
     );
 
     if (!response.ok) {
-      throw await responseError(response, 'Failed to send message');
+      throw new Error('Failed to send message');
     }
 
     await _consumeSSEStream(response.body, onEvent);
