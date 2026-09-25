@@ -1377,7 +1377,7 @@ The Global Constraints and the "never" rules (no skipped tests, no history rewri
   git replace -l                                                                  # empty
   test "$(git merge-base HEAD upstream/main)" = "$(git rev-parse upstream/main)" && echo linked
   git log --graph --oneline -25
-  git log --oneline 58009fa..pre-integration-2026-09-25 | wc -l                   # 12 (7 fork + merge 0ffffa4 + brief + uv.lock + plan + decisions)
+  git log --oneline 58009fa..pre-integration-2026-09-25 | wc -l                   # 11 (6 fork commits + merge 0ffffa4 + brief 1de4bfb + a56aa0f + plan + decisions)
   git merge-base --is-ancestor pre-integration-2026-09-25 HEAD && echo fork-kept
   git merge-base --is-ancestor 8351aa1 HEAD && echo lcp-kept
   ```
