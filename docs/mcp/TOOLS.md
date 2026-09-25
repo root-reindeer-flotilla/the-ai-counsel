@@ -69,7 +69,7 @@ Run council deliberation. Creates a conversation automatically unless `conversat
 | `query` | string | Yes | User question |
 | `web_search` | boolean | No | Enrich query with web search (default `false`) |
 | `conversation_id` | string | No | Continue an existing thread |
-| `models` | string[] | No | Override council members for `full` only (1–8 model IDs) |
+| `models` | string[] | No | Override council members for `full` only (1–12 model IDs) |
 | `documents` | object[] | No | Optional extracted-text or base64 document inputs |
 
 **Example:** Full deliberation with search
@@ -224,7 +224,7 @@ Manage council configuration and presets.
 | Parameter | Type | Actions | Description |
 |-----------|------|---------|-------------|
 | `action` | string | All | See actions below |
-| `models` | string[] | `update` | 1–8 council member model IDs |
+| `models` | string[] | `update` | 1–12 council member model IDs |
 | `chairman` | string | `update` | Chairman model ID |
 | `council_temperature` | float | `update` | Stage 1 heat |
 | `chairman_temperature` | float | `update` | Stage 3 heat |

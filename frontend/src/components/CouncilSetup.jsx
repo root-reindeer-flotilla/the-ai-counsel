@@ -3,9 +3,9 @@ import { api } from '../api';
 import CouncilGrid from './CouncilGrid';
 import EditableCouncilGrid, { NEW_MEMBER_INDEX } from './EditableCouncilGrid';
 import { filterOAuthModels, OAUTH_PROVIDERS } from '../constants/oauthProviders';
+import { MAX_COUNCIL_MEMBERS as MAX_MEMBERS } from '../constants/council';
 import './CouncilSetup.css';
 
-const MAX_MEMBERS = 8;
 const MAX_PRESETS = 20;
 
 const DIRECT_PROVIDER_KEY_FLAGS = {

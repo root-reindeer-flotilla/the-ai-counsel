@@ -129,16 +129,16 @@ async def test_configure_council_too_few_models(server):
     result = await server.call_tool("council_settings", {"action": "update", "models": []})
     text = get_text(result)
     assert "Error" in text
-    assert "1-8" in text
+    assert "1-12" in text
 
 
 @pytest.mark.asyncio
 async def test_configure_council_too_many_models(server):
-    models = [f"openai:model-{i}" for i in range(9)]
+    models = [f"openai:model-{i}" for i in range(13)]
     result = await server.call_tool("council_settings", {"action": "update", "models": models})
     text = get_text(result)
     assert "Error" in text
-    assert "1-8" in text
+    assert "1-12" in text
 
 
 @pytest.mark.asyncio

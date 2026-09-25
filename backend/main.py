@@ -33,6 +33,7 @@ from .settings import (
     DEFAULT_CHAIRMAN_MODEL,
     PROMPT_DEFAULTS,
     VALID_FONT_SIZES,
+    MAX_COUNCIL_MEMBERS,
 )
 from .settings_payload import apply_admin_import, build_admin_export, build_settings_response
 from .credentials import (
@@ -2091,10 +2092,10 @@ async def update_app_settings(request: UpdateSettingsRequest):
 
     # Council Configuration (unified)
     if request.council_models is not None:
-        if len(request.council_models) > 8:
+        if len(request.council_models) > MAX_COUNCIL_MEMBERS:
             raise HTTPException(
                 status_code=400,
-                detail="Maximum of 8 council models allowed"
+                detail=f"Maximum of {MAX_COUNCIL_MEMBERS} council models allowed"
             )
         updates["council_models"] = request.council_models
 

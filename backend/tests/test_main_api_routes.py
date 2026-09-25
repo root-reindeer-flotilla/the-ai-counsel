@@ -135,10 +135,24 @@ def test_put_settings_invalid_execution_mode_returns_400():
     assert "Invalid execution_mode" in resp.json()["detail"]
 
 
-def test_put_settings_invalid_council_model_count_returns_400():
+def test_put_settings_accepts_single_council_model(monkeypatch):
+    # Upstream allows a council of one (spec D8, owner decision 2); the fork's
+    # old minimum of two is dropped.
+    monkeypatch.setattr(main, "update_settings", lambda **kwargs: _settings_with(**kwargs))
     resp = client.put("/api/settings", json={"council_models": ["only-one"]})
+    assert resp.status_code == 200
+
+
+def test_put_settings_allows_twelve_council_models(monkeypatch):
+    monkeypatch.setattr(main, "update_settings", lambda **kwargs: _settings_with(**kwargs))
+    resp = client.put("/api/settings", json={"council_models": [f"openrouter:m/{i}" for i in range(12)]})
+    assert resp.status_code == 200
+
+
+def test_put_settings_rejects_thirteen_council_models():
+    resp = client.put("/api/settings", json={"council_models": [f"openrouter:m/{i}" for i in range(13)]})
     assert resp.status_code == 400
-    assert "At least two council models" in resp.json()["detail"]
+    assert "12" in resp.json()["detail"]
 
 
 def test_stream_endpoint_invalid_execution_mode_is_rejected(monkeypatch):

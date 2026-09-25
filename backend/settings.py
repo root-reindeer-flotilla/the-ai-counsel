@@ -228,7 +228,7 @@ PROMPT_DEFAULTS = {
 
 MAX_ADVISOR_PRESETS = 20
 MAX_COUNCIL_PRESETS = 20
-MAX_COUNCIL_MEMBERS = 8
+MAX_COUNCIL_MEMBERS = 12
 
 
 def _clamp_advisor_rounds(value: Any, default: int = 3) -> int:

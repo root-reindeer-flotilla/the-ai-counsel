@@ -239,7 +239,7 @@ Some provider/model combinations only accept their default temperature. The app 
 - **Multi-turn Conversations** — Follow-up questions carry full context automatically
 - **Docked Chat Composer** — The input stays below the scrollable conversation so responses remain readable while you type
 - **Text File Uploads** — Attach PDFs and text/code/config files in Council or Advisor mode; extracted text is sent as normalized prompt context across all providers while conversation history stores attachment metadata only
-- **Council Sizing** — Adjust council from 1 to 8 models; advisors from 2 to 4 personas (select from 12 built-ins or custom personas)
+- **Council Sizing** — Adjust council from 1 to 12 models; advisors from 2 to 4 personas (select from 12 built-ins or custom personas)
 - **Advisor Presets** — Save and load named advisor lineups (built-in/custom personas, model mode, optional rounds/web search) from Advisor Setup
 - **Abort Anytime** — Cancel in-progress requests
 - **Conversation History** — All conversations saved locally with search; sidebar cards show stacked date/time, compact run summaries (rounds, critique mode, personas, search), and cumulative cost per thread
