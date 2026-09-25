@@ -360,6 +360,25 @@ The Global Constraints and the "never" rules (no skipped tests, no history rewri
 
 ---
 
+### Task 4b: Adapt fork tests to upstream API drift (added during execution)
+
+Found after the Step B merge (`$SCRATCH/stepB-fork-failures.txt`). These fork tests check behavior that upstream changed on purpose. Each edit follows the upstream API and keeps what the test checks.
+
+**Files:**
+- Modify: `backend/tests/test_council_critical_paths.py::test_parse_ranking_truncates_to_expected_count`: upstream's parser dedupes before truncating (`test_ranking_parse.py::test_parse_ranking_deduplicates_labels`). Expect `["Response A", "Response B"]`; the test still checks truncation to `expected_count`.
+- Modify: `backend/tests/test_storage_integrity.py::test_add_user_and_error_messages_append_expected_shapes`: upstream stores `stage2: None` on error messages.
+- Modify: `backend/tests/test_main_api_routes.py`:
+  - `test_post_conversations_happy_path`: the `create_conversation` stub accepts upstream's `mode=` keyword (`**kwargs`).
+  - `test_get_conversations_happy_path`: assert the fork's fields as a subset of each item (upstream adds `mode`, `run_summary`, cost fields).
+  - `test_get_settings_returns_shape_with_key_flags`: key flags come from the credential store (`settings_payload._key_set` → `has_secret`). Patch that instead of the plaintext settings field.
+  - `test_stream_endpoint_invalid_execution_mode_returns_400`: upstream validates `execution_mode` with a pydantic `Literal`, so the status is 422. Rename to `…_is_rejected` and assert 422 and that the error names `execution_mode`.
+- Not here: `test_put_settings_invalid_council_model_count_returns_400` (Task 11), `test_openrouter_generation_*` (Task 7).
+
+- [ ] **Step 1:** Make the edits above. Run `uv run pytest backend/tests/test_council_critical_paths.py::test_parse_ranking_truncates_to_expected_count backend/tests/test_storage_integrity.py backend/tests/test_main_api_routes.py -q`. Expected: only the Task 7 and Task 11 cases still fail.
+- [ ] **Step 2:** Commit: `test(fork): adapt fork tests to upstream API changes`.
+
+---
+
 ### Task 5: F4: forced temperature 1.0 in `providers/temperature.py`
 
 **Files:**
@@ -676,7 +695,7 @@ The Global Constraints and the "never" rules (no skipped tests, no history rewri
   - `stage2_collect_rankings(user_query, stage1_results, search_context="", request=None, prompt_override=None, *, conversation_id=None, balanced_order: bool = True)`
   - First yield: `Dict[str, str]` (`"Response A" → model`, canonical order).
   - Each result dict: upstream keys plus `stage2_label_map: Dict[str, str]`, `stage2_candidate_label_map: Dict[str, str]`, `parsed_ranking_local: List[str]`, `parsed_ranking_candidate_ids: List[str]`, `parsed_ranking_models: List[str]`, `stage2_transform_applied: bool`, `stage2_retry_reason: Optional[str]`, `stage2_middle_out_mode: str`. `parsed_ranking` holds **global** labels.
-  - `calculate_aggregate_rankings(stage2_results, label_to_model)` keeps upstream's signature and behavior.
+  - `calculate_aggregate_rankings(stage2_results, label_to_model, return_diagnostics=False)`: upstream's call shape; the fork's weighted, per-evaluator-aware body (Step 5b).
 
 - [ ] **Step 1: Write the contract test.**
 
@@ -867,6 +886,14 @@ The Global Constraints and the "never" rules (no skipped tests, no history rewri
   ```
 
   Error results get the same keys with empty lists and the evaluator's maps. `openrouter` is `from . import openrouter`.
+
+- [ ] **Step 5b: Restore the fork's weighted `calculate_aggregate_rankings` (spec D3, revised during execution).**
+
+  Upstream's version re-parses raw ranking text against the global map, which is wrong under balanced ordering. Replace it with the fork's version from `git show pre-integration-2026-09-25:backend/council.py` (plus `STAGE2_HARD_CAP_MIN_COMPLETION = 0.25`), with these changes: read the local map from `stage2_label_map` (the fork read `stage2_label_model_map`), and in the legacy text fallback call `parse_ranking_from_text(text, expected_count=…, valid_labels=list(label_to_model))` as upstream does. Keep the signature `(stage2_results, label_to_model, return_diagnostics=False)`. `backend/tests/test_rankings_aggregation.py` (fork) and every upstream test that calls it must pass.
+
+- [ ] **Step 5c: One label space for Stage 3.**
+
+  Read `stage3_synthesize_final`. If it puts evaluator ranking text into the chairman prompt, convert each evaluator's local labels to global labels first (through `stage2_label_map` → model → global label), and do it in one pass so `A→B` and `B→A` swaps don't chain. Add a test in `test_stage2_contract.py` showing the chairman prompt only uses global labels. If Stage 3 already works from `parsed_ranking` or model names, record that in the commit message and add no code.
 
 - [ ] **Step 6: Keep debate on one label space.**
 
@@ -1126,7 +1153,7 @@ The Global Constraints and the "never" rules (no skipped tests, no history rewri
   In `_execute_run`:
   - Call upstream's stage functions with upstream's arguments. Read them first: `grep -n "^async def stage1_collect_responses\|^async def stage2_collect_rankings\|^async def stage3_synthesize_final\|^async def generate_conversation_title" -A10 backend/council.py`. Pass `conversation_id=run.conversation_id` wherever upstream accepts it.
   - Stage 2: treat the first item (a `dict` without `"model"`) as `run.label_to_model`. Build `run.stage2_label_maps_by_evaluator[r["model"]] = r["stage2_label_map"]` and `run.stage2_candidate_maps_by_evaluator[r["model"]] = r["stage2_candidate_label_map"]` from each result. Drop the `stage2_init_data` branch.
-  - Aggregate: `calculate_aggregate_rankings(run.stage2_results, run.label_to_model)` (upstream signature, no `return_diagnostics`). Set `run.ranking_diagnostics = {}`.
+  - Aggregate: `run.aggregate_rankings, run.ranking_diagnostics = calculate_aggregate_rankings(run.stage2_results, run.label_to_model, return_diagnostics=True)` (Task 8 Step 5b keeps `return_diagnostics`).
   - Progress: when a run starts, write `_active_runs[conversation_id]` through the helper upstream uses at `main.py:80`/`main.py:93`. Update `"stage"` and `progress` at the same points upstream's `/message/stream` does, and pop it in `finally`. So that `runs.py` doesn't import `main.py`, put the three small helpers (`_start_progress`, `_set_stage`, `_finish_progress`) in `backend/runs.py` and have `main.py` pass its `_active_runs` dict into `RunManager(progress=_active_runs)`.
   - Storage: save assistant messages through the upstream `storage` function that `/message/stream` uses (`grep -n "storage\.add_assistant_message" backend/main.py`), with the same keyword arguments, so `run_summary`/cost fields are derived the same way.
 
