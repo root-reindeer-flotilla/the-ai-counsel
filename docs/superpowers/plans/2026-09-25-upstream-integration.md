@@ -536,7 +536,7 @@ Found after the Step B merge (`$SCRATCH/stepB-fork-failures.txt`). These fork te
 - Test: `backend/tests/test_council_critical_paths.py` (fork file, unchanged unless an upstream signature forces an edit).
 
 **Interfaces:**
-- Produces: `council.strip_thinking_tags(text: Any) -> str` (the same function object as `strip_thinking_blocks`), and `council.normalize_thinking_content(content: Any, reasoning: Any = None, reasoning_details: Any = None) -> Dict[str, str]` with keys `display_text` and `prompt_safe_text`. Copy the exact signature from the fork source in Step 3.
+- Produces: `council.strip_thinking_tags(text: Any) -> str` (revised during execution: a fork function that runs `strip_thinking_blocks` and also strips `<thinking>` blocks; see spec D5), `council._prompt_safe_field(result, field) -> str`, and `council.normalize_thinking_content(content: Any, reasoning: Any = None, reasoning_details: Any = None) -> Dict[str, str]` with keys `display_text` and `prompt_safe_text`. Copy the exact signature from the fork source in Step 3.
 
 - [ ] **Step 1: Run the fork test and confirm it fails.**
 
@@ -1392,7 +1392,7 @@ Found after the Step B merge (`$SCRATCH/stepB-fork-failures.txt`). These fork te
 
   ```bash
   uv sync && uv run pytest backend/tests the_ai_counsel_mcp/tests -q
-  uv run ruff check backend the_ai_counsel_mcp
+  uv run ruff check backend the_ai_counsel_mcp 2>&1 | tail -1   # upstream 614dfb9 itself reports 57 errors and its CI doesn't run ruff; expect no more than upstream's count, with none in fork-added code
   npm ci --prefix frontend && npm test --prefix frontend && node --test frontend/src/utils/fontSize.test.js
   npm run lint --prefix frontend && npm run build --prefix frontend
   ```

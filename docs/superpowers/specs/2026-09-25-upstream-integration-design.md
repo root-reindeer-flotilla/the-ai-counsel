@@ -109,6 +109,11 @@ Add `FORCED_TEMPERATURE_ONE_MODELS`, `FORCED_TEMPERATURE_ONE_PREFIXES`, `should_
 
 Upstream has `strip_thinking_blocks` in `council.py`. `strip_thinking_tags` becomes an alias of it. The fork's `normalize_thinking_content` and `_reasoning_details_to_text` are re-added only because `test_council_critical_paths.py` and the Stage 2 display path use them. They are re-added unchanged and call `strip_thinking_blocks`.
 
+Revised during execution (2026-09-25):
+- `strip_thinking_tags` is a small fork function, not a bare alias. It runs `strip_thinking_blocks` and then also removes `<thinking>…</thinking>`, which upstream's regex does not match. Upstream's `THINK_BLOCK_RE` and `strip_thinking_blocks` are unchanged.
+- Stage 2 and Stage 3 prompts take Stage 1/2 text through `_prompt_safe_field` (the stored `*_prompt_safe` field, or `strip_thinking_tags` of the raw field).
+- **Display follows upstream:** hidden reasoning is stripped and not shown (upstream commit `a22d748`, covered by upstream's `test_title_generation.py`). The `<think>`-prepend in Stage 3 came from llm-council-plus v0.7.0 and was not a fork feature. The fork test's single display assertion now expects no `<think>` in the chairman response. To show chairman reasoning again, Stage 3 would return `normalize_thinking_content(...)["display_text"]`, which would reverse `a22d748` and break upstream's tests.
+
 ### D5b. OpenRouter extras go back into upstream's `openrouter.py` (F6–F8)
 
 Take upstream's `backend/openrouter.py` and re-add, unchanged:
