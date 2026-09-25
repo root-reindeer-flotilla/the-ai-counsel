@@ -106,6 +106,7 @@ export default function ChatInterface({
     conversation,
     onSendMessage,
     onAbort,
+    onResumeRun,
     isLoading,
     councilConfigured,
     providersConfigured = true,
@@ -347,6 +348,7 @@ export default function ChatInterface({
                                         isLoading={isLoading}
                                         stage2AnchorRef={stage2AnchorRef}
                                         stage3AnchorRef={stage3AnchorRef}
+                                        onResumeRun={index === conversation.messages.length - 1 ? onResumeRun : null}
                                     />
                                 )}
                             </div>
@@ -479,6 +481,7 @@ function CouncilMessageRenderer({
     isLoading,
     stage2AnchorRef,
     stage3AnchorRef,
+    onResumeRun,
 }) {
     const [selectedRound, setSelectedRound] = useState(null);
 
@@ -522,6 +525,12 @@ function CouncilMessageRenderer({
                 <div className="council-error">
                     <span className="council-error-icon">⚠️</span>
                     <span className="council-error-text">{msg.error}</span>
+                    {/* Fork: reconnect to a background council run (resumable runs) */}
+                    {msg.resumable && onResumeRun && !isLoading && (
+                        <button type="button" className="council-error-action" onClick={onResumeRun}>
+                            Reconnect
+                        </button>
+                    )}
                 </div>
             )}
 
@@ -614,6 +623,7 @@ function CouncilMessageRenderer({
                     <Stage2
                         rankings={displayStage2}
                         labelToModel={displayMetadata.label_to_model}
+                        stage2LabelMapsByEvaluator={displayMetadata.stage2_label_maps_by_evaluator}
                         aggregateRankings={displayMetadata.aggregate_rankings}
                         canonicalClaims={displayMetadata.canonical_claims}
                         aggregateClaimVerdicts={displayMetadata.aggregate_claim_verdicts}

@@ -1025,3 +1025,22 @@
   box-shadow: 0 0 10px rgba(6, 182, 212, 0.05);
   animation: pop-in 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275);
 }
+
+/* Fork: "Reconnect" to a background council run (resumable runs) */
+.council-error-action {
+  flex-shrink: 0;
+  margin-left: auto;
+  padding: 6px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--accent-primary);
+  background: var(--accent-primary-dim);
+  color: #dbeafe;
+  font-family: var(--font-ui);
+  font-size: calc(13px * var(--font-scale));
+  cursor: pointer;
+}
+
+.council-error-action:hover {
+  background: var(--accent-primary);
+  color: #ffffff;
+}
