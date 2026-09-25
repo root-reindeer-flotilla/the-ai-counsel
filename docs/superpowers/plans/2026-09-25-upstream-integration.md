@@ -938,6 +938,10 @@ Found after the Step B merge (`$SCRATCH/stepB-fork-failures.txt`). These fork te
 
 ---
 
+**Task 8 review follow-up (2026-09-25).** Spec-compliance and code-quality reviews found nothing blocking. Fixed in a follow-up commit: per-evaluator state keyed by candidate id (a model listed twice no longer collapses labels); Stage 3 gets a per-evaluator label legend in place of the `Response X` rewrite (spec D3); MCP ranking entries carry `stage2_label_map`; new tests for these and for the `parsed_ranking_local` + `stage2_label_map` aggregation path. Carried forward: Task 9 adds a test that an overflow reply from a `requesty:` model is **not** retried with middle-out (`stage2_transform_applied is False`, one call); Task 12's `deanonymizeStage2Text` must use `stage2_label_map`, and no frontend build should be cut from this branch between Tasks 8 and 12 (the Stage 2 tab shows local-label text against the global map until then). Not changed: the failed first attempt's cost on a middle-out retry is not recorded (overflow rejections are normally free).
+
+---
+
 ### Task 9: F1: Requesty provider on upstream's wiring
 
 **Files:**

@@ -533,22 +533,25 @@ async def stage2_collect_rankings(
     successful_results = [r for r in stage1_results if not r.get('error')]
     # Only use models that successfully responded in Stage 1
     # (no point asking failed models to rank - they'll just fail again)
-    successful_models = [r['model'] for r in successful_results]
     candidates = _build_stage2_candidates(successful_results)
     label_keys = [f"Response {chr(65 + i)}" for i in range(len(candidates))]
+    # Evaluators are the successful Stage 1 models, one per candidate. Per-evaluator
+    # state is keyed by the evaluator's own candidate id, not its model id, so a
+    # model that sits in the council twice keeps two separate evaluations.
+    evaluator_ids = [c["candidate_id"] for c in candidates]
 
     # Global (canonical) label space: upstream contract, yielded first.
     label_to_model = {label: c["model"] for label, c in zip(label_keys, candidates)}
-    model_to_global_label = {model: label for label, model in label_to_model.items()}
+    candidate_to_global_label = {c["candidate_id"]: label for label, c in zip(label_keys, candidates)}
 
     # Yield the mapping first so the caller has it
     yield label_to_model
 
     if balanced_order and not prompt_override:
         seed_key = f"{conversation_id or ''}|{user_query}"
-        orders = _deterministic_cyclic_orders(candidates, successful_models, seed_key)
+        orders = _deterministic_cyclic_orders(candidates, evaluator_ids, seed_key)
     else:
-        orders = {m: candidates for m in successful_models}
+        orders = {eid: candidates for eid in evaluator_ids}
 
     valid_label_list = ", ".join(label_keys)
 
@@ -589,7 +592,7 @@ async def stage2_collect_rankings(
     label_maps: Dict[str, Dict[str, str]] = {}
     candidate_maps: Dict[str, Dict[str, str]] = {}
     messages_by_evaluator: Dict[str, List[Dict[str, str]]] = {}
-    for evaluator in successful_models:
+    for evaluator in evaluator_ids:
         ordered = orders.get(evaluator, candidates)
         local_labels = label_keys[: len(ordered)]
         label_maps[evaluator] = {lbl: c["model"] for lbl, c in zip(local_labels, ordered)}
@@ -600,8 +603,8 @@ async def stage2_collect_rankings(
     # Use dedicated Stage 2 temperature (lower for consistent ranking output)
     stage2_temp = settings.stage2_temperature
 
-    async def _query_one(m: str, meta: Dict[str, Any]):
-        msgs = messages_by_evaluator[m]
+    async def _query_one(eid: str, m: str, meta: Dict[str, Any]):
+        msgs = messages_by_evaluator[eid]
         response = await query_model(m, msgs, temperature=stage2_temp, conversation_id=conversation_id)
         if (
             isinstance(get_provider_for_model(m), OpenRouterProvider)
@@ -618,19 +621,22 @@ async def stage2_collect_rankings(
             )
         return response
 
-    async def _query_safe(m: str):
+    async def _query_safe(eid: str, m: str):
         meta = {
             "stage2_transform_applied": False,
             "stage2_retry_reason": None,
             "stage2_middle_out_mode": "retry_on_overflow",
         }
         try:
-            return m, await _query_one(m, meta), meta
+            return eid, m, await _query_one(eid, m, meta), meta
         except Exception as e:
-            return m, {"error": True, "error_message": str(e)}, meta
+            return eid, m, {"error": True, "error_message": str(e)}, meta
 
     # Create tasks
-    tasks = [asyncio.create_task(_query_safe(m)) for m in successful_models]
+    tasks = [
+        asyncio.create_task(_query_safe(c["candidate_id"], c["model"]))
+        for c in candidates
+    ]
 
     # Process as they complete
     pending = set(tasks)
@@ -648,10 +654,10 @@ async def stage2_collect_rankings(
 
             for task in done:
                 try:
-                    model, response, meta = await task
+                    eid, model, response, meta = await task
 
-                    local_map = label_maps.get(model, {})
-                    local_candidates = candidate_maps.get(model, {})
+                    local_map = label_maps.get(eid, {})
+                    local_candidates = candidate_maps.get(eid, {})
                     result = None
                     if response is not None:
                         if response.get('error'):
@@ -691,13 +697,14 @@ async def stage2_collect_rankings(
                             # through its label map back to the global label space.
                             parsed_local = _dedupe_valid_order(parsed, set(local_map))
                             parsed_models = [local_map[lbl] for lbl in parsed_local]
+                            parsed_candidate_ids = [local_candidates[lbl] for lbl in parsed_local]
 
                             result = {
                                 "model": model,
                                 "ranking": full_text,
-                                "parsed_ranking": [model_to_global_label[m] for m in parsed_models],
+                                "parsed_ranking": [candidate_to_global_label[cid] for cid in parsed_candidate_ids],
                                 "parsed_ranking_local": parsed_local,
-                                "parsed_ranking_candidate_ids": [local_candidates[lbl] for lbl in parsed_local],
+                                "parsed_ranking_candidate_ids": parsed_candidate_ids,
                                 "parsed_ranking_models": parsed_models,
                                 "stage2_label_map": local_map,
                                 "stage2_candidate_label_map": local_candidates,
@@ -722,55 +729,33 @@ async def stage2_collect_rankings(
         raise
 
 
-_RESPONSE_LABEL_RE = re.compile(r"\bResponse ([A-Z])\b")
+def _stage2_label_legend(result: Dict[str, Any]) -> str:
+    """Name the models behind an evaluator's own labels, for the chairman.
 
-
-def _relabel_ranking_to_global(
-    text: str,
-    local_label_map: Dict[str, str],
-    model_to_global_label: Dict[str, str],
-) -> str:
-    """Rewrite an evaluator's local "Response X" labels into the global label space.
-
-    Done in a single regex pass so rotations like A->B, B->C, C->A never chain.
-    Labels this evaluator was not shown are left as written.
+    Under balanced ordering each evaluator's "Response X" labels point at
+    different models, so the ranking text is kept verbatim and prefixed with
+    that evaluator's legend. Results without a label map (saved before
+    balanced ordering) get no legend, as upstream.
     """
-    if not local_label_map or not model_to_global_label:
-        return text
-    local_to_global = {
-        local: model_to_global_label[model]
-        for local, model in local_label_map.items()
-        if model in model_to_global_label
-    }
-    return _RESPONSE_LABEL_RE.sub(lambda m: local_to_global.get(m.group(0), m.group(0)), text)
+    label_map = result.get('stage2_label_map') or {}
+    if not label_map:
+        return ""
+    pairs = "; ".join(f"{label} = {model}" for label, model in label_map.items())
+    return f"(Labels in this evaluation: {pairs})\n"
 
 
 def build_stage_texts(
     stage1_results: List[Dict[str, Any]],
     stage2_results: List[Dict[str, Any]],
 ) -> tuple:
-    """Build formatted text summaries from stage results. Returns (stage1_text, stage2_text).
-
-    Stage 2 ranking text is converted from each evaluator's local labels
-    (`stage2_label_map`) to the global labels, which follow the order of the
-    successful Stage 1 results, exactly as stage2_collect_rankings assigns them.
-    """
+    """Build formatted text summaries from stage results. Returns (stage1_text, stage2_text)."""
     stage1_text = "\n\n".join([
         f"Model: {result['model']}\nResponse: {_prompt_safe_field(result, 'response')}"
         for result in stage1_results
         if result.get('response') is not None
     ])
-    successful_models = [r['model'] for r in stage1_results if not r.get('error')]
-    model_to_global_label = {
-        model: f"Response {chr(65 + i)}" for i, model in enumerate(successful_models)
-    }
     stage2_text = "\n\n".join([
-        f"Model: {result['model']}\nRanking: "
-        + _relabel_ranking_to_global(
-            _prompt_safe_field(result, 'ranking'),
-            result.get('stage2_label_map') or {},
-            model_to_global_label,
-        )
+        f"Model: {result['model']}\nRanking: {_stage2_label_legend(result)}{_prompt_safe_field(result, 'ranking')}"
         for result in stage2_results
         if result.get('ranking') is not None
     ])

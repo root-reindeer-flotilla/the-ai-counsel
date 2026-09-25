@@ -113,15 +113,19 @@ async def test_prompt_override_implies_canonical_order(monkeypatch):
 
 
 @pytest.mark.anyio
-async def test_stage3_chairman_prompt_uses_global_labels(monkeypatch):
+async def test_stage3_chairman_prompt_names_each_evaluators_labels(monkeypatch):
     stage1 = _stage1(3)
-    # Evaluator saw a rotated order: its local A/B/C are global B/C/A. A chained
-    # replace (A->B, then B->C, ...) would collapse labels; one pass must not.
+    # Evaluator saw a rotated order: its local A/B/C are models b/c/a. The text
+    # stays verbatim (bare "A" in prose would defeat a label rewrite), and a
+    # legend names the model behind each of this evaluator's labels.
+    ranking = (
+        "Responses A and B are close; Response C is weakest. A is verbose.\n\n"
+        "FINAL RANKING:\n1. Response A\n2. Response B\n3. Response C"
+    )
     stage2 = [
         {
             "model": "requesty:model-a",
-            "ranking": "Response A is strongest; Response C is weakest.\n\n"
-                       "FINAL RANKING:\n1. Response A\n2. Response B\n3. Response C",
+            "ranking": ranking,
             "parsed_ranking": ["Response B", "Response C", "Response A"],
             "stage2_label_map": {
                 "Response A": "requesty:model-b",
@@ -130,6 +134,8 @@ async def test_stage3_chairman_prompt_uses_global_labels(monkeypatch):
             },
             "error": None,
         },
+        # Saved before balanced ordering: no map, no legend (upstream behavior).
+        {"model": "requesty:model-b", "ranking": "FINAL RANKING:\n1. Response B", "error": None},
     ]
     captured = []
 
@@ -151,10 +157,44 @@ async def test_stage3_chairman_prompt_uses_global_labels(monkeypatch):
 
     await council.stage3_synthesize_final("Q?", stage1, stage2)
 
-    prompt = captured[-1]
-    stage2_part = prompt.split("---", 1)[1]
-    assert "Response B is strongest; Response A is weakest." in stage2_part
-    assert "FINAL RANKING:\n1. Response B\n2. Response C\n3. Response A" in stage2_part
+    stage2_part = captured[-1].split("---", 1)[1]
+    assert (
+        "(Labels in this evaluation: Response A = requesty:model-b; "
+        "Response B = requesty:model-c; Response C = requesty:model-a)\n" + ranking
+    ) in stage2_part
+    assert "Model: requesty:model-b\nRanking: FINAL RANKING:\n1. Response B" in stage2_part
+    assert stage2_part.count("Labels in this evaluation") == 1
+
+
+@pytest.mark.anyio
+async def test_duplicate_council_model_keeps_distinct_labels(fake_llm):
+    fake_llm["*"] = "FINAL RANKING:\n1. Response A\n2. Response B\n3. Response C"
+    stage1 = [
+        {"model": "requesty:m", "response": "first", "error": None},
+        {"model": "requesty:m", "response": "second", "error": None},
+        {"model": "requesty:x", "response": "third", "error": None},
+    ]
+    first, results = await _collect(stage1)
+    assert first == {"Response A": "requesty:m", "Response B": "requesty:m", "Response C": "requesty:x"}
+    assert len(results) == 3
+    for r in results:
+        assert sorted(r["parsed_ranking"]) == ["Response A", "Response B", "Response C"]
+        assert [first[label] for label in r["parsed_ranking"]] == r["parsed_ranking_models"]
+    # The two evaluations by the same model saw different orders.
+    by_model = [r["stage2_candidate_label_map"] for r in results if r["model"] == "requesty:m"]
+    assert len(by_model) == 2 and by_model[0] != by_model[1]
+
+
+def test_aggregate_uses_local_label_map_when_only_local_ranking_is_present():
+    label_to_model = {"Response A": "m-a", "Response B": "m-b", "Response C": "m-c"}
+    ballot = {
+        "model": "m-a",
+        "ranking": "FINAL RANKING:\n1. Response A\n2. Response B\n3. Response C",
+        "parsed_ranking_local": ["Response A", "Response B", "Response C"],
+        "stage2_label_map": {"Response A": "m-c", "Response B": "m-a", "Response C": "m-b"},
+    }
+    rows = council.calculate_aggregate_rankings([ballot], label_to_model)
+    assert [row["model"] for row in rows] == ["m-c", "m-a", "m-b"]
 
 
 @pytest.mark.anyio

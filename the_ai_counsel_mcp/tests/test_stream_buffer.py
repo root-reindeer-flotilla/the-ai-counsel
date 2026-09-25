@@ -224,3 +224,20 @@ async def test_stage1_model_error_401():
     failed = result["results"][0]
     assert failed["error"]["type"] == "auth_error"
     assert failed["error"]["retryable"] is False
+
+
+@pytest.mark.asyncio
+async def test_stage2_forwards_evaluator_label_map():
+    """Under balanced ordering ranking_text uses the evaluator's own labels."""
+    local_map = {"Response A": "m-b", "Response B": "m-a"}
+    events = [
+        {"type": "stage2_complete",
+         "data": [{"model": "m-a", "ranking": "FINAL RANKING:\n1. Response A\n2. Response B",
+                   "parsed_ranking": ["Response B", "Response A"], "stage2_label_map": local_map,
+                   "error": None}],
+         "metadata": {"label_to_model": {"Response A": "m-a", "Response B": "m-b"}, "aggregate_rankings": []}},
+    ]
+    result, _ = await buffer_stage2(_make_iter(events), "conv-1")
+    entry = result["rankings"][0]
+    assert entry["stage2_label_map"] == local_map
+    assert [result["label_to_model"][label] for label in entry["parsed_ranking"]] == ["m-b", "m-a"]

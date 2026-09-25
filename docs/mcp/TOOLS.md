@@ -98,6 +98,8 @@ Errors return `{"status": "error", "message": "..."}`.
 
 Stage-only actions also include `cost_report`. Individual result rows include `usage` and `cost` when the backend provider returned usage.
 
+Each `stage2.rankings` row has `ranking_text` (the evaluator's raw text), `parsed_ranking` and `stage2_label_map`. Evaluators see the responses in different orders, so `ranking_text` uses that evaluator's own labels: decode it with its `stage2_label_map`. `parsed_ranking` is already in the labels of `label_to_model`.
+
 ---
 
 ## model_chat
