@@ -76,9 +76,6 @@ logger = logging.getLogger(__name__)
 # NOTE: process-local — only valid for single-worker deployments.
 _active_runs: Dict[str, Dict[str, Any]] = {}
 
-# Fork: resumable background runs (/runs routes); they report progress into _active_runs.
-RUN_MANAGER = RunManager(progress=_active_runs)
-
 
 def _register_run(conversation_id: str, execution_mode: str) -> None:
     _active_runs[conversation_id] = {
@@ -787,6 +784,43 @@ async def get_conversation_progress(conversation_id: str):
 
 
 # --- Fork: resumable runs (backend/runs.py) ---------------------------------
+
+import re  # noqa: E402  (fork imports stay in the fork block)
+
+from starlette.middleware import Middleware  # noqa: E402
+from starlette.responses import JSONResponse  # noqa: E402
+
+# Background runs report progress into _active_runs and search through upstream's helper.
+RUN_MANAGER = RunManager(progress=_active_runs, fetch_search_context=_fetch_search_context)
+
+# Upstream POSTs that register _active_runs or save a turn for one conversation.
+# While a /runs run is live they would overwrite its progress entry and save
+# through a stale conversation, deleting the run's answer, so they get a 409.
+# Add any new upstream per-conversation turn route here.
+_RUN_GUARDED_ROUTES = re.compile(
+    r"^/api/conversations/(?P<conversation_id>[^/]+)/(?:message|message/stream|message/debate|debate/stream)$"
+)
+
+
+class _RefuseTurnsDuringRun:
+    """Pure ASGI middleware, so upstream's streaming routes pass through untouched."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "http" and scope["method"] == "POST":
+            match = _RUN_GUARDED_ROUTES.match(scope["path"])
+            if match and await RUN_MANAGER.get_active_run_for_conversation(match["conversation_id"]):
+                response = JSONResponse({"detail": "Conversation already has an active run"}, status_code=409)
+                await response(scope, receive, send)
+                return
+        await self.app(scope, receive, send)
+
+
+# Appended, not add_middleware(): that would put it outside CORSMiddleware, and the
+# browser could not read a 409 without CORS headers.
+app.user_middleware.append(Middleware(_RefuseTurnsDuringRun))
 
 
 @app.post("/api/conversations/{conversation_id}/runs")

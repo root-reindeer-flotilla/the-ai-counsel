@@ -1,6 +1,8 @@
 import asyncio
-import time
 import inspect
+import json
+import time
+from types import SimpleNamespace
 
 import pytest
 from backend import main, runs, storage
@@ -125,46 +127,40 @@ async def test_cancel_run_persists_partial_results(monkeypatch, tmp_path):
 
 @pytest.mark.anyio
 async def test_stage2_aggregate_rows_include_generation_time_and_tokens(monkeypatch, tmp_path):
+    """Leaderboard rows carry per-model time, tokens and cost, read from upstream's result shape.
+
+    Upstream results carry normalized ``usage`` and a ``cost`` record; durations are
+    measured by the run from each result's arrival relative to its stage's start.
+    """
     monkeypatch.setattr(storage, "DATA_DIR", str(tmp_path))
     manager = runs.RunManager()
     monkeypatch.setattr(main, "RUN_MANAGER", manager)
-    monkeypatch.setattr(runs, "generate_conversation_title", lambda _q, **_kwargs: asyncio.sleep(0, result="Title"))
-    monkeypatch.setattr(
-        runs,
-        "calculate_aggregate_rankings",
-        lambda _stage2, _labels, return_diagnostics=False: (
-            (
-                [{"model": "openai:model-a", "average_rank": 1.5, "rankings_count": 1}],
-                {"ballots_used": 1},
-            )
-            if return_diagnostics
-            else [{"model": "openai:model-a", "average_rank": 1.5, "rankings_count": 1}]
-        ),
-    )
+    clock = {"now": 100.0}
+    monkeypatch.setattr(runs, "time", SimpleNamespace(perf_counter=lambda: clock["now"]))
 
     async def _stage1_collect(_query, _search_context="", _request=None, **_kwargs):
         yield 1
+        clock["now"] += 3.0  # model-a answers 3 s after Stage 1 starts
         yield {
             "model": "openai:model-a",
             "response": "A",
             "error": None,
-            "stage1_duration_ms": 3000,
-            "stage1_total_tokens": 1200,
-            "stage1_usage": {"cost": 0.12},
-            "stage1_response_id": "s1",
+            "usage": {"input_tokens": 1000, "output_tokens": 200, "total_tokens": 1200},
+            "cost": {"model": "openai:model-a", "total_cost": 0.12, "cost_status": "estimated"},
         }
 
     async def _stage2_collect(_query, _stage1_results, _search_context="", _request=None, **_kwargs):
         yield {"Response A": "openai:model-a"}
+        clock["now"] += 6.0  # and ranks 6 s after Stage 2 starts
         yield {
             "model": "openai:model-a",
             "ranking": "FINAL RANKING:\n1. Response A",
             "parsed_ranking": ["Response A"],
+            "stage2_label_map": {"Response A": "openai:model-a"},
             "error": None,
-            "stage2_duration_ms": 6000,
-            "stage2_total_tokens": 29209,
-            "stage2_usage": {"cost": 0.28},
-            "stage2_response_id": "s2",
+            # Raw provider naming, no total: prompt + completion.
+            "usage": {"prompt_tokens": 29000, "completion_tokens": 209},
+            "cost": {"model": "openai:model-a", "total_cost": 0.28, "cost_status": "estimated"},
         }
 
     monkeypatch.setattr(runs, "stage1_collect_responses", _stage1_collect)
@@ -186,6 +182,8 @@ async def test_stage2_aggregate_rows_include_generation_time_and_tokens(monkeypa
     assert final_run is not None
     assert len(final_run.aggregate_rankings) == 1
     row = final_run.aggregate_rankings[0]
+    assert row["model"] == "openai:model-a"
+    assert row["generation_time_ms"] == 9000
     assert row["generation_time_seconds"] == 9
     assert row["generation_total_tokens"] == 30409
     assert row["generation_total_cost"] == pytest.approx(0.40)
@@ -195,6 +193,7 @@ async def test_stage2_aggregate_rows_include_generation_time_and_tokens(monkeypa
     persisted_row = assistant["metadata"]["aggregate_rankings"][0]
     assert persisted_row["generation_time_seconds"] == 9
     assert persisted_row["generation_total_tokens"] == 30409
+    assert persisted_row["generation_total_cost"] == pytest.approx(0.40)
 
 
 @pytest.mark.anyio
@@ -545,22 +544,27 @@ async def test_cancel_before_run_starts_releases_conversation(monkeypatch, tmp_p
     assert await manager.get_active_run_for_conversation(conv["id"]) is None
     assert conv["id"] not in progress_map
     assert run.events[-1] == {"type": "cancelled"}
-    # As for any cancelled run, the user message stays and an aborted assistant turn is saved.
+    # As upstream's /message/stream does, a cancel with no Stage 1 result keeps the
+    # user message and saves no (empty) assistant turn.
     saved = storage.get_conversation(conv["id"])
-    assert [m["role"] for m in saved["messages"]] == ["user", "assistant"]
-    assert saved["messages"][1]["aborted"] is True
-    assert saved["messages"][1]["stage1"] == []
+    assert [m["role"] for m in saved["messages"]] == ["user"]
+    # The conversation is free for the next run.
+    next_run = await manager.start_run(conversation_id=conv["id"], content="again", execution_mode="chat_only")
+    await manager.cancel_run(next_run.run_id)
+    assert await _wait_for(lambda: next_run.status == "cancelled", timeout=3.0)
 
 
 @pytest.mark.anyio
 async def test_run_web_search_follows_upstream_query_rules(monkeypatch, tmp_path):
     monkeypatch.setattr(storage, "DATA_DIR", str(tmp_path))
-    manager = runs.RunManager()
+    # The run searches through main's own _fetch_search_context (injected), so it
+    # follows upstream's query rules and provider env setup without a copy of them.
+    manager = runs.RunManager(fetch_search_context=main._fetch_search_context)
     settings = Settings()
     settings.search_provider = "duckduckgo"
     settings.search_keyword_extraction = "llm"
     monkeypatch.setattr(runs, "get_settings", lambda: settings)
-    monkeypatch.setattr(runs, "get_api_key", lambda provider: f"key-{provider}")
+    monkeypatch.setattr(main, "get_api_key", lambda provider: f"key-{provider}")
     monkeypatch.setenv("TAVILY_API_KEY", "before")
     search_calls = []
     query_calls = []
@@ -578,8 +582,8 @@ async def test_run_web_search_follows_upstream_query_rules(monkeypatch, tmp_path
         yield 1
         yield {"model": "m1", "response": "A", "error": None}
 
-    monkeypatch.setattr(runs, "generate_search_query", _generate_search_query)
-    monkeypatch.setattr(runs, "perform_web_search", _perform_web_search)
+    monkeypatch.setattr(main, "generate_search_query", _generate_search_query)
+    monkeypatch.setattr(main, "perform_web_search", _perform_web_search)
     monkeypatch.setattr(runs, "stage1_collect_responses", _stage1_collect)
 
     conv = storage.create_conversation("c-run-search")
@@ -593,7 +597,7 @@ async def test_run_web_search_follows_upstream_query_rules(monkeypatch, tmp_path
     assert await _wait_for(lambda: run.status == "completed", timeout=3.0)
     assert query_calls == [("question", {"conversation_id": conv["id"]})]
     assert search_calls == [("optimized query", runs.SearchProvider.TAVILY)]
-    assert runs.os.environ["TAVILY_API_KEY"] == "key-tavily"
+    assert main.os.environ["TAVILY_API_KEY"] == "key-tavily"
     assert run.search_query == "optimized query"
     assert {"type": "search_start", "data": {"provider": "tavily"}} in run.events
 
@@ -641,3 +645,331 @@ async def test_run_documents_reach_stages_and_user_message(monkeypatch, tmp_path
         await manager.start_run(
             conversation_id=conv["id"], content="bad", execution_mode="chat_only", documents=["not-a-dict"]
         )
+
+
+@pytest.mark.anyio
+async def test_run_without_search_helper_fails_with_clear_error(monkeypatch, tmp_path):
+    monkeypatch.setattr(storage, "DATA_DIR", str(tmp_path))
+    manager = runs.RunManager()  # no fetch_search_context injected
+    conv = storage.create_conversation("c-run-no-search")
+    storage.add_user_message(conv["id"], "earlier")
+
+    run = await manager.start_run(conversation_id=conv["id"], content="q", execution_mode="chat_only", web_search=True)
+    assert await _wait_for(lambda: run.status == "failed", timeout=3.0)
+    assert "fetch_search_context" in run.error_message
+    assert run.events[-1]["type"] == "error"
+
+
+def _sse_events(chunks):
+    return [json.loads(chunk[len("data: "):]) for chunk in chunks if chunk.startswith("data: ")]
+
+
+async def _collect_stream(manager, run_id, from_event=0):
+    return [chunk async for chunk in manager.stream_events(run_id, from_event=from_event)]
+
+
+@pytest.mark.anyio
+async def test_cancel_during_title_wait_saves_turn_and_emits_cancelled(monkeypatch, tmp_path):
+    """Stop while the finished run waits for the first-message title keeps the turn."""
+    monkeypatch.setattr(storage, "DATA_DIR", str(tmp_path))
+    manager = runs.RunManager()
+    release_title = asyncio.Event()
+
+    async def _title(_query, **_kwargs):
+        await release_title.wait()
+        return "Late title"
+
+    async def _stage1_collect(_query, _search_context="", _request=None, **_kwargs):
+        yield 1
+        yield {"model": "m1", "response": "A", "error": None}
+
+    monkeypatch.setattr(runs, "generate_conversation_title", _title)
+    monkeypatch.setattr(runs, "stage1_collect_responses", _stage1_collect)
+
+    conv = storage.create_conversation("c-run-title-cancel")
+    run = await manager.start_run(conversation_id=conv["id"], content="first", execution_mode="chat_only")
+    # Every stage is done; the run is now waiting on the title.
+    assert await _wait_for(lambda: any(e["type"] == "stage1_complete" for e in run.events), timeout=3.0)
+    await asyncio.sleep(0.05)
+
+    await manager.cancel_run(run.run_id)
+    await asyncio.sleep(0.05)
+    release_title.set()
+
+    assert await _wait_for(lambda: run.task.done(), timeout=3.0)
+    assert run.status == "cancelled"
+    assert run.events[-1] == {"type": "cancelled"}
+    saved = storage.get_conversation(conv["id"])
+    assert [m["role"] for m in saved["messages"]] == ["user", "assistant"]
+    assert saved["messages"][1]["aborted"] is True
+    assert saved["messages"][1]["stage1"][0]["response"] == "A"
+    assert saved["title"] == "Late title"
+    assert await manager.get_active_run_for_conversation(conv["id"]) is None
+
+
+@pytest.mark.anyio
+async def test_stream_attached_during_cancel_handling_gets_cancelled_event(monkeypatch, tmp_path):
+    """The run stays non-terminal until its final event, so a late stream still gets it."""
+    monkeypatch.setattr(storage, "DATA_DIR", str(tmp_path))
+    manager = runs.RunManager()
+    release_title = asyncio.Event()
+
+    async def _title(_query, **_kwargs):
+        await release_title.wait()
+        return "Title"
+
+    async def _stage1_collect(_query, _search_context="", _request=None, **_kwargs):
+        yield 2
+        yield {"model": "m1", "response": "A", "error": None}
+        await asyncio.Event().wait()  # m2 never answers
+        yield {"model": "m2", "response": "B", "error": None}
+
+    monkeypatch.setattr(runs, "generate_conversation_title", _title)
+    monkeypatch.setattr(runs, "stage1_collect_responses", _stage1_collect)
+
+    conv = storage.create_conversation("c-run-late-stream")
+    run = await manager.start_run(conversation_id=conv["id"], content="first", execution_mode="chat_only")
+    assert await _wait_for(lambda: len(run.stage1_results) == 1, timeout=3.0)
+
+    await manager.cancel_run(run.run_id)
+    await asyncio.sleep(0.05)  # the cancel handler is now waiting (briefly) for the title
+    consumer = asyncio.create_task(_collect_stream(manager, run.run_id))
+    await asyncio.sleep(0.05)
+    # A second Stop during the handler must not interrupt the save.
+    await manager.cancel_run(run.run_id)
+    release_title.set()
+
+    chunks = await asyncio.wait_for(consumer, timeout=3.0)
+    events = _sse_events(chunks)
+    assert events[-1] == {"type": "cancelled"}
+    assert events == run.events
+    saved = storage.get_conversation(conv["id"])
+    assert [m["role"] for m in saved["messages"]] == ["user", "assistant"]
+    assert saved["messages"][1]["aborted"] is True
+    # The second Stop did not cut the handler's title wait short.
+    assert saved["title"] == "Title"
+
+
+@pytest.mark.anyio
+async def test_failure_after_partial_progress_sets_error_on_saved_turn(monkeypatch, tmp_path):
+    monkeypatch.setattr(storage, "DATA_DIR", str(tmp_path))
+    manager = runs.RunManager()
+
+    async def _stage1_collect(_query, _search_context="", _request=None, **_kwargs):
+        yield 2
+        yield {"model": "m1", "response": "A", "error": None}
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(runs, "stage1_collect_responses", _stage1_collect)
+    conv = storage.create_conversation("c-run-partial-fail")
+    storage.add_user_message(conv["id"], "earlier")
+
+    run = await manager.start_run(conversation_id=conv["id"], content="q", execution_mode="full")
+    assert await _wait_for(lambda: run.status == "failed", timeout=3.0)
+    assert run.events[-1] == {"type": "error", "message": "boom"}
+    assistant = storage.get_conversation(conv["id"])["messages"][-1]
+    assert assistant["role"] == "assistant"
+    assert assistant["stage1"][0]["response"] == "A"
+    assert assistant["metadata"]["incomplete"] is True
+    # The UI shows a failed turn from the message's top-level error.
+    assert assistant["error"] == "Error: boom"
+
+
+@pytest.mark.anyio
+async def test_title_task_is_cancelled_when_run_fails_early(monkeypatch, tmp_path):
+    monkeypatch.setattr(storage, "DATA_DIR", str(tmp_path))
+    manager = runs.RunManager()
+    title_cancelled = asyncio.Event()
+
+    async def _title(_query, **_kwargs):
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            title_cancelled.set()
+            raise
+
+    async def _stage1_collect(_query, _search_context="", _request=None, **_kwargs):
+        await asyncio.sleep(0.05)  # the title call is under way
+        raise RuntimeError("provider exploded")
+        yield  # pragma: no cover - makes this an async generator
+
+    monkeypatch.setattr(runs, "generate_conversation_title", _title)
+    monkeypatch.setattr(runs, "stage1_collect_responses", _stage1_collect)
+    conv = storage.create_conversation("c-run-title-leak")
+
+    run = await manager.start_run(conversation_id=conv["id"], content="first", execution_mode="full")
+    assert await _wait_for(lambda: run.status == "failed", timeout=3.0)
+    assert await _wait_for(title_cancelled.is_set, timeout=1.0)
+
+
+@pytest.mark.anyio
+async def test_stream_events_replays_from_event_and_ends_after_final_event(monkeypatch, tmp_path):
+    monkeypatch.setattr(storage, "DATA_DIR", str(tmp_path))
+    manager = runs.RunManager()
+    release = asyncio.Event()
+
+    async def _stage1_collect(_query, _search_context="", _request=None, **_kwargs):
+        yield 2
+        yield {"model": "m1", "response": "A", "error": None}
+        await release.wait()
+        yield {"model": "m2", "response": "B", "error": None}
+
+    monkeypatch.setattr(runs, "stage1_collect_responses", _stage1_collect)
+    conv = storage.create_conversation("c-run-replay")
+    storage.add_user_message(conv["id"], "earlier")
+
+    run = await manager.start_run(conversation_id=conv["id"], content="q", execution_mode="chat_only")
+    assert await _wait_for(lambda: len(run.stage1_results) == 1, timeout=3.0)
+    # Re-attach mid-run from event 2: earlier events are skipped, later ones arrive live.
+    live = asyncio.create_task(_collect_stream(manager, run.run_id, from_event=2))
+    await asyncio.sleep(0.05)
+    assert not live.done()
+    release.set()
+    live_events = _sse_events(await asyncio.wait_for(live, timeout=3.0))
+    assert run.status == "completed"
+    assert live_events == run.events[2:]
+    assert live_events[-1]["type"] == "complete"
+
+    # A finished run replays from any offset and the stream ends after the final event.
+    replay = _sse_events(await asyncio.wait_for(_collect_stream(manager, run.run_id, from_event=3), timeout=1.0))
+    assert replay == run.events[3:]
+    assert replay[-1]["type"] == "complete"
+
+
+def test_finish_progress_only_pops_the_runs_own_entry():
+    progress_map = {}
+    manager = runs.RunManager(progress=progress_map)
+    run = runs.RunState(
+        run_id="r1", conversation_id="c1", content="q", web_search=False, execution_mode="full", is_first_message=False
+    )
+
+    other = {"mode": "council", "stage": "stage1", "execution_mode": "full"}  # an upstream stream's entry
+    progress_map["c1"] = other
+    manager._finish_progress(run)
+    assert progress_map["c1"] is other
+
+    progress_map["c1"] = {"mode": "council", "run_id": "someone-else"}
+    manager._finish_progress(run)
+    assert progress_map["c1"]["run_id"] == "someone-else"
+
+    manager._start_progress(run)
+    assert progress_map["c1"]["run_id"] == "r1"
+    manager._finish_progress(run)
+    assert "c1" not in progress_map
+
+
+@pytest.mark.anyio
+async def test_finished_runs_are_pruned_and_release_request_data(monkeypatch, tmp_path):
+    monkeypatch.setattr(storage, "DATA_DIR", str(tmp_path))
+    manager = runs.RunManager()
+
+    async def _stage1_collect(_query, _search_context="", _request=None, **_kwargs):
+        yield 1
+        yield {"model": "m1", "response": "A", "error": None}
+
+    monkeypatch.setattr(runs, "stage1_collect_responses", _stage1_collect)
+
+    def _state(run_id, status):
+        state = runs.RunState(
+            run_id=run_id,
+            conversation_id=f"conv-{run_id}",
+            content="q",
+            web_search=False,
+            execution_mode="chat_only",
+            is_first_message=False,
+            status=status,
+        )
+        manager._runs[run_id] = state
+        return state
+
+    old_active = _state("active-old", "running")  # an older run that is still live
+    for i in range(25):
+        _state(f"done-{i:02d}", "completed" if i % 2 else "failed")
+
+    conv = storage.create_conversation("c-run-prune")
+    storage.add_user_message(conv["id"], "earlier")
+    run = await manager.start_run(conversation_id=conv["id"], content="big question", execution_mode="chat_only")
+    assert "active-old" in manager._runs and manager._runs["active-old"] is old_active
+    finished = [rid for rid, r in manager._runs.items() if r.status in runs.TERMINAL_STATUSES]
+    assert finished == [f"done-{i:02d}" for i in range(5, 25)]
+    assert run.run_id in manager._runs
+
+    assert await _wait_for(lambda: run.task.done(), timeout=3.0)
+    assert run.status == "completed"
+    # The request's history and document-expanded query are released; the snapshot never had them.
+    assert run.history == []
+    assert run.query == ""
+    snapshot = await manager.snapshot(run)
+    assert "history" not in snapshot and "query" not in snapshot
+    assert snapshot["content"] == "big question"
+
+
+@pytest.mark.anyio
+async def test_restart_mid_run_leaves_conversation_idle_with_user_message(monkeypatch, tmp_path):
+    """Review Focus 4: after a restart, a conversation whose run was live is idle and keeps the user message."""
+    monkeypatch.setattr(storage, "DATA_DIR", str(tmp_path))
+    progress_map = {}
+    monkeypatch.setattr(main, "_active_runs", progress_map)
+    manager = runs.RunManager(progress=progress_map)
+    monkeypatch.setattr(main, "RUN_MANAGER", manager)
+
+    async def _stage1_collect(_query, _search_context="", _request=None, **_kwargs):
+        yield 1
+        await asyncio.Event().wait()  # the model never answers before the "restart"
+        yield {"model": "m1", "response": "A", "error": None}
+
+    monkeypatch.setattr(runs, "stage1_collect_responses", _stage1_collect)
+    conv = storage.create_conversation("c-run-restart")
+    storage.add_user_message(conv["id"], "earlier")
+    storage.add_assistant_message(conv["id"], [{"model": "m1", "response": "old", "error": None}], None, None, {})
+
+    run = await manager.start_run(conversation_id=conv["id"], content="in flight", execution_mode="full")
+    assert await _wait_for(lambda: any(e["type"] == "stage1_init" for e in run.events), timeout=3.0)
+    assert (await main.get_active_conversation_run(conv["id"]))["active_run"]["run_id"] == run.run_id
+
+    # "Restart": the process comes back with an empty manager and progress map.
+    monkeypatch.setattr(main, "_active_runs", {})
+    monkeypatch.setattr(main, "RUN_MANAGER", runs.RunManager(progress=main._active_runs))
+    try:
+        assert await main.get_active_conversation_run(conv["id"]) == {"active_run": None}
+        assert await main.get_conversation_progress(conv["id"]) == {"active": False}
+        messages = storage.get_conversation(conv["id"])["messages"]
+        assert [m["role"] for m in messages] == ["user", "assistant", "user"]
+        assert messages[-1]["content"] == "in flight"
+    finally:
+        # Stop the orphaned task the "old process" left behind.
+        run.task.cancel()
+        await asyncio.gather(run.task, return_exceptions=True)
+
+
+@pytest.mark.anyio
+async def test_run_interrupted_inside_cancel_handler_still_ends_cancelled(monkeypatch, tmp_path):
+    """A second hard cancel of the task (e.g. at shutdown) never leaves the conversation busy."""
+    monkeypatch.setattr(storage, "DATA_DIR", str(tmp_path))
+    manager = runs.RunManager()
+
+    async def _title(_query, **_kwargs):
+        await asyncio.Event().wait()
+
+    async def _stage1_collect(_query, _search_context="", _request=None, **_kwargs):
+        yield 2
+        yield {"model": "m1", "response": "A", "error": None}
+        await asyncio.Event().wait()
+        yield {"model": "m2", "response": "B", "error": None}
+
+    monkeypatch.setattr(runs, "generate_conversation_title", _title)
+    monkeypatch.setattr(runs, "stage1_collect_responses", _stage1_collect)
+    conv = storage.create_conversation("c-run-double-cancel")
+
+    run = await manager.start_run(conversation_id=conv["id"], content="first", execution_mode="chat_only")
+    assert await _wait_for(lambda: len(run.stage1_results) == 1, timeout=3.0)
+    await manager.cancel_run(run.run_id)
+    await asyncio.sleep(0.05)  # in the handler's title wait
+    run.task.cancel()
+    await asyncio.gather(run.task, return_exceptions=True)
+
+    assert run.status == "cancelled"
+    assert run.events[-1] == {"type": "cancelled"}
+    assert await manager.get_active_run_for_conversation(conv["id"]) is None
+    # The partial turn was saved before the title wait.
+    assert storage.get_conversation(conv["id"])["messages"][1]["aborted"] is True

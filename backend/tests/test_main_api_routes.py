@@ -271,3 +271,61 @@ def test_start_run_passes_request_options_and_maps_errors(monkeypatch):
         resp = client.post("/api/conversations/c1/runs", json={"content": "q"})
         assert resp.status_code == status
         assert resp.json()["detail"] == str(error)
+
+
+def _manager_with_live_run(conversation_id):
+    from backend import runs
+
+    manager = main.RunManager()
+    run = runs.RunState(
+        run_id="live-run",
+        conversation_id=conversation_id,
+        content="q",
+        web_search=False,
+        execution_mode="full",
+        is_first_message=False,
+        status="running",
+    )
+    manager._runs[run.run_id] = run
+    manager._active_by_conversation[conversation_id] = run.run_id
+    return manager
+
+
+def test_upstream_turn_routes_refuse_while_a_run_is_live(monkeypatch):
+    """Upstream's per-conversation POSTs would overwrite a /runs run's progress and saved turn."""
+    monkeypatch.setattr(main, "RUN_MANAGER", _manager_with_live_run("c-live"))
+    # Without the guard these routes would reach storage; a missing conversation makes that a 404.
+    monkeypatch.setattr(main.storage, "get_conversation", lambda _cid: None)
+    message_body = {"content": "q"}
+    debate_body = {"question": "q", "persona_ids": ["a", "b"]}
+    for path, body in [
+        ("/api/conversations/c-live/message/stream", message_body),
+        ("/api/conversations/c-live/message/debate", message_body),
+        ("/api/conversations/c-live/message", message_body),
+        ("/api/conversations/c-live/debate/stream", debate_body),
+    ]:
+        resp = client.post(path, json=body, headers={"Origin": "http://localhost:5173"})
+        assert resp.status_code == 409, path
+        assert resp.json() == {"detail": "Conversation already has an active run"}
+        # Inside the CORS middleware, so the browser can read the 409.
+        assert resp.headers.get("access-control-allow-origin") == "http://localhost:5173", path
+
+    # Other conversations, and reads of this one, are not affected.
+    assert client.post("/api/conversations/c-other/message/stream", json=message_body).status_code == 404
+    assert client.get("/api/conversations/c-live/runs/active").status_code == 404
+
+
+def test_start_run_refuses_while_upstream_stream_is_registered(monkeypatch):
+    """The other direction: a /runs start is refused while an upstream stream owns the conversation."""
+    monkeypatch.setattr(main, "RUN_MANAGER", main.RunManager(progress=main._active_runs))
+    monkeypatch.setattr(main.storage, "get_conversation", lambda cid: {"id": cid, "messages": []})
+    add_calls = []
+    monkeypatch.setattr(main.storage, "add_user_message", lambda *a, **k: add_calls.append(a))
+    entry = {"mode": "council", "stage": "stage1", "execution_mode": "full", "progress": {}}
+    monkeypatch.setitem(main._active_runs, "c-stream", entry)
+
+    resp = client.post("/api/conversations/c-stream/runs", json={"content": "q"})
+    assert resp.status_code == 409
+    assert resp.json() == {"detail": "Conversation already has an active run"}
+    assert main._active_runs["c-stream"] is entry
+    assert add_calls == []

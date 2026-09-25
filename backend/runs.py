@@ -4,19 +4,20 @@ Runs execute in a background task, independent of any HTTP request, and keep
 their events so a client can re-attach with ``from_event``. Runs do not survive
 a backend restart (spec D7).
 
-This module must not import ``main``: ``main`` passes its ``_active_runs``
-progress map in as ``RunManager(progress=...)``.
+This module must not import ``main``: ``main`` passes in its ``_active_runs``
+progress map and its ``_fetch_search_context`` helper as
+``RunManager(progress=..., fetch_search_context=...)``.
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
-import os
+import logging
 import time
 import uuid
 from dataclasses import dataclass, field
-from typing import Any, AsyncGenerator, Dict, List, Optional
+from typing import Any, AsyncGenerator, Awaitable, Callable, Dict, Iterable, List, Optional, Tuple
 
 from . import storage
 from .config import get_chairman_model, get_council_models
@@ -25,17 +26,16 @@ from .council import (
     _prompt_safe_field,
     calculate_aggregate_rankings,
     generate_conversation_title,
-    generate_search_query,
     stage1_collect_responses,
     stage2_collect_rankings,
     stage3_synthesize_final,
 )
-from .credentials import get_api_key
 from .documents import build_effective_query, to_attachment_metadata, validate_documents_for_request
 from .model_preflight import build_preflight_error_message, preflight_models
-from .search import SearchProvider, perform_web_search
+from .search import SearchProvider
 from .settings import get_settings
 
+logger = logging.getLogger(__name__)
 
 VALID_EXECUTION_MODES = ["chat_only", "chat_ranking", "full"]
 TERMINAL_STATUSES = {"completed", "cancelled", "failed"}
@@ -44,28 +44,103 @@ STAGE1_ALL_FAILED_MESSAGE = (
     "All models failed to respond in Stage 1, likely due to rate limits or API errors. "
     "Please try again or adjust your model selection."
 )
+# Finished runs kept for re-attach and replay; older ones are dropped when a run starts.
+MAX_FINISHED_RUNS = 20
+# How long a cancelled first-message run waits for its title, as upstream's stream does.
+CANCEL_TITLE_WAIT_SECONDS = 2.0
 
-# Search providers that need an API key in the environment, as in main._apply_search_env.
-_SEARCH_API_KEY_ENV = {
-    SearchProvider.SERPER: ("serper", "SERPER_API_KEY"),
-    SearchProvider.TAVILY: ("tavily", "TAVILY_API_KEY"),
-    SearchProvider.BRAVE: ("brave", "BRAVE_API_KEY"),
-    SearchProvider.TINYFISH: ("tinyfish", "TINYFISH_API_KEY"),
-}
+# main._fetch_search_context(content, settings, provider_override, *, conversation_id)
+# -> (search_context, search_query, search_result)
+FetchSearchContext = Callable[..., Awaitable[Tuple[str, str, Dict[str, Any]]]]
 
 
-def _apply_search_env(settings: Any, provider_override: Optional[str] = None) -> SearchProvider:
-    """Set the env var for the active search provider and return it.
+def _call_tokens(usage: Any) -> Optional[int]:
+    """Total tokens of one call from upstream's ``usage``: total, else input + output."""
+    if not isinstance(usage, dict):
+        return None
 
-    Mirrors main._apply_search_env; kept here because runs.py must not import main.
+    def _first_int(*keys: str) -> Optional[int]:
+        for key in keys:
+            value = usage.get(key)
+            if isinstance(value, int) and not isinstance(value, bool):
+                return value
+        return None
+
+    total = _first_int("total_tokens")
+    if total is not None:
+        return total
+    parts = [
+        part
+        for part in (_first_int("input_tokens", "prompt_tokens"), _first_int("output_tokens", "completion_tokens"))
+        if part is not None
+    ]
+    return sum(parts) if parts else None
+
+
+def _call_cost(cost: Any) -> Optional[float]:
+    """Cost of one call from upstream's ``cost`` record (its ``total_cost``), or a bare number."""
+    if isinstance(cost, dict):
+        cost = cost.get("total_cost")
+    if cost is None or isinstance(cost, bool):
+        return None
+    try:
+        return float(cost)
+    except (TypeError, ValueError):
+        return None
+
+
+def _sum_known(values: Iterable[Optional[float]]) -> Optional[float]:
+    known = [value for value in values if value is not None]
+    return sum(known) if known else None
+
+
+def _elapsed_ms(started_at: float) -> int:
+    return max(0, int(round((time.perf_counter() - started_at) * 1000)))
+
+
+def _with_generation_metrics(
+    rows: List[Dict[str, Any]],
+    stages: List[Tuple[List[Dict[str, Any]], Dict[str, int]]],
+) -> List[Dict[str, Any]]:
+    """Add the leaderboard's per-model time, tokens and cost to aggregate ranking rows.
+
+    ``stages`` is ``[(results, elapsed_ms_by_model), ...]`` for Stage 1 and Stage 2.
+    A model's time is its arrival time within each stage, summed over the stages.
     """
-    provider = SearchProvider(provider_override or settings.search_provider)
-    key_spec = _SEARCH_API_KEY_ENV.get(provider)
-    if key_spec:
-        key = get_api_key(key_spec[0])
-        if key:
-            os.environ[key_spec[1]] = key
-    return provider
+    enriched = []
+    for row in rows:
+        model = row.get("model")
+        time_ms = 0
+        tokens: List[Optional[float]] = []
+        costs: List[Optional[float]] = []
+        for results, elapsed_ms_by_model in stages:
+            time_ms += elapsed_ms_by_model.get(model, 0)
+            result = next((r for r in reversed(results) if r.get("model") == model), None)
+            if result is not None:
+                tokens.append(_call_tokens(result.get("usage")))
+                costs.append(_call_cost(result.get("cost")))
+        total_tokens = _sum_known(tokens)
+        enriched.append(
+            {
+                **row,
+                "generation_time_ms": time_ms,
+                "generation_time_seconds": int(round(time_ms / 1000)),
+                "generation_total_tokens": int(total_tokens) if total_tokens is not None else None,
+                "generation_total_cost": _sum_known(costs),
+            }
+        )
+    return enriched
+
+
+def _log_stage_totals(run: "RunState", stage: str, results: List[Dict[str, Any]]) -> None:
+    logger.info(
+        "Run %s %s: %d results, tokens=%s, cost=%s",
+        run.run_id,
+        stage,
+        len(results),
+        _sum_known(_call_tokens(r.get("usage")) for r in results),
+        _sum_known(_call_cost(r.get("cost")) for r in results),
+    )
 
 
 def build_chat_history(conversation: Dict[str, Any]) -> List[Dict[str, str]]:
@@ -137,13 +212,20 @@ class RunState:
 class RunManager:
     """Tracks and executes deliberation runs independent from HTTP request lifetime."""
 
-    def __init__(self, progress: Optional[Dict[str, Dict[str, Any]]] = None):
+    def __init__(
+        self,
+        progress: Optional[Dict[str, Dict[str, Any]]] = None,
+        fetch_search_context: Optional[FetchSearchContext] = None,
+    ):
         self._runs: Dict[str, RunState] = {}
         self._active_by_conversation: Dict[str, str] = {}
         self._lock = asyncio.Lock()
         # main's _active_runs map (conversation_id -> progress entry), so that
         # GET /api/conversations/{id}/progress also reports background runs.
         self._progress: Dict[str, Dict[str, Any]] = progress if progress is not None else {}
+        # main's _fetch_search_context, so runs search exactly as upstream's routes do.
+        # Without it, a run that asks for web search fails with a clear error.
+        self._fetch_search_context = fetch_search_context
 
     async def start_run(
         self,
@@ -201,11 +283,18 @@ class RunManager:
                 history=history,
                 query=query,
             )
+            self._prune_finished_runs()
             self._runs[run.run_id] = run
             self._active_by_conversation[conversation_id] = run.run_id
             self._start_progress(run)
             run.task = asyncio.create_task(self._execute_run(run))
             return run
+
+    def _prune_finished_runs(self) -> None:
+        """Keep only the most recent MAX_FINISHED_RUNS finished runs; never drop a live one."""
+        finished = [run_id for run_id, run in self._runs.items() if run.status in TERMINAL_STATUSES]
+        for run_id in finished[: max(0, len(finished) - MAX_FINISHED_RUNS)]:
+            del self._runs[run_id]
 
     async def get_active_run_for_conversation(self, conversation_id: str) -> Optional[RunState]:
         run_id = self._active_by_conversation.get(conversation_id)
@@ -225,7 +314,9 @@ class RunManager:
         run = self._runs.get(run_id)
         if not run:
             return None
-        if run.status in TERMINAL_STATUSES:
+        if run.status in TERMINAL_STATUSES or run.cancel_event.is_set():
+            # Already stopping: a second task.cancel() would interrupt the cancel
+            # handler's save and final event.
             return run
         run.cancel_event.set()
         # A task cancelled before its first step never enters _execute_run's
@@ -340,13 +431,35 @@ class RunManager:
         async with run.event_condition:
             run.event_condition.notify_all()
 
+    async def _emit_final(self, run: RunState, status: str, event: Dict[str, Any]):
+        """Set the terminal status and append the final event with no await in between.
+
+        A stream ends once the status is terminal and it has sent every event, so
+        the status must never be terminal before the final event is in the list.
+        """
+        run.status = status
+        await self._emit(run, event)
+
     async def _fail_with_error_message(self, run: RunState, message: str):
         """End the run the way upstream records a failed turn: an error message, no stages."""
         run.error_message = message
-        run.status = "failed"
         storage.add_error_message(run.conversation_id, message)
         run.assistant_message_saved = True
-        await self._emit(run, {"type": "error", "message": message})
+        await self._emit_final(run, "failed", {"type": "error", "message": message})
+
+    async def _save_title_after_cancel(self, run: RunState, title_task: Optional[asyncio.Task]):
+        """Save the first-message title if it finishes shortly, as upstream's stream does."""
+        if title_task is None:
+            return
+        # asyncio.wait neither cancels title_task nor raises what it raised.
+        await asyncio.wait({title_task}, timeout=CANCEL_TITLE_WAIT_SECONDS)
+        if not title_task.done() or title_task.cancelled() or title_task.exception() is not None:
+            return
+        run.title = title_task.result()
+        try:
+            storage.update_conversation_title(run.conversation_id, run.title)
+        except Exception as exc:
+            logger.warning("Could not save title for cancelled run %s: %s", run.run_id, exc)
 
     def _raise_if_cancelled(self, run: RunState):
         if run.cancel_event.is_set():
@@ -400,85 +513,22 @@ class RunManager:
             conversation=conversation,
         )
 
-        # Mark as aborted on persisted message if needed.
-        if run.aborted:
+        # Top-level flags the UI reads on a reloaded turn.
+        if run.aborted or run.error_message:
             last = conversation["messages"][-1]
-            last["aborted"] = True
+            if run.aborted:
+                last["aborted"] = True
+            if run.error_message:
+                last["error"] = f"Error: {run.error_message}"
             storage.save_conversation(conversation)
 
         run.assistant_message_saved = True
 
     async def _execute_run(self, run: RunState):
-        title_task = None
-        stage1_started_at = None
-        stage1_completed_at = None
-        stage2_started_at = None
-        stage2_completed_at = None
-
-        def _tokens_for_log(value: Any) -> str:
-            return str(value) if isinstance(value, int) else "null"
-
-        def _usage_tokens_for_log(usage: Any, keys: List[str]) -> Optional[int]:
-            if not isinstance(usage, dict):
-                return None
-            for key in keys:
-                token_value = usage.get(key)
-                if isinstance(token_value, int):
-                    return token_value
-            return None
-
-        def _cost_for_log(usage: Any) -> str:
-            if not isinstance(usage, dict):
-                return "null"
-            cost = usage.get("cost")
-            if cost is None:
-                return "null"
-            try:
-                return str(float(cost))
-            except (TypeError, ValueError):
-                return "null"
-
-        def _sum_cost_for_log(results: List[Dict[str, Any]], usage_key: str) -> Optional[float]:
-            total = 0.0
-            has_cost = False
-            for result in results:
-                usage = result.get(usage_key)
-                if not isinstance(usage, dict):
-                    continue
-                cost = usage.get("cost")
-                if cost is None:
-                    continue
-                try:
-                    total += float(cost)
-                    has_cost = True
-                except (TypeError, ValueError):
-                    continue
-            return total if has_cost else None
-
-        def _sum_tokens_for_log(results: List[Dict[str, Any]], tokens_key: str) -> Optional[int]:
-            total = 0
-            has_tokens = False
-            for result in results:
-                tokens = result.get(tokens_key)
-                if isinstance(tokens, int) and tokens > 0:
-                    total += tokens
-                    has_tokens = True
-            return total if has_tokens else None
-
-        def _sum_usage_tokens_for_log(
-            results: List[Dict[str, Any]],
-            usage_key: str,
-            token_keys: List[str],
-        ) -> Optional[int]:
-            total = 0
-            has_tokens = False
-            for result in results:
-                usage = result.get(usage_key)
-                token_count = _usage_tokens_for_log(usage, token_keys)
-                if isinstance(token_count, int) and token_count >= 0:
-                    total += token_count
-                    has_tokens = True
-            return total if has_tokens else None
+        title_task: Optional[asyncio.Task] = None
+        # Per-model arrival time within each stage; every model in a stage starts together.
+        stage1_ms: Dict[str, int] = {}
+        stage2_ms: Dict[str, int] = {}
 
         try:
             self._raise_if_cancelled(run)
@@ -501,28 +551,19 @@ class RunManager:
                 )
 
             if run.web_search:
+                if self._fetch_search_context is None:
+                    raise RuntimeError("Web search is unavailable: RunManager was created without fetch_search_context")
                 settings = get_settings()
-                provider = _apply_search_env(settings, run.search_provider)
+                provider = SearchProvider(run.search_provider or settings.search_provider)
                 self._set_stage(run, "search")
                 await self._emit(run, {"type": "search_start", "data": {"provider": provider.value}})
-                # LLM query generation only when selected and not DuckDuckGo (upstream's rule).
-                if settings.search_keyword_extraction == "llm" and provider != SearchProvider.DUCKDUCKGO:
-                    run.search_query = await generate_search_query(
-                        run.content,
-                        conversation_id=run.conversation_id,
-                    )
-                else:
-                    run.search_query = run.content
-                self._raise_if_cancelled(run)
-                search_result = await perform_web_search(
-                    run.search_query,
-                    settings.search_result_count,
-                    provider,
-                    settings.full_content_results,
-                    settings.search_keyword_extraction,
-                    hybrid_mode=settings.search_hybrid_mode,
+                # main._fetch_search_context applies upstream's provider env and query rules.
+                run.search_context, run.search_query, search_result = await self._fetch_search_context(
+                    run.content,
+                    settings,
+                    run.search_provider,
+                    conversation_id=run.conversation_id,
                 )
-                run.search_context = search_result["results"]
                 await self._emit(
                     run,
                     {
@@ -556,18 +597,7 @@ class RunManager:
                     await self._emit(run, {"type": "stage1_init", "total": item})
                     continue
                 run.stage1_results.append(item)
-                stage1_usage = item.get("stage1_usage")
-                stage1_input_tokens_value = _usage_tokens_for_log(stage1_usage, ["input_tokens", "prompt_tokens"])
-                stage1_output_tokens_value = _usage_tokens_for_log(stage1_usage, ["output_tokens", "completion_tokens"])
-                stage1_tokens_value = item.get("stage1_total_tokens")
-                print(
-                    f"Stage 1 Progress: {len(run.stage1_results)}/{run.stage1_total_models} - "
-                    f"{item.get('model', 'unknown')} | "
-                    f"{_tokens_for_log(stage1_input_tokens_value)} | "
-                    f"{_tokens_for_log(stage1_output_tokens_value)} | "
-                    f"{_tokens_for_log(stage1_tokens_value)} | "
-                    f"{_cost_for_log(stage1_usage)}"
-                )
+                stage1_ms[item.get("model")] = _elapsed_ms(stage1_started_at)
                 await self._emit(
                     run,
                     {
@@ -577,27 +607,8 @@ class RunManager:
                         "total": run.stage1_total_models,
                     },
                 )
-
-            stage1_completed_at = time.perf_counter()
-            stage1_total_cost = _sum_cost_for_log(run.stage1_results, "stage1_usage")
-            stage1_total_input_tokens = _sum_usage_tokens_for_log(
-                run.stage1_results,
-                "stage1_usage",
-                ["input_tokens", "prompt_tokens"],
-            )
-            stage1_total_output_tokens = _sum_usage_tokens_for_log(
-                run.stage1_results,
-                "stage1_usage",
-                ["output_tokens", "completion_tokens"],
-            )
-            stage1_total_tokens = _sum_tokens_for_log(run.stage1_results, "stage1_total_tokens")
-            print(
-                "Stage 1 Totals: "
-                f"{str(stage1_total_input_tokens) if stage1_total_input_tokens is not None else 'null'} | "
-                f"{str(stage1_total_output_tokens) if stage1_total_output_tokens is not None else 'null'} | "
-                f"{str(stage1_total_tokens) if stage1_total_tokens is not None else 'null'} | "
-                f"{str(stage1_total_cost) if stage1_total_cost is not None else 'null'}"
-            )
+            stage1_wall_ms = _elapsed_ms(stage1_started_at)
+            _log_stage_totals(run, "stage1", run.stage1_results)
             await self._emit(run, {"type": "stage1_complete", "data": run.stage1_results})
 
             if not any(r for r in run.stage1_results if not r.get("error")):
@@ -625,6 +636,7 @@ class RunManager:
                         await self._emit(run, {"type": "stage2_init", "total": run.stage2_total_models})
                         continue
                     run.stage2_results.append(item)
+                    stage2_ms[item.get("model")] = _elapsed_ms(stage2_started_at)
                     # Snapshot convenience only, keyed by model: a model sitting in the
                     # council twice collapses here. Each result's own stage2_label_map
                     # is authoritative, and aggregation below reads that.
@@ -633,18 +645,6 @@ class RunManager:
                         run.stage2_label_maps_by_evaluator[evaluator] = item["stage2_label_map"]
                     if isinstance(item.get("stage2_candidate_label_map"), dict):
                         run.stage2_candidate_maps_by_evaluator[evaluator] = item["stage2_candidate_label_map"]
-                    stage2_usage = item.get("stage2_usage")
-                    stage2_input_tokens_value = _usage_tokens_for_log(stage2_usage, ["input_tokens", "prompt_tokens"])
-                    stage2_output_tokens_value = _usage_tokens_for_log(stage2_usage, ["output_tokens", "completion_tokens"])
-                    stage2_tokens_value = item.get("stage2_total_tokens")
-                    print(
-                        f"Stage 2 Progress: {len(run.stage2_results)}/{run.stage2_total_models} - "
-                        f"{item.get('model', 'unknown')} | "
-                        f"{_tokens_for_log(stage2_input_tokens_value)} | "
-                        f"{_tokens_for_log(stage2_output_tokens_value)} | "
-                        f"{_tokens_for_log(stage2_tokens_value)} | "
-                        f"{_cost_for_log(stage2_usage)}"
-                    )
                     await self._emit(
                         run,
                         {
@@ -654,140 +654,21 @@ class RunManager:
                             "total": run.stage2_total_models,
                         },
                     )
+                stage2_wall_ms = _elapsed_ms(stage2_started_at)
+                _log_stage_totals(run, "stage2", run.stage2_results)
 
-                run.aggregate_rankings, run.ranking_diagnostics = calculate_aggregate_rankings(
+                aggregate_rankings, run.ranking_diagnostics = calculate_aggregate_rankings(
                     run.stage2_results,
                     run.label_to_model,
                     return_diagnostics=True,
                 )
-                # Enrich aggregate rows with per-model generation metrics used by the leaderboard UI.
-                stage1_times = {
-                    item["model"]: item.get("stage1_duration_ms")
-                    for item in run.stage1_results
-                    if item.get("model")
-                }
-                stage2_times = {
-                    item["model"]: item.get("stage2_duration_ms")
-                    for item in run.stage2_results
-                    if item.get("model")
-                }
-                stage1_tokens = {
-                    item["model"]: item.get("stage1_total_tokens")
-                    for item in run.stage1_results
-                    if item.get("model")
-                }
-                stage2_tokens = {
-                    item["model"]: item.get("stage2_total_tokens")
-                    for item in run.stage2_results
-                    if item.get("model")
-                }
-                stage1_usage = {
-                    item["model"]: item.get("stage1_usage")
-                    for item in run.stage1_results
-                    if item.get("model")
-                }
-                stage2_usage = {
-                    item["model"]: item.get("stage2_usage")
-                    for item in run.stage2_results
-                    if item.get("model")
-                }
-                stage1_response_ids = {
-                    item["model"]: item.get("stage1_response_id")
-                    for item in run.stage1_results
-                    if item.get("model")
-                }
-                stage2_response_ids = {
-                    item["model"]: item.get("stage2_response_id")
-                    for item in run.stage2_results
-                    if item.get("model")
-                }
-
-                enriched_aggregate_rankings = []
-                for item in run.aggregate_rankings:
-                    model_name = item.get("model")
-                    model_stage1_ms = stage1_times.get(model_name) or 0
-                    model_stage2_ms = stage2_times.get(model_name) or 0
-                    model_total_ms = max(0, int(model_stage1_ms + model_stage2_ms))
-                    model_stage1_tokens = stage1_tokens.get(model_name)
-                    model_stage2_tokens = stage2_tokens.get(model_name)
-                    model_total_tokens = None
-                    if isinstance(model_stage1_tokens, int) or isinstance(model_stage2_tokens, int):
-                        model_total_tokens = int(model_stage1_tokens or 0) + int(model_stage2_tokens or 0)
-
-                    model_stage1_usage = stage1_usage.get(model_name) if isinstance(stage1_usage.get(model_name), dict) else {}
-                    model_stage2_usage = stage2_usage.get(model_name) if isinstance(stage2_usage.get(model_name), dict) else {}
-                    stage1_cost = model_stage1_usage.get("cost")
-                    stage2_cost = model_stage2_usage.get("cost")
-                    generation_total_cost = None
-                    try:
-                        if stage1_cost is not None or stage2_cost is not None:
-                            generation_total_cost = float(stage1_cost or 0) + float(stage2_cost or 0)
-                    except (TypeError, ValueError):
-                        generation_total_cost = None
-
-                    enriched_aggregate_rankings.append(
-                        {
-                            **item,
-                            "generation_time_ms": model_total_ms,
-                            "generation_time_seconds": max(0, int(round(model_total_ms / 1000))),
-                            "generation_total_tokens": model_total_tokens,
-                            "generation_total_cost": generation_total_cost,
-                            "stage1_usage": model_stage1_usage,
-                            "stage2_usage": model_stage2_usage,
-                            "stage1_response_id": stage1_response_ids.get(model_name),
-                            "stage2_response_id": stage2_response_ids.get(model_name),
-                        }
-                    )
-                run.aggregate_rankings = enriched_aggregate_rankings
-                stage2_completed_at = time.perf_counter()
-                stage2_total_cost = _sum_cost_for_log(run.stage2_results, "stage2_usage")
-                stage2_total_input_tokens = _sum_usage_tokens_for_log(
-                    run.stage2_results,
-                    "stage2_usage",
-                    ["input_tokens", "prompt_tokens"],
+                # Per-model time/tokens/cost for the fork's leaderboard columns.
+                run.aggregate_rankings = _with_generation_metrics(
+                    aggregate_rankings,
+                    [(run.stage1_results, stage1_ms), (run.stage2_results, stage2_ms)],
                 )
-                stage2_total_output_tokens = _sum_usage_tokens_for_log(
-                    run.stage2_results,
-                    "stage2_usage",
-                    ["output_tokens", "completion_tokens"],
-                )
-                stage2_total_tokens = _sum_tokens_for_log(run.stage2_results, "stage2_total_tokens")
-                print(
-                    "Stage 2 Totals: "
-                    f"{str(stage2_total_input_tokens) if stage2_total_input_tokens is not None else 'null'} | "
-                    f"{str(stage2_total_output_tokens) if stage2_total_output_tokens is not None else 'null'} | "
-                    f"{str(stage2_total_tokens) if stage2_total_tokens is not None else 'null'} | "
-                    f"{str(stage2_total_cost) if stage2_total_cost is not None else 'null'}"
-                )
-                combined_stage12_cost = None
-                if stage1_total_cost is not None or stage2_total_cost is not None:
-                    combined_stage12_cost = float(stage1_total_cost or 0) + float(stage2_total_cost or 0)
-                combined_stage12_input_tokens = None
-                if stage1_total_input_tokens is not None or stage2_total_input_tokens is not None:
-                    combined_stage12_input_tokens = int(stage1_total_input_tokens or 0) + int(stage2_total_input_tokens or 0)
-                combined_stage12_output_tokens = None
-                if stage1_total_output_tokens is not None or stage2_total_output_tokens is not None:
-                    combined_stage12_output_tokens = int(stage1_total_output_tokens or 0) + int(stage2_total_output_tokens or 0)
-                combined_stage12_tokens = None
-                if stage1_total_tokens is not None or stage2_total_tokens is not None:
-                    combined_stage12_tokens = int(stage1_total_tokens or 0) + int(stage2_total_tokens or 0)
-                print(
-                    "Stage 1+2 Totals: "
-                    f"{str(combined_stage12_input_tokens) if combined_stage12_input_tokens is not None else 'null'} | "
-                    f"{str(combined_stage12_output_tokens) if combined_stage12_output_tokens is not None else 'null'} | "
-                    f"{str(combined_stage12_tokens) if combined_stage12_tokens is not None else 'null'} | "
-                    f"{str(combined_stage12_cost) if combined_stage12_cost is not None else 'null'}"
-                )
-                if (
-                    stage1_started_at is not None
-                    and stage1_completed_at is not None
-                    and stage2_started_at is not None
-                    and stage2_completed_at is not None
-                ):
-                    stage1_ms = max(0, int((stage1_completed_at - stage1_started_at) * 1000))
-                    stage2_ms = max(0, int((stage2_completed_at - stage2_started_at) * 1000))
-                    run.generation_time_ms = stage1_ms + stage2_ms
-                    run.generation_time_seconds = max(0, int(round(run.generation_time_ms / 1000)))
+                run.generation_time_ms = stage1_wall_ms + stage2_wall_ms
+                run.generation_time_seconds = int(round(run.generation_time_ms / 1000))
 
                 await self._emit(
                     run,
@@ -825,33 +706,29 @@ class RunManager:
 
             if title_task:
                 try:
-                    run.title = await title_task
+                    # Shielded: a Stop during this wait cancels the run, not the title,
+                    # so the cancel handler can still save both.
+                    run.title = await asyncio.shield(title_task)
                     storage.update_conversation_title(run.conversation_id, run.title)
                     await self._emit(run, {"type": "title_complete", "data": {"title": run.title}})
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.warning("Title generation failed for run %s: %s", run.run_id, exc)
 
             await self._save_assistant_message(run)
-            run.status = "completed"
             cost_report = build_council_cost_report(run.stage1_results, run.stage2_results, run.stage3_result)
-            await self._emit(run, {"type": "complete", "metadata": {"cost_report": cost_report}})
+            await self._emit_final(run, "completed", {"type": "complete", "metadata": {"cost_report": cost_report}})
         except asyncio.CancelledError:
             run.aborted = True
-            run.status = "cancelled"
-            if title_task:
+            # As upstream's stream: save partial results only when Stage 1 produced any.
+            if run.stage1_results:
                 try:
-                    run.title = await asyncio.wait_for(title_task, timeout=2.0)
-                    storage.update_conversation_title(run.conversation_id, run.title)
-                except Exception:
-                    pass
-            try:
-                await self._save_assistant_message(run, partial=True)
-            except Exception as save_exc:
-                print(f"Could not save partial results for run {run.run_id}: {save_exc}")
-            await self._emit(run, {"type": "cancelled"})
+                    await self._save_assistant_message(run, partial=True)
+                except Exception as save_exc:
+                    logger.warning("Could not save partial results for run %s: %s", run.run_id, save_exc)
+            await self._save_title_after_cancel(run, title_task)
+            await self._emit_final(run, "cancelled", {"type": "cancelled"})
         except Exception as exc:
             run.error_message = str(exc) or exc.__class__.__name__
-            run.status = "failed"
             try:
                 if run.stage1_results:
                     await self._save_assistant_message(run, partial=True)
@@ -859,10 +736,21 @@ class RunManager:
                     storage.add_error_message(run.conversation_id, f"Error: {run.error_message}")
                     run.assistant_message_saved = True
             except Exception as save_exc:
-                print(f"Could not save failed run {run.run_id}: {save_exc}")
-            await self._emit(run, {"type": "error", "message": run.error_message})
+                logger.warning("Could not save failed run %s: %s", run.run_id, save_exc)
+            await self._emit_final(run, "failed", {"type": "error", "message": run.error_message})
         finally:
+            if title_task is not None and not title_task.done():
+                title_task.cancel()
+            if run.status not in TERMINAL_STATUSES:
+                # Interrupted inside a handler (e.g. at shutdown): never leave the
+                # conversation looking busy.
+                run.aborted = True
+                run.status = "cancelled"
+                run.events.append({"type": "cancelled"})
             run.ended_at = time.perf_counter()
+            # Request-sized data the snapshot never exposes; finished runs are kept for replay.
+            run.history = []
+            run.query = ""
             async with self._lock:
                 active_run_id = self._active_by_conversation.get(run.conversation_id)
                 if active_run_id == run.run_id:
