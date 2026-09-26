@@ -498,7 +498,7 @@ Full details: [`docs/CREDENTIALS.md`](docs/CREDENTIALS.md).
 
 ## Fork additions
 
-This fork adds the following on top of The AI Counsel v0.13.1. Design and decisions: [`docs/superpowers/specs/2026-09-25-upstream-integration-design.md`](docs/superpowers/specs/2026-09-25-upstream-integration-design.md).
+This fork adds the following on top of The AI Counsel v0.13.1. Design and decisions: the [integration spec](https://github.com/root-reindeer-flotilla/the-ai-counsel/blob/7061d01/docs/superpowers/specs/2026-09-25-upstream-integration-design.md) and [plan](https://github.com/root-reindeer-flotilla/the-ai-counsel/blob/7061d01/docs/superpowers/plans/2026-09-25-upstream-integration.md), as merged in [PR #1](https://github.com/root-reindeer-flotilla/the-ai-counsel/pull/1) (`08a32be`).
 
 | # | Feature | What it does |
 |---|---------|--------------|
