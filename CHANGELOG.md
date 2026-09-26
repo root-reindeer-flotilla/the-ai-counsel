@@ -17,6 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 - Council cap raised from 8 to 12 members (backend, MCP tools and the lineup grid).
+- `start.sh` runs the frontend with Bun when it is installed, else npm (fork). `package-lock.json` stays the only lockfile; `frontend/bun.lock` is git-ignored.
 
 ## [0.13.1] - 2026-09-18
 

@@ -431,6 +431,7 @@ This fork adds F1–F9 on top of The AI Counsel v0.13.1. Design and decisions: [
 - **F7 OpenRouter generation stats:** `openrouter.fetch_generation`, `GET /api/openrouter/generation?id=…`.
 - **F8 OpenRouter reasoning/slug handling:** `_resolve_to_canonical_slug`, `_is_openrouter_gemini3_reasoning_target`, `_is_openrouter_deepseek_reasoning_target` in `backend/openrouter.py`.
 - **F9 Council cap of 12:** `MAX_COUNCIL_MEMBERS = 12` in `backend/settings.py`, with its own copy in `the_ai_counsel_mcp/tools/council.py`; the lineup grid in `utils/councilGridUtils.js` lays out 12 seats.
+- **Bun for the dev server:** `start.sh` runs the frontend with Bun when it is installed (on `PATH` or `~/.bun/bin/bun`), else `npm run dev`. `package-lock.json` is the only lockfile; `frontend/bun.lock` is git-ignored, so never commit one.
 
 ## Future Enhancements
 

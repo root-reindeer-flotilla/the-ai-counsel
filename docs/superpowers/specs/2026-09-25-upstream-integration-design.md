@@ -8,7 +8,7 @@ The repository owner confirmed these before execution started. They override any
 
 1. **Branch.** Work happens on `integrate/ai-counsel` and is pushed there. Commit `399e044` (this spec and its plan, from `claude/laughing-cori-wxbb2c`) is cherry-picked onto it first. The branch head before the cherry-pick was `a56aa0f` ("chore: stop ignoring uv.lock"), one commit past the brief's `1de4bfb`.
 2. **Minimum council size is 1**, following upstream. Task 11 rewrites the fork's minimum-2 test without further confirmation (D8).
-3. **Council maximum is 12 everywhere** (D8). **npm only:** `frontend/bun.lock` and the bun launcher in `start.sh` are dropped (D9).
+3. **Council maximum is 12 everywhere** (D8). **npm only:** `frontend/bun.lock` and the bun launcher in `start.sh` are dropped (D9). *Revised 2026-09-26 by the owner:* "npm only" means npm's lockfile, not dropping Bun. `start.sh` runs the frontend with Bun when it is installed and falls back to npm; `package-lock.json` stays the only lockfile and `frontend/bun.lock` is git-ignored.
 4. **Verification split.** All automated tests, lint and build run in the execution session. The manual UI checks (success criterion 5, which need real API keys and an existing `data/`) are done by the owner locally, from a checklist delivered before the PR merges.
 5. **Execution method:** subagent-driven development (one implementer subagent per task, then a spec-compliance review and a code-quality review).
 6. **Backup ref.** A durable backup of the branch head just before the Step A merge (`09395e0`) exists on `origin` before the first merge. The session's git proxy rejects tag pushes (HTTP 403), so the backup is the branch `backup/pre-integration-2026-09-25` at `09395e0`, created through the GitHub API. The tag `pre-integration-2026-09-25` exists locally in the execution clone at the same commit, and the owner may push it later with `git push origin 09395e0c31e7ca024779fc25b67f1eab60e1f0b3:refs/tags/pre-integration-2026-09-25`. The off-repo bundle is optional, because a cloud container is not durable.
@@ -60,7 +60,7 @@ The brief listed five features. Reading the fork's code and tests found three mo
 
 Other fork files: `test_storage_integrity.py`, `test_search_pure_functions.py`, `test_main_api_routes.py` (remaining cases), `modelHelpers.test.js`, `scripts/test_reasoning_all_models.py`, `docs/stage2-ordering-analysis.md`, `docs/HTTP2-HTTP3-Implementation-Report.md`. These carry over. Each test either passes against upstream code or gets adapted to upstream's current API, without losing what it checks.
 
-Fork files that are dropped: `frontend/bun.lock`, `.vscode/settings.json`, `GEMINI.md` (upstream removed it), the bun launcher in `start.sh` (it hardcodes `/home/patrick/.bun/bin/bun`), the `uv.lock` line in `.gitignore` (upstream tracks `uv.lock`), and `INTEGRATION_PLAN.md` (replaced by this spec and its plan).
+Fork files that are dropped: `frontend/bun.lock`, `.vscode/settings.json`, `GEMINI.md` (upstream removed it), the bun launcher in `start.sh` (it hardcodes `/home/patrick/.bun/bin/bun`; revised 2026-09-26: `start.sh` prefers Bun again, see decision 3), the `uv.lock` line in `.gitignore` (upstream tracks `uv.lock`), and `INTEGRATION_PLAN.md` (replaced by this spec and its plan).
 
 ## Approaches considered
 
@@ -159,7 +159,7 @@ The fork also required a **minimum** of 2 council models (`test_put_settings_inv
 
 ### D9. Tooling
 
-- **Package manager:** npm (upstream). `frontend/bun.lock` is deleted.
+- **Package manager:** npm (upstream). `frontend/bun.lock` is deleted and git-ignored. `start.sh` runs the dev server with Bun when it is installed (on `PATH` or at `~/.bun/bin/bun`), else with npm (decision 3, revised 2026-09-26).
 - **Frontend tests:** vitest is added (`"test": "vitest run"`, devDependency `vitest`) so the fork's `api.test.js`, `Stage2.test.js`, and `modelHelpers.test.js` run. Upstream's `fontSize.test.js` uses `node:test`. It keeps running with `node --test` and is excluded from vitest through `vitest.config.js` `test.exclude`.
 - **Python:** upstream `pyproject.toml`, plus the fork's `pytest-cov` dev dependency and `pythonpath = ["."]`, then `uv lock`. The fork tests use `@pytest.mark.anyio`, so `conftest.py` = upstream's fixtures + the fork's `anyio_backend` fixture.
 

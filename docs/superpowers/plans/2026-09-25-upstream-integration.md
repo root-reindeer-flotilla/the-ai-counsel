@@ -1467,6 +1467,9 @@ Found after the Step B merge (`$SCRATCH/stepB-fork-failures.txt`). These fork te
 Not changed: Stop on a polled run with no `run_id` (an upstream stream or debate after a reload) only stops polling, as upstream does, because the UI cannot cancel it; after a 409 the unsent turn stays on screen with the Reconnect button while the question goes back into the box (the owner's requirement; Reconnect reloads the saved conversation); `api.getRun` and `/progress`'s `event_count` stay as API for clients; `resume()` checks `/progress` itself so a finished run clears the loading state, which upstream's `checkForActiveRun` does not; `useForkRuns` is covered through its pure helpers in `utils/councilRuns.js`, since the frontend has no DOM test environment.
 
 
+**Bun in `start.sh` (2026-09-26, owner).** The owner clarified that "npm only" meant npm's lockfile, not dropping Bun (spec decision 3, revised). `start.sh` runs the frontend with Bun when it is installed (on `PATH` or `~/.bun/bin/bun`) and falls back to `npm run dev --`, as a marked fork hook; `frontend/bun.lock` is git-ignored so `package-lock.json` stays the only lockfile. Checked by running the launch lines on a spare port with Bun and with Bun absent (npm on Node 22): the dev server came up both ways.
+
+
 ---
 
 ### Task 13: Docs sync and cleanup

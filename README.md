@@ -511,6 +511,7 @@ This fork adds the following on top of The AI Counsel v0.13.1. Design and decisi
 | F7 | OpenRouter generation stats | `GET /api/openrouter/generation?id=…` returns OpenRouter's usage and cost record for a generation. |
 | F8 | OpenRouter reasoning and slug handling | Resolves model IDs to OpenRouter's canonical slug and turns on reasoning (high effort for Gemini 3). |
 | F9 | Council cap of 12 | Up to 12 council members in the backend, the MCP tools and the setup grid (upstream: 8). |
+| — | Bun for the dev server | `./start.sh` runs the frontend with [Bun](https://bun.sh) when it is installed, else npm. `package-lock.json` is the only lockfile; don't commit a `bun.lock`. |
 
 ### Resumable runs in the UI
 
@@ -537,6 +538,7 @@ On conflicts, keep upstream's code and re-apply the fork's small hooks. The fron
 - `backend/council.py`: the Stage 2 ordering and aggregation.
 - `backend/providers/temperature.py` and `backend/openrouter.py`.
 - `backend/settings.py`: `MAX_COUNCIL_MEMBERS = 12`.
+- `start.sh`: the fork's Bun-or-npm frontend launch (`# Fork`).
 - `the_ai_counsel_mcp/tools/council.py`: its own copy of `MAX_COUNCIL_MEMBERS`.
 - `frontend/package-lock.json` and `uv.lock`: take upstream's version, then run `npm install --prefix frontend` and `uv lock`.
 - `README.md`, `AGENTS.md`, `CHANGELOG.md`.
