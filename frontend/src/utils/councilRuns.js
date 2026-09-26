@@ -59,6 +59,24 @@ export function classifySendError({
   return 'remove-optimistic';
 }
 
+/**
+ * True while the conversation a send was made from is on screen. A first send
+ * from the draft gets its real id before the screen shows it, so `'draft'`
+ * counts, but only for the send that started on the draft.
+ */
+export function isSendOnScreen({ conversationId, currentId, startedOnDraft = false }) {
+  return currentId === conversationId || (currentId === 'draft' && startedOnDraft);
+}
+
+/**
+ * A turn followed through /progress polling, after Stop: stopped and idle,
+ * and no longer `externalRun`, so a poll answer already in flight cannot
+ * bring its spinners back.
+ */
+export function markPolledTurnStopped(msg, idleLoading) {
+  return { ...msg, externalRun: false, runId: null, aborted: true, loading: idleLoading };
+}
+
 /** The message for an `interrupted` send: a 404 means the run is gone. */
 export function interruptedRunMessage(error) {
   return error?.status === 404 ? RUN_GONE_MESSAGE : RUN_STREAM_LOST_MESSAGE;

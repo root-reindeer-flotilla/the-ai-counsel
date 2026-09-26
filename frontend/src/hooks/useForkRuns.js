@@ -23,6 +23,8 @@ import { api } from '../api';
 import {
   classifySendError,
   interruptedRunMessage,
+  isSendOnScreen,
+  markPolledTurnStopped,
   patchRunTurn,
   polledRunId,
   readStoredConversationId,
@@ -66,7 +68,7 @@ export function useForkRuns({
   app,
 }) {
   const currentIdRef = useRef(currentConversationId);
-  const liveRunRef = useRef(null); // { conversationId, runId, stopRequested }
+  const liveRunRef = useRef(null); // { conversationId, runId, stopRequested, startedOnDraft }
   const selectionRestoredRef = useRef(false);
   const [restoredInput, setRestoredInput] = useState(null);
 
@@ -101,7 +103,9 @@ export function useForkRuns({
   const streamRun = async (conversationId, options, onEvent, signal) => {
     // Stop pressed while a draft conversation was being created.
     if (signal?.aborted) throw abortError();
-    const live = { conversationId, runId: null, stopRequested: false };
+    // A first send from the draft: the screen may still show 'draft' for it.
+    const startedOnDraft = currentIdRef.current === 'draft';
+    const live = { conversationId, runId: null, stopRequested: false, startedOnDraft };
     liveRunRef.current = live;
     let runStarted = false;
     let serverCancelled = false;
@@ -124,7 +128,7 @@ export function useForkRuns({
       }, signal, 0);
       if (serverCancelled) throw abortError();
     } catch (error) {
-      error.forkRun = { runStarted, stopRequested: live.stopRequested, serverCancelled };
+      error.forkRun = { runStarted, stopRequested: live.stopRequested, serverCancelled, startedOnDraft };
       throw error;
     } finally {
       if (liveRunRef.current === live) liveRunRef.current = null;
@@ -136,44 +140,47 @@ export function useForkRuns({
    * is handled here; false leaves it to upstream (Stop, or nothing was sent).
    */
   const handleSendError = (error, { conversationId, content }) => {
+    const forkRun = error?.forkRun;
     const outcome = classifySendError({
       error,
-      ...(error?.forkRun || {}),
-      // While a draft becomes a real conversation the id on screen can still be 'draft'.
-      isCurrent: isCurrent(conversationId) || currentIdRef.current === 'draft',
+      ...(forkRun || {}),
+      isCurrent: isSendOnScreen({
+        conversationId,
+        currentId: currentIdRef.current,
+        // Debate sends (no forkRun) keep the draft rule they had.
+        startedOnDraft: forkRun ? forkRun.startedOnDraft : true,
+      }),
     });
     if (outcome === 'detach') return true;
     if (outcome === 'conflict') {
-      setCurrentConversation((prev) => patchRunTurn(prev, conversationId, (msg) => ({
-        ...msg,
-        error: RUN_CONFLICT_MESSAGE,
-        resumable: true,
-        loading: idleLoading,
-        timers: finalizeTimers(msg.timers),
-      })));
+      markResumable(conversationId, RUN_CONFLICT_MESSAGE);
       setRestoredInput({ text: content });
-      setIsLoading(false);
       return true;
     }
     if (outcome === 'interrupted') {
       console.error('Lost the council run stream:', error);
-      setCurrentConversation((prev) => patchRunTurn(prev, conversationId, (msg) => ({
-        ...msg,
-        error: interruptedRunMessage(error),
-        resumable: true,
-        loading: idleLoading,
-        timers: finalizeTimers(msg.timers),
-      })));
-      setIsLoading(false);
+      markResumable(conversationId, interruptedRunMessage(error));
       return true;
     }
     return false;
   };
 
+  /** End the in-flight turn with `message` and a Reconnect button. */
+  const markResumable = (conversationId, message) => {
+    setCurrentConversation((prev) => patchRunTurn(prev, conversationId, (msg) => ({
+      ...msg,
+      error: message,
+      resumable: true,
+      loading: idleLoading,
+      timers: finalizeTimers(msg.timers),
+    })));
+    setIsLoading(false);
+  };
+
   /** Stop: cancel this conversation's council run on the server. */
   const stop = (conversationId, conversation) => {
     const live = liveRunRef.current;
-    if (live && (live.conversationId === conversationId || conversationId === 'draft')) {
+    if (live && isSendOnScreen({ conversationId: live.conversationId, currentId: conversationId, startedOnDraft: live.startedOnDraft })) {
       // Upstream then aborts the stream; handleSendError sees stopRequested.
       live.stopRequested = true;
       if (live.runId) api.cancelRun(live.runId).catch(logCancelError);
@@ -182,12 +189,7 @@ export function useForkRuns({
     // A run re-attached through /progress polling (after a reload or reopening).
     const runId = polledRunId(conversation, conversationId);
     if (!runId) return;
-    setCurrentConversation((prev) => patchRunTurn(prev, conversationId, (msg) => ({
-      ...msg,
-      runId: null,
-      aborted: true,
-      loading: idleLoading,
-    })));
+    setCurrentConversation((prev) => patchRunTurn(prev, conversationId, (msg) => markPolledTurnStopped(msg, idleLoading)));
     setIsLoading(false);
     api.cancelRun(runId).catch(logCancelError);
   };

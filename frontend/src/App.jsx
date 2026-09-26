@@ -620,7 +620,7 @@ function App() {
       // Remove from local state
       setConversations(conversations.filter(c => c.id !== id));
       // If we deleted the current conversation, clear it
-      if (id === currentConversationId) {
+      if (forkRuns.isCurrent(id)) { // fork: the ref, since the awaits above can outlast a switch
         setCurrentConversationId(null);
         setCurrentConversation(null);
       }

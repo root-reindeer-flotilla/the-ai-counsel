@@ -92,6 +92,39 @@ describe('streamRun', () => {
     expect(error.code).toBe('RUN_STREAM_DROPPED');
   });
 
+  it('reads an event split across chunks and a last event with no trailing newline', async () => {
+    const chunks = ['data: {"type":"stage1_st', 'art"}\n', 'data: {"type":"complete"}'];
+    const body = new ReadableStream({
+      start(controller) {
+        const enc = new TextEncoder();
+        chunks.forEach((c) => controller.enqueue(enc.encode(c)));
+        controller.close();
+      },
+    });
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(body, { status: 200 })));
+    const seen = [];
+    await createForkApi(BASE).streamRun('r1', (type) => seen.push(type), undefined, 0);
+    expect(seen).toEqual(['stage1_start', 'complete']);
+  });
+
+  it('rejects with AbortError when the signal aborts mid-stream', async () => {
+    const controller = new AbortController();
+    let streamController;
+    const body = new ReadableStream({
+      start(c) {
+        streamController = c;
+        c.enqueue(new TextEncoder().encode('data: {"type":"stage1_start"}\n'));
+      },
+    });
+    // Like fetch: aborting the signal errors the response body.
+    controller.signal.addEventListener('abort', () => streamController.error(new DOMException('Aborted', 'AbortError')));
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(body, { status: 200 })));
+    const error = await createForkApi(BASE)
+      .streamRun('r1', () => controller.abort(), controller.signal, 0)
+      .catch((e) => e);
+    expect(error.name).toBe('AbortError');
+  });
+
   it('rejects an unknown run with its status', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => jsonResponse({ detail: 'Run not found' }, 404)));
     const error = await createForkApi(BASE).streamRun('nope', () => {}).catch((e) => e);

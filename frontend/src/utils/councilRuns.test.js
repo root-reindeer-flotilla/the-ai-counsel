@@ -5,6 +5,8 @@ import {
   classifySendError,
   interruptedRunMessage,
   isRunTurn,
+  isSendOnScreen,
+  markPolledTurnStopped,
   patchRunTurn,
   polledRunId,
   readStoredConversationId,
@@ -147,5 +149,28 @@ describe('advisorConflictMessage', () => {
   it('explains a 409 and leaves other errors to upstream', () => {
     expect(advisorConflictMessage(Object.assign(new Error('x'), { status: 409 }))).toMatch(/still running or finishing/);
     expect(advisorConflictMessage(new Error('x'))).toBe(null);
+  });
+});
+
+describe('isSendOnScreen', () => {
+  it('is on screen while its conversation is shown', () => {
+    expect(isSendOnScreen({ conversationId: 'a', currentId: 'a' })).toBe(true);
+    expect(isSendOnScreen({ conversationId: 'a', currentId: 'b' })).toBe(false);
+  });
+
+  it("counts the draft only for the send that started on it (the first send's id is not committed yet)", () => {
+    expect(isSendOnScreen({ conversationId: 'new', currentId: 'draft', startedOnDraft: true })).toBe(true);
+    // A send from A, then New Conversation: the new draft is not A.
+    expect(isSendOnScreen({ conversationId: 'a', currentId: 'draft', startedOnDraft: false })).toBe(false);
+  });
+});
+
+describe('markPolledTurnStopped', () => {
+  it('marks the turn stopped and idle, and takes it off /progress polling', () => {
+    const idle = { stage1: false };
+    const msg = { role: 'assistant', externalRun: true, runId: 'r1', loading: { stage1: true } };
+    expect(markPolledTurnStopped(msg, idle)).toEqual({
+      role: 'assistant', externalRun: false, runId: null, aborted: true, loading: idle,
+    });
   });
 });

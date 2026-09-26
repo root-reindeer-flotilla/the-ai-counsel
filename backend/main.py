@@ -777,7 +777,9 @@ async def get_conversation_progress(conversation_id: str):
         "stage3": run.get("stage3_response"),
         "stage4": run.get("stage4_response"),
     }
-    # Fork: a background run (/runs) can be re-attached with streamRun(run_id, from_event).
+    # Fork: a background run (/runs) reports its id so the UI's Stop can cancel it while
+    # following the run through this polling (spec decision 11). event_count is for API
+    # clients that re-attach with GET /api/runs/{run_id}/stream?from_event=N.
     if run.get("run_id"):
         response["run_id"] = run["run_id"]
         response["event_count"] = run.get("event_count", 0)
