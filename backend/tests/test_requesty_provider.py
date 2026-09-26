@@ -2,10 +2,12 @@
 
 import json
 
+import httpx
 import pytest
+import respx
 from fastapi.testclient import TestClient
 
-from backend import council, costs, main
+from backend import council, costs, main, requesty
 from backend import settings as settings_mod
 from backend.credentials import file_backend, ids, relay_import, store, upgrade
 from backend.providers.requesty import RequestyProvider
@@ -227,12 +229,6 @@ def test_test_requesty_falls_back_to_stored_key(cred_file, monkeypatch):
 
 
 # --- Review follow-up: request payload, errors, key test, costs -------------
-
-import httpx
-import respx
-
-from backend import requesty
-
 
 def _ok_reply():
     return httpx.Response(200, json={"choices": [{"message": {"content": "hi"}}], "usage": {}})

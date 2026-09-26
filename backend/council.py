@@ -36,7 +36,7 @@ from .providers.google import GoogleProvider
 from .providers.mistral import MistralProvider
 from .providers.deepseek import DeepSeekProvider
 from .providers.openrouter import OpenRouterProvider
-from .providers.requesty import RequestyProvider
+from .providers.requesty import RequestyProvider  # noqa: E402  (fork: kept with upstream's provider imports)
 from .providers.ollama import OllamaProvider
 from .providers.groq import GroqProvider
 from .providers.custom_openai import CustomOpenAIProvider
