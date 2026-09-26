@@ -69,7 +69,7 @@ Run council deliberation. Creates a conversation automatically unless `conversat
 | `query` | string | Yes | User question |
 | `web_search` | boolean | No | Enrich query with web search (default `false`) |
 | `conversation_id` | string | No | Continue an existing thread |
-| `models` | string[] | No | Override council members for `full` only (1–8 model IDs) |
+| `models` | string[] | No | Override council members for `full` only (1–12 model IDs) |
 | `documents` | object[] | No | Optional extracted-text or base64 document inputs |
 
 **Example:** Full deliberation with search
@@ -97,6 +97,8 @@ Run council deliberation. Creates a conversation automatically unless `conversat
 Errors return `{"status": "error", "message": "..."}`.
 
 Stage-only actions also include `cost_report`. Individual result rows include `usage` and `cost` when the backend provider returned usage.
+
+Each `stage2.rankings` row has `ranking_text` (the evaluator's raw text), `parsed_ranking` and `stage2_label_map`. Evaluators see the responses in different orders, so `ranking_text` uses that evaluator's own labels: decode it with its `stage2_label_map`. `parsed_ranking` is already in the labels of `label_to_model`.
 
 ---
 
@@ -222,7 +224,7 @@ Manage council configuration and presets.
 | Parameter | Type | Actions | Description |
 |-----------|------|---------|-------------|
 | `action` | string | All | See actions below |
-| `models` | string[] | `update` | 1–8 council member model IDs |
+| `models` | string[] | `update` | 1–12 council member model IDs |
 | `chairman` | string | `update` | Chairman model ID |
 | `council_temperature` | float | `update` | Stage 1 heat |
 | `chairman_temperature` | float | `update` | Stage 3 heat |
@@ -347,6 +349,8 @@ If settings fetch fails while backend is up: includes `"settings_error": "..."`.
 | `"llm"` | Chairman model reformulates the query (skipped for DuckDuckGo) |
 
 **`set_api_key` valid providers:** `openrouter`, `openai`, `anthropic`, `google`, `mistral`, `deepseek`, `groq`, `nvidia`, `opencode` (alias for `opencode-zen` / `opencode-go` — both products share the single `opencode_api_key` field), `tinyfish`, `tavily`, `brave`, `serper`.
+
+**Requesty (fork):** `requesty:` model IDs work in every council and debate tool, and `council_settings` → `update` accepts `enabled_providers.requesty`. `providers` does not cover Requesty: `set_api_key` and `test` do not accept it, and `list_models` does not list its models. Use REST instead: `PUT /api/settings` with `requesty_api_key`, `POST /api/settings/test-requesty`, `GET /api/models/requesty`.
 
 **OpenCode test:** `test` with provider `opencode-zen` or `opencode-go` validates the product. For testing both products against a single key, use REST `POST /api/settings/test-opencode` (no equivalent single-call MCP shortcut).
 

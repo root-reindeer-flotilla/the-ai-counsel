@@ -31,6 +31,7 @@ _catalog_cache: Optional[Dict[str, Any]] = None
 _catalog_failure_until = 0.0
 _SUPPORTED_PROVIDER_PREFIXES = {
     "openrouter",
+    "requesty",
     "ollama",
     "openai",
     "openai-oauth",
@@ -48,6 +49,13 @@ _SUPPORTED_PROVIDER_PREFIXES = {
 }
 _SUBSCRIPTION_OAUTH_PROVIDERS = {"xai-oauth", "openai-oauth", "github-copilot"}
 _OPENCODE_PROVIDERS = {"opencode-zen", "opencode-go"}
+
+# Providers whose catalog match is only an upstream-model estimate.
+_ESTIMATE_ONLY_PROVIDERS = {"custom", "requesty"}
+_ESTIMATE_NOTES = {
+    "custom": ["Custom endpoint cost is an upstream model estimate unless the endpoint is known-free."],
+    "requesty": ["Requesty cost is an upstream model estimate; Requesty's own pricing may differ."],
+}
 
 # OpenCode Zen / Go published per-1M-token prices. Keys are the native model id
 # (the suffix after the provider prefix). OpenCode Go is subscription-based;
@@ -345,6 +353,9 @@ def _catalog_platform(provider: str, native_id: str) -> Optional[str]:
         # A custom endpoint can expose upstream model IDs. Use those only as a
         # low-confidence estimate unless the endpoint itself is known-free.
         return None
+    if provider == "requesty":
+        # Router over upstream model IDs: estimate from any platform's price.
+        return None
     return provider or None
 
 
@@ -440,7 +451,7 @@ def _resolve_ai_model_pricing(
             "source_quality": entry.get("source_quality") or "catalog",
             "matched_model": model.get("model_id"),
             "matched_platform": entry.get("platform"),
-            "confidence": "medium" if provider == "custom" else "high",
+            "confidence": "medium" if provider in _ESTIMATE_ONLY_PROVIDERS else "high",
         }
     return None
 
@@ -497,7 +508,7 @@ def _resolve_litellm_pricing(
             "source_quality": "catalog",
             "matched_model": key,
             "matched_platform": item.get("litellm_provider"),
-            "confidence": "medium" if provider == "custom" else "high",
+            "confidence": "medium" if provider in _ESTIMATE_ONLY_PROVIDERS else "high",
         }
     return None
 
@@ -693,6 +704,10 @@ async def estimate_call_cost(model_id: str, usage: Dict[str, Any]) -> Dict[str, 
     )
 
     is_zero = input_price == 0 and output_price == 0 and (cached_price in (None, 0))
+    # Requesty prices are matched across hosts (azure/, bedrock/, ...), so a
+    # zero-priced match is not proof the call was free.
+    if provider == "requesty":
+        is_zero = False
     return {
         **base,
         "input_cost": _round_money(input_cost + cached_cost),
@@ -706,7 +721,7 @@ async def estimate_call_cost(model_id: str, usage: Dict[str, Any]) -> Dict[str, 
         "pricing_confidence": pricing.get("confidence", "unknown"),
         "cost_status": "free" if is_zero else "estimated",
         "is_estimate": not is_zero,
-        "notes": [] if provider != "custom" else ["Custom endpoint cost is an upstream model estimate unless the endpoint is known-free."],
+        "notes": _ESTIMATE_NOTES.get(provider, []),
     }
 
 

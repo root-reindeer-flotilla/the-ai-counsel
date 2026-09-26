@@ -14,6 +14,8 @@ import Stage4, { Stage4Skeleton } from './Stage4';
 import RoundNavigator from './RoundNavigator';
 import CostReport from './CostReport';
 import DocumentUpload from './DocumentUpload';
+import ReconnectRunButton from './ReconnectRunButton'; // fork: resumable council runs
+import { useRestoredInput } from '../hooks/useForkRuns';
 import './ChatInterface.css';
 
 function hasStage1Results(msg) {
@@ -106,6 +108,8 @@ export default function ChatInterface({
     conversation,
     onSendMessage,
     onAbort,
+    onResumeRun,
+    restoredInput,
     isLoading,
     councilConfigured,
     providersConfigured = true,
@@ -126,6 +130,7 @@ export default function ChatInterface({
     convergenceThreshold = 2,
 }) {
     const [input, setInput] = useState('');
+    useRestoredInput(restoredInput, setInput); // fork: a 409 puts the unsent question back
     const [activeSearchProvider, setActiveSearchProvider] = useState(null);
     const [searchPopoverOpen, setSearchPopoverOpen] = useState(false);
     const [documentPayload, setDocumentPayload] = useState({ documents: [], attachments: [], warnings: [] });
@@ -347,6 +352,7 @@ export default function ChatInterface({
                                         isLoading={isLoading}
                                         stage2AnchorRef={stage2AnchorRef}
                                         stage3AnchorRef={stage3AnchorRef}
+                                        onResumeRun={index === conversation.messages.length - 1 ? onResumeRun : null}
                                     />
                                 )}
                             </div>
@@ -479,6 +485,7 @@ function CouncilMessageRenderer({
     isLoading,
     stage2AnchorRef,
     stage3AnchorRef,
+    onResumeRun,
 }) {
     const [selectedRound, setSelectedRound] = useState(null);
 
@@ -522,6 +529,7 @@ function CouncilMessageRenderer({
                 <div className="council-error">
                     <span className="council-error-icon">⚠️</span>
                     <span className="council-error-text">{msg.error}</span>
+                    {msg.resumable && onResumeRun && !isLoading && <ReconnectRunButton onReconnect={onResumeRun} />}
                 </div>
             )}
 
@@ -614,6 +622,7 @@ function CouncilMessageRenderer({
                     <Stage2
                         rankings={displayStage2}
                         labelToModel={displayMetadata.label_to_model}
+                        stage2LabelMapsByEvaluator={displayMetadata.stage2_label_maps_by_evaluator}
                         aggregateRankings={displayMetadata.aggregate_rankings}
                         canonicalClaims={displayMetadata.canonical_claims}
                         aggregateClaimVerdicts={displayMetadata.aggregate_claim_verdicts}

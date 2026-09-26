@@ -9,6 +9,8 @@ import openrouterLogo from '../assets/icons/openrouter.svg';
 import nvidiaLogo from '../assets/icons/nvidia.svg';
 import customLogo from '../assets/icons/openai-compatible.svg';
 import opencodeLogo from '../assets/icons/opencode.svg';
+import requestyLogo from '../assets/icons/requesty.svg';
+import { MAX_COUNCIL_MEMBERS } from '../constants/council';
 
 export const PROVIDER_CONFIG = {
   openai: { color: '#10a37f', label: 'OpenAI', logo: openaiLogo },
@@ -20,6 +22,7 @@ export const PROVIDER_CONFIG = {
   deepseek: { color: '#4e61e6', label: 'DeepSeek', logo: deepseekLogo },
   nvidia: { color: '#76b900', label: 'NVIDIA', logo: nvidiaLogo },
   openrouter: { color: '#7f5af0', label: 'OpenRouter', logo: openrouterLogo },
+  requesty: { color: '#6d5dfc', label: 'Requesty', logo: requestyLogo },
   custom: { color: '#06b6d4', label: 'Custom', logo: customLogo },
   'opencode-zen': { color: '#211E1E', label: 'OpenCode Zen', logo: opencodeLogo },
   'opencode-go': { color: '#211E1E', label: 'OpenCode Go', logo: opencodeLogo },
@@ -30,6 +33,7 @@ export const PROVIDER_CONFIG = {
 };
 
 const PROVIDER_PREFIXES = [
+  ['requesty:', 'requesty'],
   ['github-copilot:', 'github-copilot'],
   ['openai-oauth:', 'openai-oauth'],
   ['xai-oauth:', 'xai-oauth'],
@@ -50,6 +54,8 @@ export function getProviderInfo(modelId) {
   if (!modelId) return PROVIDER_CONFIG.default;
   const id = modelId.toLowerCase();
 
+  // Fork: Requesty ids embed an OpenRouter-style path (requesty:openai/gpt-4o).
+  if (id.startsWith('requesty:')) return PROVIDER_CONFIG.requesty;
   if (id.startsWith('openrouter:') || id.includes('openrouter')) return PROVIDER_CONFIG.openrouter;
 
   for (const [prefix, key] of PROVIDER_PREFIXES) {
@@ -99,23 +105,23 @@ export function getCouncilLayoutClass(lineupCount, showChairman = true) {
   if (lineupCount === 5) return 'layout-5-members';
   if (lineupCount === 6) return 'layout-6-members';
   if (lineupCount === 7) return 'layout-7-members';
-  return 'layout-8-members';
+  // Fork: 9–12 member layouts (CouncilGrid.css), up to MAX_COUNCIL_MEMBERS.
+  return `layout-${Math.min(Math.max(lineupCount, 8), MAX_COUNCIL_MEMBERS)}-members`;
 }
 
 export const LINEUP_COLS = 4;
-const LINEUP_ROWS = 2;
+// Fork: rows for up to MAX_COUNCIL_MEMBERS (12 → 3 rows of 4).
+const LINEUP_ROWS = Math.ceil(MAX_COUNCIL_MEMBERS / LINEUP_COLS);
 export const LINEUP_SLOTS = LINEUP_COLS * LINEUP_ROWS;
 
 /**
  * + Add starts top-right, moves left as members fill row 1.
- * When row 1 is full, + Add jumps to bottom-right (next to chairman) and moves left on row 2.
+ * When a row is full, + Add jumps to the right end of the next row and moves left.
  */
 export function getAddSlot(memberCount) {
-  if (memberCount >= 8) return null;
-  if (memberCount < LINEUP_COLS) {
-    return LINEUP_COLS - 1 - memberCount;
-  }
-  return LINEUP_SLOTS - 1 - (memberCount - LINEUP_COLS);
+  if (memberCount >= MAX_COUNCIL_MEMBERS) return null;
+  const row = Math.floor(memberCount / LINEUP_COLS);
+  return row * LINEUP_COLS + (LINEUP_COLS - 1 - (memberCount % LINEUP_COLS));
 }
 
 /** Slot for member at index (members array is newest-first / prepended). */
@@ -124,13 +130,16 @@ export function getMemberSlot(memberIndex, memberCount) {
     return LINEUP_COLS - 1 - memberIndex;
   }
 
-  const row2Count = memberCount - LINEUP_COLS;
+  // Fork: the newest members fill the last (possibly partial) row right to
+  // left; older members fill the full rows above it in order.
+  const lastRow = Math.floor((memberCount - 1) / LINEUP_COLS);
+  const lastRowCount = memberCount - lastRow * LINEUP_COLS;
 
-  if (memberIndex < row2Count) {
-    return LINEUP_SLOTS - 1 - memberIndex;
+  if (memberIndex < lastRowCount) {
+    return (lastRow + 1) * LINEUP_COLS - 1 - memberIndex;
   }
 
-  return memberIndex - row2Count;
+  return memberIndex - lastRowCount;
 }
 
 /** Draft picker opens in the current + Add slot. */

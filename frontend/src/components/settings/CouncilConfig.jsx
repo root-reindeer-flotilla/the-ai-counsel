@@ -49,6 +49,7 @@ export default function CouncilConfig({
     const isSourceConfigured = (source) => {
         switch (source) {
             case 'openrouter': return !!settings?.openrouter_api_key_set;
+            case 'requesty': return !!settings?.requesty_api_key_set; // fork
             case 'ollama': return ollamaStatus?.connected;
             case 'groq': return !!settings?.groq_api_key_set;
             case 'custom': return !!(settings?.custom_endpoint_url);
@@ -154,6 +155,7 @@ export default function CouncilConfig({
                                             ...prev,
                                             direct: isEnabled,
                                             openrouter: isEnabled ? prev.openrouter : false,
+                                            requesty: isEnabled ? prev.requesty : false,
                                             groq: isEnabled ? prev.groq : false,
                                             custom: isEnabled ? prev.custom : false,
                                         }));
@@ -203,6 +205,35 @@ export default function CouncilConfig({
                                 <span className="toggle-text" style={{ fontSize: 'calc(13px * var(--font-scale))' }}>
                                     OpenRouter
                                     {!isSourceConfigured('openrouter') && (
+                                        <span className="toggle-hint"> · not configured</span>
+                                    )}
+                                </span>
+                            </label>
+
+                            {/* Fork: Requesty aggregator (same rules as OpenRouter) */}
+                            <label
+                                className={`toggle-wrapper ${!isSourceConfigured('requesty') ? 'source-disabled' : ''}`}
+                                title={!isSourceConfigured('requesty') ? 'Not configured — add API key in LLM API Keys' : ''}
+                            >
+                                <div className="toggle-switch direct-toggle">
+                                    <input
+                                        type="checkbox"
+                                        checked={isSourceConfigured('requesty') && !!enabledProviders.requesty}
+                                        onChange={(e) => {
+                                            const on = e.target.checked;
+                                            setEnabledProviders(prev => ({
+                                                ...prev,
+                                                requesty: on,
+                                                ...(on && !prev.direct ? { direct: true } : {}),
+                                            }));
+                                        }}
+                                        disabled={!isSourceConfigured('requesty')}
+                                    />
+                                    <span className="slider"></span>
+                                </div>
+                                <span className="toggle-text" style={{ fontSize: 'calc(13px * var(--font-scale))' }}>
+                                    Requesty
+                                    {!isSourceConfigured('requesty') && (
                                         <span className="toggle-hint"> · not configured</span>
                                     )}
                                 </span>

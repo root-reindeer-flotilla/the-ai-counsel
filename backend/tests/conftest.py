@@ -152,6 +152,7 @@ class _FakeSettings:
         self.mistral_api_key = None
         self.deepseek_api_key = None
         self.nvidia_api_key = None
+        self.requesty_api_key = None
         self.opencode_api_key = None
 
 
@@ -168,3 +169,9 @@ def fake_settings(monkeypatch):
     stub = _FakeSettings()
     monkeypatch.setattr(settings_module, "get_settings", lambda: stub)
     return stub
+
+
+@pytest.fixture
+def anyio_backend():
+    """Fork tests use @pytest.mark.anyio; run them on asyncio only."""
+    return "asyncio"

@@ -2,6 +2,7 @@ import React from 'react';
 import { createPortal } from 'react-dom';
 import { getProviderInfo, getModelDisplayName, getCouncilLayoutClass, PROVIDER_CONFIG } from '../utils/councilGridUtils';
 import './CouncilGrid.css';
+import './CouncilGrid.fork.css'; // fork: 9–12 member layouts
 
 export default function CouncilGrid({
     models = [],

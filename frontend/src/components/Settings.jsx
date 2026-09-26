@@ -10,6 +10,7 @@ import GeneralSettings, { RESPONSE_LANGUAGE_DEFAULT } from './settings/GeneralSe
 import { RESPONSE_LANGUAGES_FALLBACK } from '../constants/responseLanguages';
 import { normalizeFontSize } from '../utils/fontSize';
 import { countStoredCredentials, filterOAuthModels, OAUTH_PROVIDERS } from '../constants/oauthProviders';
+import { useRequestySettings } from '../hooks/useRequestySettings'; // fork
 import './Settings.css';
 
 const PROMPT_FIELDS = [
@@ -45,6 +46,7 @@ const hasAnyDirectKey = (data) => !!(
 /** Council toggles cannot be ON for providers that have no credentials. */
 const normalizeEnabledProviders = (enabledProviders, data, ollamaConnected) => ({
   openrouter: !!enabledProviders?.openrouter && !!data?.openrouter_api_key_set,
+  requesty: enabledProviders?.requesty === true && !!data?.requesty_api_key_set, // fork: off unless saved on
   ollama: !!enabledProviders?.ollama && !!ollamaConnected,
   groq: !!enabledProviders?.groq && !!data?.groq_api_key_set,
   direct: !!enabledProviders?.direct && hasAnyDirectKey(data),
@@ -154,6 +156,7 @@ export default function Settings({ onClose, ollamaStatus, onRefreshOllama, initi
   // Enabled Providers (which sources are available)
   const [enabledProviders, setEnabledProviders] = useState({
     openrouter: true,
+    requesty: false, // fork
     ollama: false,
     groq: false,
     direct: false,
@@ -199,6 +202,10 @@ export default function Settings({ onClose, ollamaStatus, onRefreshOllama, initi
   const [error, setError] = useState(null);
   const [success, setSuccess] = useState(false);
   const [successMessage, setSuccessMessage] = useState(null);
+  const requesty = useRequestySettings({ // fork: Requesty key, Test, Disconnect, models
+    settings, enabledProviders, setEnabledProviders, setSuccess,
+    panel: () => ({ loadSettings, handleDisconnectProviderKey }),
+  });
   const [validationErrors, setValidationErrors] = useState({});
 
   
@@ -338,6 +345,7 @@ export default function Settings({ onClose, ollamaStatus, onRefreshOllama, initi
 
   // Helper to determine if filters need to switch based on availability
   const isRemoteAvailable = enabledProviders.openrouter
+    || enabledProviders.requesty
     || enabledProviders.direct
     || enabledProviders.groq
     || enabledProviders.custom
@@ -546,6 +554,7 @@ export default function Settings({ onClose, ollamaStatus, onRefreshOllama, initi
       if (data.opencode_api_key_set) {
         loadOpencodeModels();
       }
+      requesty.loadModels(data); // fork
 
     } catch (err) {
       console.error("Error loading settings:", err);
@@ -1081,6 +1090,7 @@ export default function Settings({ onClose, ollamaStatus, onRefreshOllama, initi
       setShowDisconnectAllConfirm(false);
       setKeyValidationStatus({});
       setOpenrouterTestResult(null);
+      requesty.reset(); // fork
       setGroqTestResult(null);
       setOpencodeTestResult(null);
       setTavilyTestResult(null);
@@ -1126,6 +1136,7 @@ export default function Settings({ onClose, ollamaStatus, onRefreshOllama, initi
       // 1. Disable all providers
       setEnabledProviders({
         openrouter: false,
+        requesty: false,
         ollama: false,
         groq: false,
         direct: false,
@@ -1185,6 +1196,7 @@ export default function Settings({ onClose, ollamaStatus, onRefreshOllama, initi
         full_content_results: 3,
         enabled_providers: {
           openrouter: false,
+          requesty: false,
           ollama: false,
           groq: false,
           direct: false,
@@ -1551,6 +1563,7 @@ export default function Settings({ onClose, ollamaStatus, onRefreshOllama, initi
       // Clear stale Retest errors from before import (keys were in store, not settings.json).
       setKeyValidationStatus({});
       setOpenrouterTestResult(null);
+      requesty.reset(); // fork
       setGroqTestResult(null);
       setOpencodeTestResult(null);
       setTavilyTestResult(null);
@@ -1637,6 +1650,8 @@ export default function Settings({ onClose, ollamaStatus, onRefreshOllama, initi
       models.push(...availableModels);
     }
 
+    if (enabledProviders.requesty) models.push(...requesty.models); // fork
+
     // Add Ollama models if enabled
     if (enabledProviders.ollama) {
       models.push(...ollamaAvailableModels.map(m => ({
@@ -1688,6 +1703,7 @@ export default function Settings({ onClose, ollamaStatus, onRefreshOllama, initi
   }, [
     enabledProviders,
     availableModels,
+    requesty.models,
     ollamaAvailableModels,
     directAvailableModels,
     customEndpointModels,
@@ -1826,6 +1842,7 @@ export default function Settings({ onClose, ollamaStatus, onRefreshOllama, initi
                 handleTestOpenRouter={handleTestOpenRouter}
                 isTestingOpenRouter={isTestingOpenRouter}
                 openrouterTestResult={openrouterTestResult}
+                {...requesty.providerProps} // fork
                 // Groq
                 groqApiKey={groqApiKey}
                 setGroqApiKey={(val) => { setGroqApiKey(val); setGroqTestResult(null); }}
@@ -2071,7 +2088,7 @@ export default function Settings({ onClose, ollamaStatus, onRefreshOllama, initi
               {successMessage
                 || (activeSection === 'general' && relayImportMessage?.tone === 'success'
                   ? relayImportMessage.text
-                  : activeSection === 'llm_keys' && !settings?.openrouter_api_key_set && !ollamaStatus?.connected
+                  : activeSection === 'llm_keys' && !settings?.openrouter_api_key_set && !settings?.requesty_api_key_set && !ollamaStatus?.connected
                     ? 'Defaults loaded. Please configure an API Key.'
                     : 'Settings saved!')}
             </div>

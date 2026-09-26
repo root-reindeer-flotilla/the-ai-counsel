@@ -33,6 +33,7 @@ from .settings import (
     DEFAULT_CHAIRMAN_MODEL,
     PROMPT_DEFAULTS,
     VALID_FONT_SIZES,
+    MAX_COUNCIL_MEMBERS,
 )
 from .settings_payload import apply_admin_import, build_admin_export, build_settings_response
 from .credentials import (
@@ -67,6 +68,7 @@ from .documents import (
     to_attachment_metadata,
     validate_documents_for_request,
 )
+from .runs import RunManager, build_chat_history
 
 logger = logging.getLogger(__name__)
 
@@ -549,24 +551,8 @@ async def _fetch_search_context(
 
 def _build_chat_history(conversation: Dict[str, Any]) -> List[Dict[str, str]]:
     """Extract prior turns from a conversation into [{role, content}, ...] for multi-turn context."""
-    history = []
-    for msg in conversation.get("messages", []):
-        if msg["role"] == "user":
-            history.append({"role": "user", "content": msg["content"]})
-        elif msg["role"] == "assistant":
-            # Prefer chairman synthesis (stage3), fall back to first stage1 response
-            content = None
-            if msg.get("stage3") and msg["stage3"].get("response"):
-                content = msg["stage3"]["response"]
-            elif msg.get("stage1") and len(msg["stage1"]) > 0:
-                first_success = next(
-                    (r for r in msg["stage1"] if not r.get("error")),
-                    msg["stage1"][0]
-                )
-                content = first_success.get("response", "")
-            if content:
-                history.append({"role": "assistant", "content": content})
-    return history
+    # Fork: shared with RunManager, and strips thinking blocks from prior answers.
+    return build_chat_history(conversation)
 
 
 def _build_council_preflight_models(body: SendMessageRequest) -> List[str]:
@@ -777,7 +763,7 @@ async def get_conversation_progress(conversation_id: str):
         }
     s1 = run.get("stage1_responses") or []
     s2 = run.get("stage2_responses") or []
-    return {
+    response = {
         "active": True,
         "mode": "council",
         "stage": run["stage"],
@@ -791,6 +777,126 @@ async def get_conversation_progress(conversation_id: str):
         "stage3": run.get("stage3_response"),
         "stage4": run.get("stage4_response"),
     }
+    # Fork: a background run (/runs) reports its id so the UI's Stop can cancel it while
+    # following the run through this polling (spec decision 11). event_count is for API
+    # clients that re-attach with GET /api/runs/{run_id}/stream?from_event=N.
+    if run.get("run_id"):
+        response["run_id"] = run["run_id"]
+        response["event_count"] = run.get("event_count", 0)
+    return response
+
+
+# --- Fork: resumable runs (backend/runs.py) ---------------------------------
+
+import re  # noqa: E402  (fork imports stay in the fork block)
+
+from starlette.middleware import Middleware  # noqa: E402
+from starlette.responses import JSONResponse  # noqa: E402
+
+# Background runs report progress into _active_runs and search through upstream's helper.
+RUN_MANAGER = RunManager(progress=_active_runs, fetch_search_context=_fetch_search_context)
+
+# Upstream POSTs that register _active_runs or save a turn for one conversation.
+# While a /runs run is live they would overwrite its progress entry and save
+# through a stale conversation, deleting the run's answer, so they get a 409.
+# Add any new upstream per-conversation turn route here.
+_RUN_GUARDED_ROUTES = re.compile(
+    r"^/api/conversations/(?P<conversation_id>[^/]+)/(?:message|message/stream|message/debate|debate/stream)$"
+)
+
+
+class _RefuseTurnsDuringRun:
+    """Pure ASGI middleware, so upstream's streaming routes pass through untouched."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "http" and scope["method"] == "POST":
+            match = _RUN_GUARDED_ROUTES.match(scope["path"])
+            if match and await RUN_MANAGER.get_active_run_for_conversation(match["conversation_id"]):
+                response = JSONResponse({"detail": "Conversation already has an active run"}, status_code=409)
+                await response(scope, receive, send)
+                return
+        await self.app(scope, receive, send)
+
+
+# Appended, not add_middleware(): that would put it outside CORSMiddleware, and the
+# browser could not read a 409 without CORS headers.
+app.user_middleware.append(Middleware(_RefuseTurnsDuringRun))
+
+
+@app.post("/api/conversations/{conversation_id}/runs")
+async def start_conversation_run(conversation_id: str, body: SendMessageRequest):
+    """Start a background deliberation run and return its snapshot."""
+    try:
+        run = await RUN_MANAGER.start_run(
+            conversation_id=conversation_id,
+            content=body.content,
+            web_search=body.web_search,
+            execution_mode=body.execution_mode,
+            search_provider=body.search_provider,
+            council_models=body.council_models,
+            chairman_model=body.chairman_model,
+            documents=body.documents,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    return await RUN_MANAGER.snapshot(run)
+
+
+@app.get("/api/conversations/{conversation_id}/runs/active")
+async def get_active_conversation_run(conversation_id: str):
+    """Get the active run for a conversation, or {"active_run": null}."""
+    conversation = storage.get_conversation(conversation_id)
+    if conversation is None:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    run = await RUN_MANAGER.get_active_run_for_conversation(conversation_id)
+    if run is None:
+        return {"active_run": None}
+    return {"active_run": await RUN_MANAGER.snapshot(run)}
+
+
+@app.get("/api/runs/{run_id}")
+async def get_run(run_id: str):
+    """Get a run snapshot."""
+    run = await RUN_MANAGER.get_run(run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="Run not found")
+    return await RUN_MANAGER.snapshot(run)
+
+
+@app.get("/api/runs/{run_id}/stream")
+async def stream_run(run_id: str, from_event: int = 0):
+    """Stream events for a run (supports reconnect/replay)."""
+    run = await RUN_MANAGER.get_run(run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="Run not found")
+    return StreamingResponse(
+        RUN_MANAGER.stream_events(run_id, from_event=from_event),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+        },
+    )
+
+
+@app.post("/api/runs/{run_id}/cancel")
+async def cancel_run(run_id: str):
+    """Force-stop a running deliberation."""
+    run = await RUN_MANAGER.cancel_run(run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="Run not found")
+    return {"run_id": run.run_id, "status": run.status}
+
+
+# --- End fork: resumable runs -----------------------------------------------
 
 
 @app.post("/api/conversations/{conversation_id}/message/stream")
@@ -1719,6 +1825,7 @@ class UpdateSettingsRequest(BaseModel):
     brave_api_key: Optional[str] = None
     tinyfish_api_key: Optional[str] = None
     openrouter_api_key: Optional[str] = None
+    requesty_api_key: Optional[str] = None
     openai_api_key: Optional[str] = None
     anthropic_api_key: Optional[str] = None
     google_api_key: Optional[str] = None
@@ -1957,6 +2064,8 @@ async def update_app_settings(request: UpdateSettingsRequest):
 
     if request.openrouter_api_key is not None:
         updates["openrouter_api_key"] = request.openrouter_api_key
+    if request.requesty_api_key is not None:
+        updates["requesty_api_key"] = request.requesty_api_key
         
     # Direct Provider Keys
     if request.openai_api_key is not None:
@@ -1985,10 +2094,10 @@ async def update_app_settings(request: UpdateSettingsRequest):
 
     # Council Configuration (unified)
     if request.council_models is not None:
-        if len(request.council_models) > 8:
+        if len(request.council_models) > MAX_COUNCIL_MEMBERS:
             raise HTTPException(
                 status_code=400,
-                detail="Maximum of 8 council models allowed"
+                detail=f"Maximum of {MAX_COUNCIL_MEMBERS} council models allowed"
             )
         updates["council_models"] = request.council_models
 
@@ -2180,8 +2289,8 @@ async def get_direct_models():
     
     # Iterate over all providers
     for provider_id, provider in PROVIDERS.items():
-        # Skip OpenRouter and Ollama as they are handled separately
-        if provider_id in ["openrouter", "ollama", "hybrid"]:
+        # Skip OpenRouter, Requesty, and Ollama as they are handled separately
+        if provider_id in ["openrouter", "requesty", "ollama", "hybrid"]:
             continue
             
         try:
@@ -2342,6 +2451,11 @@ async def test_tinyfish_api(request: TestTinyfishRequest):
 
 class TestOpenRouterRequest(BaseModel):
     """Request to test OpenRouter API key."""
+    api_key: Optional[str] = None
+
+
+class TestRequestyRequest(BaseModel):
+    """Request to test Requesty API key."""
     api_key: Optional[str] = None
 
 
@@ -2558,6 +2672,17 @@ async def get_openrouter_models():
         return {"models": [], "error": str(e)}
 
 
+@app.get("/api/openrouter/generation")
+async def get_openrouter_generation(id: str):
+    """Fetch OpenRouter generation usage/cost metadata by generation ID."""
+    from . import openrouter as openrouter_client
+
+    result = await openrouter_client.fetch_generation(id)
+    if result.get("error"):
+        return {"success": False, "error": result.get("error_message", "Unknown error")}
+    return {"success": True, "data": result.get("data")}
+
+
 @app.post("/api/settings/test-openrouter")
 async def test_openrouter_api(request: TestOpenRouterRequest):
     """Test OpenRouter API key with a simple request."""
@@ -2590,6 +2715,23 @@ async def test_openrouter_api(request: TestOpenRouterRequest):
         return {"success": False, "message": "Request timed out"}
     except Exception as e:
         return {"success": False, "message": str(e)}
+
+
+@app.get("/api/models/requesty")
+async def get_requesty_models():
+    """Fetch available models from Requesty API (ids prefixed `requesty:`)."""
+    return {"models": await PROVIDERS["requesty"].get_models()}
+
+
+@app.post("/api/settings/test-requesty")
+async def test_requesty_api(request: TestRequestyRequest):
+    """Test Requesty API key; falls back to the saved key when none is given."""
+    from .config import get_requesty_api_key
+
+    api_key = request.api_key if request.api_key else get_requesty_api_key()
+    if not api_key:
+        return {"success": False, "message": "No API key provided or configured"}
+    return await PROVIDERS["requesty"].validate_key(api_key)
 
 
 # ---------- MCP server (mounted on same port as REST API) ----------

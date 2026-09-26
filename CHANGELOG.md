@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Requesty provider (fork):** `requesty:` model IDs, key in Settings → LLM API Keys (stored as `api:requesty`, env override `REQUESTY_API_KEY`), enable toggle in Council Config, `GET /api/models/requesty` and `POST /api/settings/test-requesty`.
+- **Resumable council runs (fork):** council turns run in the background on the server. Reloading or switching back re-attaches through `/progress`; Stop cancels the run on the server; deleting a conversation cancels its run. New routes `POST /api/conversations/{id}/runs`, `GET /api/conversations/{id}/runs/active`, `GET /api/runs/{run_id}`, `GET /api/runs/{run_id}/stream` and `POST /api/runs/{run_id}/cancel`. Runs are in memory and do not survive a backend restart.
+- **Balanced Stage 2 ordering (fork):** each evaluator sees the answers in its own cyclic order; each Stage 2 result carries its own `stage2_label_map`.
+- **Forced temperature 1.0 (fork)** for models that only work at 1.0.
+- **OpenRouter middle-out retry (fork):** a Stage 2 request that overflows the context window is retried once with `transforms: ["middle-out"]`.
+- **OpenRouter generation endpoint (fork):** `GET /api/openrouter/generation?id=…`.
+
+### Changed
+- Council cap raised from 8 to 12 members (backend, MCP tools and the lineup grid).
+- `start.sh` runs the frontend with Bun when it is installed, else npm (fork). `package-lock.json` stays the only lockfile; `frontend/bun.lock` is git-ignored.
+
 ## [0.13.1] - 2026-09-18
 
 ### Fixed

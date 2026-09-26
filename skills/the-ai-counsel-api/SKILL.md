@@ -145,10 +145,21 @@ Use this table **only when MCP tools are unavailable** or the operation has no M
 | Import settings (restore) | POST | `/api/settings/import` |
 | Reset settings to defaults | POST | `/api/settings/reset` |
 | Disconnect all providers (keys + OAuth) | POST | `/api/settings/disconnect-all-providers` |
+| List Requesty models (fork) | GET | `/api/models/requesty` |
+| Test Requesty key (fork) | POST | `/api/settings/test-requesty` |
+| OpenRouter generation stats (fork) | GET | `/api/openrouter/generation?id={generation_id}` |
+| Start a background run (fork) | POST | `/api/conversations/{id}/runs` |
+| Get a conversation's active run (fork) | GET | `/api/conversations/{id}/runs/active` |
+| Get a run snapshot (fork) | GET | `/api/runs/{run_id}` |
+| Stream / replay run events (fork) | GET | `/api/runs/{run_id}/stream?from_event=N` |
+| Cancel a run (fork) | POST | `/api/runs/{run_id}/cancel` |
+
+**Council size:** 1–12 council members (`MAX_COUNCIL_MEMBERS = 12`). `PUT /api/settings` with more than 12 `council_models` returns 400.
 
 **Model ID prefix format:**
 ```
 openrouter:anthropic/claude-sonnet-4   → Cloud via OpenRouter
+requesty:openai/gpt-4.1                → Cloud via Requesty (fork; `<host>/<model>`)
 ollama:llama3.1:latest                 → Local Ollama
 anthropic:claude-sonnet-4              → Direct Anthropic API
 openai:gpt-4.1                         → Direct OpenAI API
@@ -176,6 +187,8 @@ GET `/api/settings` exposes `*_oauth_connected` booleans, `credential_storage*` 
 **Disconnect API keys:** `PUT /api/settings` with an empty string for any `*_api_key` field clears that secret from the credential store and ignores a matching process env override (e.g. `OPENCODE_API_KEY`) until a new non-empty key is saved. Applies to OpenRouter, Groq, OpenCode, direct providers, custom endpoint, and search provider keys.
 
 **Disconnect all:** `POST /api/settings/disconnect-all-providers` — wipe credential store + OAuth, set `disabled_secret_ids` for all known secrets, disable all provider toggles. Returns `{status, cleared, message, ...settings}`.
+
+**Requesty (fork):** `requesty_api_key` in `PUT /api/settings`; `GET /api/settings` returns `requesty_api_key_set` and `enabled_providers.requesty` (default `false`). `GET /api/models/requesty` returns `{"models": [...]}` with `requesty:`-prefixed ids. `POST /api/settings/test-requesty` body `{"api_key": "..."}` (omit to test the saved key) returns `{"success", "message"}`.
 
 **OpenCode note (v0.8.0):** The OpenCode provider only exposes models that route to `/v1/chat/completions`. GPT Responses, Anthropic Messages, and per-model Gemini are not supported in v1 and are filtered out of `/v1/models`. A single shared `opencode_api_key` field covers both products; Go users can also use Zen's free models. Direct Go requests automatically carry the current Counsel conversation ID as `x-opencode-session` across all turns, stages, and retries, plus the identifying `the-ai-counsel/<version>` user agent; standalone provider calls generate one fallback session ID per logical query. Use `POST /api/settings/test-opencode` to validate both products at once.
 
@@ -648,6 +661,7 @@ curl -X PUT http://localhost:8001/api/settings \
 | DeepSeek | `deepseek_api_key` |
 | Groq | `groq_api_key` |
 | Nvidia | `nvidia_api_key` |
+| Requesty (fork) | `requesty_api_key` |
 | OpenCode (Zen + Go) | `opencode_api_key` |
 | TinyFish | `tinyfish_api_key` |
 | Tavily | `tavily_api_key` |
@@ -790,6 +804,63 @@ async def poll_progress(conv_id: str, base_url="http://localhost:8001"):
 - Frontend auto-reconnects to in-progress runs when navigating back to a conversation
 - MCP agents or scripts can monitor a deliberation started elsewhere
 - Dashboard / status views that show active council activity
+
+**Fork:** for a run started through `POST /api/conversations/{id}/runs`, the active response also carries `run_id` and `event_count`, so a client can cancel it (`POST /api/runs/{run_id}/cancel`) or replay its stream from `GET /api/runs/{run_id}/stream?from_event={event_count}`.
+
+---
+
+### 13c. Resumable Runs (fork)
+
+A council turn (`chat_only`, `chat_ranking`, `full`) can run as a background run on the server. It keeps going when the client disconnects. Runs are held **in memory**: they do not survive a backend restart. Debate keeps its own endpoints.
+
+| Route | Success | Errors |
+|-------|---------|--------|
+| `POST /api/conversations/{id}/runs` | run snapshot | 400 bad documents; 404 conversation not found; **409** `{"detail": "Conversation already has an active run"}` when a run, an upstream stream or an advisor debate is live on the conversation; **422** invalid `execution_mode` |
+| `GET /api/conversations/{id}/runs/active` | `{"active_run": <snapshot>}`, or **`200 {"active_run": null}`** when no run is live (including after a backend restart) | 404 only when the conversation does not exist |
+| `GET /api/runs/{run_id}` | run snapshot | 404 run not found |
+| `GET /api/runs/{run_id}/stream?from_event=0` | SSE (`text/event-stream`), replays events from index `from_event`, then follows live; `: ping` comments every 15 s | 404 run not found |
+| `POST /api/runs/{run_id}/cancel` | `{"run_id": "...", "status": "..."}` | 404 run not found |
+
+The `POST …/runs` body is the same as `/message/stream`: `content`, `web_search`, `execution_mode`, `search_provider`, `council_models`, `chairman_model`, `documents`.
+
+While a `/runs` run is live, `POST` to `/message`, `/message/stream`, `/message/debate` and `/debate/stream` of that conversation returns 409.
+
+**Snapshot shape:**
+```json
+{
+  "run_id": "...",
+  "conversation_id": "...",
+  "status": "queued | running | completed | cancelled | failed",
+  "content": "...",
+  "web_search": false,
+  "execution_mode": "full",
+  "stage1_results": [],
+  "stage2_results": [],
+  "stage3_result": null,
+  "metadata": {
+    "label_to_model": {}, "stage2_label_maps_by_evaluator": {}, "stage2_candidate_maps_by_evaluator": {},
+    "aggregate_rankings": [], "ranking_diagnostics": {}, "generation_time_ms": null, "generation_time_seconds": null,
+    "search_query": null, "search_context": null, "aborted": false, "error_message": null
+  },
+  "progress": {"stage1": {"count": 0, "total": 0}, "stage2": {"count": 0, "total": 0}},
+  "assistant_message_saved": false,
+  "event_count": 0
+}
+```
+
+Stream events use the council event types (see Key SSE Event Types) and end with `complete`, `cancelled` or `error`.
+
+```bash
+RUN=$(curl -s -X POST http://localhost:8001/api/conversations/$CONV_ID/runs \
+  -H "Content-Type: application/json" \
+  -d '{"content": "Compare Rust and Go", "execution_mode": "full"}' | python3 -c 'import sys,json; print(json.load(sys.stdin)["run_id"])')
+curl -N "http://localhost:8001/api/runs/$RUN/stream?from_event=0"
+curl -X POST http://localhost:8001/api/runs/$RUN/cancel
+```
+
+### 13d. OpenRouter Generation Stats (fork)
+
+`GET /api/openrouter/generation?id={generation_id}` returns OpenRouter's usage and cost record for one generation: `{"success": true, "data": {...}}`, or `{"success": false, "error": "..."}` (for example when no OpenRouter key is configured).
 
 ---
 

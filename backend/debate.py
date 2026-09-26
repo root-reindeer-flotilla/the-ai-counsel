@@ -643,6 +643,7 @@ async def run_iterative_debate(
                 user_query, stage1_results, search_context, request,
                 prompt_override=stage2_prompt_override,
                 conversation_id=conversation_id,
+                balanced_order=False,
             ):
                 if isinstance(item, dict) and not item.get("model"):
                     label_to_model = item

@@ -46,6 +46,7 @@ VALID_FONT_SIZES = ("default", "large")
 # Default enabled providers
 DEFAULT_ENABLED_PROVIDERS = {
     "openrouter": True,
+    "requesty": False,
     "ollama": False,
     "groq": False,
     "direct": False,  # Master toggle for all direct connections
@@ -126,6 +127,7 @@ class Settings(BaseModel):
     serper_api_key: Optional[str] = None
     tinyfish_api_key: Optional[str] = None
     openrouter_api_key: Optional[str] = None
+    requesty_api_key: Optional[str] = None
     openai_api_key: Optional[str] = None
     anthropic_api_key: Optional[str] = None
     google_api_key: Optional[str] = None
@@ -226,7 +228,7 @@ PROMPT_DEFAULTS = {
 
 MAX_ADVISOR_PRESETS = 20
 MAX_COUNCIL_PRESETS = 20
-MAX_COUNCIL_MEMBERS = 8
+MAX_COUNCIL_MEMBERS = 12
 
 
 def _clamp_advisor_rounds(value: Any, default: int = 3) -> int:

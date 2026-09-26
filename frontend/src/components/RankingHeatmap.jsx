@@ -1,4 +1,5 @@
 import { getShortModelName, getModelVisuals } from '../utils/modelHelpers';
+import { getRankedEntries } from '../utils/stage2Labels';
 import './RankingHeatmap.css';
 
 function ordinal(n) {
@@ -34,9 +35,8 @@ export default function RankingHeatmap({ rankings, labelToModel }) {
   const positions = {};
   for (const ranking of validRankings) {
     positions[ranking.model] = {};
-    const parsed = ranking.parsed_ranking || [];
-    parsed.forEach((label, idx) => {
-      const model = labelToModel[label];
+    // Fork: ranked models, whichever label space the saved result used.
+    getRankedEntries(ranking, labelToModel, { dropUnknown: false }).forEach(({ model }, idx) => {
       if (model) positions[ranking.model][model] = idx + 1;
     });
   }

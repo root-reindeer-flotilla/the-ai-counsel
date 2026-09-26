@@ -47,6 +47,7 @@ export function countStoredCredentials(settings) {
     'openrouter_api_key_set', 'openai_api_key_set', 'anthropic_api_key_set', 'google_api_key_set',
     'mistral_api_key_set', 'deepseek_api_key_set', 'groq_api_key_set', 'nvidia_api_key_set',
     'opencode_api_key_set', 'custom_endpoint_api_key_set',
+    'requesty_api_key_set', // fork
     'xai_oauth_connected', 'openai_oauth_connected', 'github_copilot_connected',
   ];
   return flags.filter((k) => settings[k]).length;
@@ -63,6 +64,7 @@ export function hasConfiguredProviders(settings, { ollamaConnected = false } = {
     'openrouter_api_key_set', 'openai_api_key_set', 'anthropic_api_key_set', 'google_api_key_set',
     'mistral_api_key_set', 'deepseek_api_key_set', 'groq_api_key_set', 'nvidia_api_key_set',
     'opencode_api_key_set', 'custom_endpoint_api_key_set',
+    'requesty_api_key_set', // fork
     'xai_oauth_connected', 'openai_oauth_connected', 'github_copilot_connected',
   ];
   return llmFlags.some((k) => settings[k]);

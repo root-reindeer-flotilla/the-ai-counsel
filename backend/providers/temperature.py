@@ -20,6 +20,7 @@ INTERNAL_PROVIDER_PREFIXES = {
     "opencode-go",
     "opencode-zen",
     "openrouter",
+    "requesty",
     "xai-oauth",
 }
 
@@ -67,7 +68,7 @@ def should_omit_temperature(model_id: str, provider: str) -> bool:
         return is_openai_fixed_temperature_model(model_id)
     if provider == "anthropic":
         return is_anthropic_temperature_deprecated_model(model_id)
-    if provider in {"custom", "openrouter"}:
+    if provider in {"custom", "openrouter", "requesty"}:
         return (
             is_openai_fixed_temperature_model(model_id)
             or is_anthropic_temperature_deprecated_model(model_id)
@@ -86,3 +87,32 @@ def add_temperature_if_supported(
     if not should_omit_temperature(model_id, provider):
         payload["temperature"] = temperature
     return payload
+
+
+# Models that only behave correctly at temperature 1.0 (matched on the model
+# part after any internal prefix and upstream provider slug).
+FORCED_TEMPERATURE_ONE_MODELS = frozenset({
+    "gemini-3-pro-preview",
+    "gemini-3-flash-preview",
+    "gemini-2.5-flash",
+    "grok-4.1-fast",
+    "glm-5",
+    "minimax-m2.5",
+})
+# Families where variants (":free", "-exp", ...) share the rule.
+FORCED_TEMPERATURE_ONE_PREFIXES = ("gpt-oss-120b", "gpt-oss-20b")
+
+
+def should_force_temperature_one(model_id: str) -> bool:
+    """True when the model must always run at temperature 1.0."""
+
+    _, model = split_upstream_model(model_id)
+    if not model:
+        return False
+    return model in FORCED_TEMPERATURE_ONE_MODELS or model.startswith(FORCED_TEMPERATURE_ONE_PREFIXES)
+
+
+def resolve_temperature(model_id: str, requested: float) -> float:
+    """Return the temperature to request for model_id."""
+
+    return 1.0 if should_force_temperature_one(model_id) else requested

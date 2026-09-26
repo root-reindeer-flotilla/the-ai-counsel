@@ -19,8 +19,8 @@ export default function SearchableModelSelect({
   const groupedOptions = models.reduce((acc, model) => {
     // Determine group label
     let groupLabel;
-    // Use source field if available, otherwise fallback to provider check
     const isOpenRouter = model.source === 'openrouter' || model.provider === 'OpenRouter';
+    const isRequesty = model.source === 'requesty' || model.provider === 'Requesty' || model.id?.startsWith('requesty:');
     const isOllama = model.id?.startsWith('ollama:') || model.provider === 'Ollama';
     const isXaiOAuth = model.id?.startsWith('xai-oauth:') || model.source === 'xai-oauth';
     const isOpenAiOAuth = model.id?.startsWith('openai-oauth:') || model.source === 'openai-oauth';
@@ -28,6 +28,8 @@ export default function SearchableModelSelect({
 
     if (isOpenRouter) {
       groupLabel = 'OpenRouter (Cloud)';
+    } else if (isRequesty) {
+      groupLabel = 'Requesty (Cloud)';
     } else if (isOllama) {
       groupLabel = 'Local (Ollama)';
     } else if (isXaiOAuth) {
@@ -57,6 +59,7 @@ export default function SearchableModelSelect({
     'Groq (Direct)',
     'xAI SuperGrok (Subscription)', 'ChatGPT Plus/Pro (Subscription)', 'GitHub Copilot (Subscription)',
     'OpenRouter (Cloud)',
+    'Requesty (Cloud)',
     'Local (Ollama)'
   ];
 

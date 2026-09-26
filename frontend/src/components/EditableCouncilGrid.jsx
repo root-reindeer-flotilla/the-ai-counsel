@@ -11,6 +11,7 @@ import {
   slotToGridStyle,
   PROVIDER_CONFIG,
 } from '../utils/councilGridUtils';
+import { MAX_COUNCIL_MEMBERS } from '../constants/council';
 import './CouncilGrid.css';
 import './EditableCouncilGrid.css';
 
@@ -150,7 +151,7 @@ export default function EditableCouncilGrid({
   members = [],
   chairman = '',
   showChairman = true,
-  maxMembers = 8,
+  maxMembers = MAX_COUNCIL_MEMBERS,
   models = [],
   modelsLoading = false,
   activeEditor = null,

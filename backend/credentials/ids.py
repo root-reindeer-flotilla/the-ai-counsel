@@ -5,6 +5,7 @@ from typing import Dict, List, Optional
 # All known credential store keys.
 KNOWN_SECRET_IDS: List[str] = [
     "api:openrouter",
+    "api:requesty",
     "api:openai",
     "api:anthropic",
     "api:google",
@@ -26,6 +27,7 @@ KNOWN_SECRET_IDS: List[str] = [
 # Settings model field → secret id (for upgrade / PUT routing).
 SETTINGS_FIELD_TO_SECRET_ID: Dict[str, str] = {
     "openrouter_api_key": "api:openrouter",
+    "requesty_api_key": "api:requesty",
     "openai_api_key": "api:openai",
     "anthropic_api_key": "api:anthropic",
     "google_api_key": "api:google",
@@ -46,6 +48,7 @@ SECRET_ID_TO_SETTINGS_FIELD: Dict[str, str] = {v: k for k, v in SETTINGS_FIELD_T
 # Env var overrides (highest precedence).
 ENV_OVERRIDES: Dict[str, str] = {
     "api:openrouter": "OPENROUTER_API_KEY",
+    "api:requesty": "REQUESTY_API_KEY",
     "api:openai": "OPENAI_API_KEY",
     "api:anthropic": "ANTHROPIC_API_KEY",
     "api:google": "GOOGLE_API_KEY",

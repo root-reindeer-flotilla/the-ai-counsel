@@ -17,7 +17,7 @@ The file store is **not** encrypted — anyone who can read the file can read th
 
 ## What is stored
 
-- LLM API keys (OpenRouter, Groq, OpenCode, OpenAI, Anthropic, Google, …)
+- LLM API keys (OpenRouter, Requesty, Groq, OpenCode, OpenAI, Anthropic, Google, …)
 - Search provider keys (Tavily, Brave, Serper, TinyFish)
 - Custom endpoint API key
 - Subscription OAuth blobs (xAI SuperGrok, ChatGPT Plus/Pro, GitHub Copilot)
@@ -43,6 +43,12 @@ Preference when resolving a key for Retest / providers:
 1. Not in `disabled_secret_ids`
 2. Value in credential store (file or OS keystore)
 3. Else matching env override (if any)
+
+Requesty (fork) follows the same rules: secret id `api:requesty`, env override `REQUESTY_API_KEY`.
+
+### Requesty key in older fork installs
+
+Older fork installs kept `requesty_api_key` as plaintext in `data/settings.json`. The migration is lazy: it runs on the first `GET /api/settings` (the UI does this on open), not at backend start. That load moves the key into the credential store as `api:requesty` and rewrites `settings.json` without it. Until then, a council run finds no Requesty key. A settings write that comes first (for example a `PUT /api/settings` before any `GET`) drops the plaintext key without migrating it, so open the UI (or `GET /api/settings`) once after upgrading, before any other settings change, and back up `data/settings.json` first.
 
 ## Import from relay-ai
 

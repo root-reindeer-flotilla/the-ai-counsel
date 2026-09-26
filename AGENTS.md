@@ -418,6 +418,21 @@ Before committing a version bump, run `uv run python scripts/check_version_consi
 
 **GitHub Releases:** For public version bumps, create an annotated `vX.Y.Z` tag and a GitHub Release from that tag. Release notes should come from the matching `CHANGELOG.md` section. See [`docs/RELEASE.md`](docs/RELEASE.md).
 
+## Fork additions
+
+This fork adds F1–F9 on top of The AI Counsel v0.13.1. Design and decisions: [`docs/superpowers/specs/2026-09-25-upstream-integration-design.md`](docs/superpowers/specs/2026-09-25-upstream-integration-design.md). Syncing with upstream (merge, never rebase; conflict spots): see README → Fork additions → Syncing with upstream.
+
+- **F1 Requesty provider:** `requesty:` model IDs (`backend/requesty.py`, `backend/providers/requesty.py`); key `api:requesty` / env `REQUESTY_API_KEY`; aggregator toggle `enabled_providers.requesty` (default off); `GET /api/models/requesty`, `POST /api/settings/test-requesty`. Frontend: `hooks/useRequestySettings.js`, `utils/requesty.js`.
+- **F2 Resumable runs:** `backend/runs.py` (`RunManager`, in memory) and the five run routes in `backend/main.py`'s fork block. Frontend: `forkApi.js`, `hooks/useForkRuns.js`, `utils/councilRuns.js`. A send streams live; reload or switching back re-attaches by polling `/progress` (which carries `run_id`); Stop cancels the run on the server; leaving a conversation only detaches; deleting a conversation cancels its run. Runs do not survive a backend restart. While a `/runs` run is live, `/message`, `/message/stream`, `/message/debate` and `/debate/stream` answer 409 for that conversation.
+- **F3 Balanced cyclic Stage 2 ordering:** `backend/council.py` (`_deterministic_cyclic_orders`, `stage2_collect_rankings(balanced_order=True)`, weighted `calculate_aggregate_rankings`). Each Stage 2 result carries its own `stage2_label_map`; `parsed_ranking` stays in global labels. Debate passes `balanced_order=False`. Frontend: `utils/stage2Labels.js`.
+- **F4 Forced temperature 1.0:** `backend/providers/temperature.py` (`should_force_temperature_one`, `resolve_temperature`), applied in `council.query_model`.
+- **F5 Thinking-content normalization:** `council.strip_thinking_tags`, `normalize_thinking_content`, `_prompt_safe_field`; Stage 2/3 prompts and chat history never carry thinking blocks.
+- **F6 OpenRouter context-overflow retry:** `openrouter.is_context_overflow_response`; Stage 2 retries once with `transforms=["middle-out"]` and records `stage2_transform_applied`, `stage2_retry_reason`, `stage2_middle_out_mode`.
+- **F7 OpenRouter generation stats:** `openrouter.fetch_generation`, `GET /api/openrouter/generation?id=…`.
+- **F8 OpenRouter reasoning/slug handling:** `_resolve_to_canonical_slug`, `_is_openrouter_gemini3_reasoning_target`, `_is_openrouter_deepseek_reasoning_target` in `backend/openrouter.py`.
+- **F9 Council cap of 12:** `MAX_COUNCIL_MEMBERS = 12` in `backend/settings.py`, with its own copy in `the_ai_counsel_mcp/tools/council.py`; the lineup grid in `utils/councilGridUtils.js` lays out 12 seats.
+- **Bun for the dev server:** `start.sh` runs the frontend with Bun when it is installed (on `PATH` or `~/.bun/bin/bun`), else `npm run dev`. `package-lock.json` is the only lockfile; `frontend/bun.lock` is git-ignored, so never commit one.
+
 ## Future Enhancements
 
 - Model performance analytics over time

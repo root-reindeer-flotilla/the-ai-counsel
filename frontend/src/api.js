@@ -2,6 +2,9 @@
  * API client for The AI Counsel backend.
  */
 
+import { createForkApi, responseError } from './forkApi'; // fork: Requesty and resumable runs
+export { parseSseDataChunk } from './forkApi'; // fork: api.test.js tests it here
+
 // Dynamically determine API base URL based on current hostname
 // This allows the app to work on both localhost and network IPs
 // In Vite dev, the backend port comes from PORT_BACKEND (see vite.config.js).
@@ -68,6 +71,8 @@ async function _consumeSSEStream(body, onEvent) {
 }
 
 export const api = {
+  ...createForkApi(API_BASE),
+
   /**
    * List all conversations.
    */
@@ -483,7 +488,7 @@ export const api = {
     );
 
     if (!response.ok) {
-      throw new Error('Failed to start debate stream');
+      throw await responseError(response, 'Failed to start debate stream');
     }
 
     await _consumeSSEStream(response.body, onEvent);
@@ -587,7 +592,7 @@ export const api = {
     );
 
     if (!response.ok) {
-      throw new Error('Failed to start debate stream');
+      throw await responseError(response, 'Failed to start debate stream');
     }
 
     await _consumeSSEStream(response.body, onEvent);

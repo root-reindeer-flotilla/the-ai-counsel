@@ -1,0 +1,17 @@
+/*
+ * Fork: read-only council grid for 9–12 members (MAX_COUNCIL_MEMBERS = 12).
+ *
+ * Upstream's CouncilGrid.css gives the chairman `grid-row: 1 / -1` for these
+ * layouts, but .council-grid has no explicit rows, so -1 is line 1 and the
+ * chairman takes only row 1; members then spill into column 5. Nine to twelve
+ * members fill three rows of four, so the chairman spans those three rows.
+ * `.chairman.chairman` outranks upstream's selector whatever order the CSS
+ * chunks load in; the mobile rule there uses !important and still stacks the
+ * cards.
+ */
+.council-grid.layout-9-members .council-card.chairman.chairman,
+.council-grid.layout-10-members .council-card.chairman.chairman,
+.council-grid.layout-11-members .council-card.chairman.chairman,
+.council-grid.layout-12-members .council-card.chairman.chairman {
+    grid-row: 1 / span 3;
+}

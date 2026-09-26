@@ -8,6 +8,9 @@ from typing import Any
 from ..client import CouncilClient
 from .. import presets as preset_ops
 
+# Keep in sync with backend.settings.MAX_COUNCIL_MEMBERS.
+MAX_COUNCIL_MEMBERS = 12
+
 
 def register(server, base_url: str) -> None:
     """Register council_settings tool."""
@@ -121,8 +124,8 @@ def register(server, base_url: str) -> None:
 
                 updates: dict[str, Any] = {}
                 if models is not None:
-                    if not (1 <= len(models) <= 8):
-                        return f"Error: council requires 1-8 models, got {len(models)}."
+                    if not (1 <= len(models) <= MAX_COUNCIL_MEMBERS):
+                        return f"Error: council requires 1-{MAX_COUNCIL_MEMBERS} models, got {len(models)}."
                     updates["council_models"] = models
                 if chairman is not None:
                     updates["chairman_model"] = chairman

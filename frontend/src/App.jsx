@@ -3,6 +3,7 @@ import Sidebar from './components/Sidebar';
 import { api, DEFAULT_EXECUTION_MODE, buildAvailableSearchProviders } from './api';
 import { hasConfiguredProviders } from './constants/oauthProviders';
 import { applyFontSize, normalizeFontSize } from './utils/fontSize';
+import { advisorConflictMessage, useForkRuns } from './hooks/useForkRuns'; // fork: resumable council runs
 import './App.css';
 import './components/StageCopyButtons.css';
 import './ModeToggle.css';
@@ -157,6 +158,12 @@ function App() {
   const isInitialMount = useRef(true);
   const conversationVersionRef = useRef(0);
   const skipLoadForIdRef = useRef(null);
+  // Fork: resumable council runs (hooks/useForkRuns.js).
+  const forkRuns = useForkRuns({
+    currentConversationId, setCurrentConversation, setCurrentConversationId, setAppMode, setIsLoading,
+    conversationVersionRef, idleLoading: IDLE_LOADING, finalizeTimers, getConversationMode,
+    app: () => ({ loadConversation, checkForActiveRun }),
+  });
 
   const computeCouncilConfigured = useCallback((models) => {
     const members = (models || []).filter((m) => m && m.trim());
@@ -409,6 +416,7 @@ function App() {
           return updated;
         })
       );
+      forkRuns.restoreSelection(convs); // fork: reopen this tab's conversation after a reload
     } catch (error) {
       console.error('Failed to load conversations:', error);
       // Retry up to 3 times with increasing delays (1s, 2s, 3s)
@@ -422,7 +430,7 @@ function App() {
     try {
       const conv = await api.getConversation(id);
       // Only apply if no newer optimistic update has occurred since we started
-      if (conversationVersionRef.current === expectedVersion) {
+      if (conversationVersionRef.current === expectedVersion && forkRuns.isCurrent(id)) { // fork: isCurrent
         const normalized = { ...conv, mode: getConversationMode(conv) };
         setCurrentConversation(normalized);
         setAppMode(getConversationMode(normalized));
@@ -483,10 +491,11 @@ function App() {
   };
 
   const checkForActiveRun = async (conversationId) => {
+    if (!forkRuns.isCurrent(conversationId)) return; // fork: never touch another conversation's polling
     stopProgressPolling();
     try {
       const progress = await api.getConversationProgress(conversationId);
-      if (!progress.active) return;
+      if (!progress.active || !forkRuns.isCurrent(conversationId)) return; // fork: isCurrent
 
       if (progress.mode === 'advisors') {
         applyAdvisorProgress(conversationId, progress);
@@ -511,6 +520,7 @@ function App() {
                 stage4: progress.stage4 || null,
               },
               externalRun: true,
+              runId: progress.run_id || null, // fork: Stop cancels a /runs run by id
             });
           }
           return { ...prev, mode: 'council', messages };
@@ -518,11 +528,13 @@ function App() {
       }
 
       let inFlight = false;
+      stopProgressPolling(); // fork: a second check (StrictMode) must not leak an interval
       progressPollRef.current = setInterval(async () => {
         if (inFlight) return;
         inFlight = true;
         try {
           const p = await api.getConversationProgress(conversationId);
+          if (!forkRuns.isCurrent(conversationId)) return; // fork: stale poll after a switch
           if (!p.active) {
             stopProgressPolling();
             setIsLoading(false);
@@ -582,6 +594,8 @@ function App() {
   };
 
   const handleSelectConversation = (id) => {
+    // Fork: re-selecting the open conversation keeps following its run.
+    if (id === currentConversationId && (progressPollRef.current || forkRuns.hasLiveRun(id))) return;
     stopProgressPolling();
     if (abortControllerRef.current) {
       abortControllerRef.current.abort();
@@ -600,11 +614,13 @@ function App() {
 
   const handleDeleteConversation = async (id) => {
     try {
+      if (id === currentConversationId) handleAbort(); // fork: deleting a conversation stops its run
+      await forkRuns.cancelBeforeDelete(id);
       await api.deleteConversation(id);
       // Remove from local state
       setConversations(conversations.filter(c => c.id !== id));
       // If we deleted the current conversation, clear it
-      if (id === currentConversationId) {
+      if (forkRuns.isCurrent(id)) { // fork: the ref, since the awaits above can outlast a switch
         setCurrentConversationId(null);
         setCurrentConversation(null);
       }
@@ -614,6 +630,7 @@ function App() {
   };
 
   const handleAbort = () => {
+    forkRuns.stop(currentConversationId, currentConversation); // fork: Stop cancels the council run
     stopProgressPolling();
     if (advisorAbortControllerRef.current) {
       advisorAbortControllerRef.current.abort();
@@ -872,7 +889,7 @@ function App() {
           messages[messages.length - 1] = {
             ...lastMsg,
             isRunning: false,
-            error: error.message || 'Failed to start debate. Please try again.',
+            error: advisorConflictMessage(error) || error.message || 'Failed to start debate. Please try again.',
           };
         }
         return { ...prev, messages };
@@ -991,7 +1008,7 @@ function App() {
 
       // Send message with streaming
       const isDebate = debateRounds > 1 || critiqueMode !== 'freeform';
-      const streamMethod = isDebate ? api.streamDebateMessage.bind(api) : api.sendMessageStream.bind(api);
+      const streamMethod = isDebate ? api.streamDebateMessage.bind(api) : forkRuns.streamRun; // fork: resumable runs
       const streamOptions = {
         content,
         searchProvider,
@@ -1542,6 +1559,7 @@ function App() {
           }
         }, abortControllerRef.current?.signal);
     } catch (error) {
+      if (forkRuns.handleSendError(error, { conversationId: activeConversationId, content })) return; // fork
       // Handle aborted requests - mark message as aborted
       if (error.name === 'AbortError') {
         console.log('Request aborted');
@@ -1663,6 +1681,8 @@ function App() {
                 conversation={currentConversation}
                 onSendMessage={handleSendMessage}
                 onAbort={handleAbort}
+                onResumeRun={forkRuns.resume}
+                restoredInput={forkRuns.restoredInput}
                 isLoading={isLoading}
                 councilConfigured={councilConfigured}
                 providersConfigured={providersConfigured}

@@ -10,6 +10,7 @@ import deepseekIcon from '../../assets/icons/deepseek.svg';
 import nvidiaIcon from '../../assets/icons/nvidia.svg';
 import customEndpointIcon from '../../assets/icons/openai-compatible.svg';
 import opencodeIcon from '../../assets/icons/opencode.svg';
+import requestyIcon from '../../assets/icons/requesty.svg';
 import SubscriptionOAuth from './SubscriptionOAuth';
 
 const PROVIDER_ICONS = {
@@ -43,6 +44,14 @@ export default function ProviderSettings({
     handleTestOpenRouter,
     isTestingOpenRouter,
     openrouterTestResult,
+    // Requesty
+    requestyApiKey,
+    setRequestyApiKey,
+    handleTestRequesty,
+    isTestingRequesty,
+    requestyTestResult,
+    requestyAvailableModels = [],
+    onDisconnectRequesty,
     // Groq
     groqApiKey,
     setGroqApiKey,
@@ -235,6 +244,53 @@ export default function ProviderSettings({
                 )}
                 <p className="api-key-hint">
                     Get key at <a href="https://openrouter.ai/keys" target="_blank" rel="noopener noreferrer">openrouter.ai</a>
+                </p>
+            </form>
+
+            {/* Requesty */}
+            <form className="api-key-section" onSubmit={e => e.preventDefault()}>
+                <label>
+                    <img src={requestyIcon} alt="" className="provider-icon" />
+                    Requesty API Key
+                </label>
+                <div className="api-key-input-row">
+                    <input
+                        type="password"
+                        placeholder={settings?.requesty_api_key_set ? '••••••••••••••••' : 'Enter API key'}
+                        value={requestyApiKey}
+                        onChange={(e) => setRequestyApiKey(e.target.value)}
+                        className={settings?.requesty_api_key_set && !requestyApiKey ? 'key-configured' : ''}
+                    />
+                    <button
+                        className="test-button"
+                        onClick={handleTestRequesty}
+                        disabled={(!requestyApiKey && !settings?.requesty_api_key_set) || isTestingRequesty}
+                    >
+                        {isTestingRequesty ? 'Testing...' : (settings?.requesty_api_key_set && !requestyApiKey ? 'Retest' : 'Test')}
+                    </button>
+                </div>
+                {settings?.requesty_api_key_set && !requestyApiKey && (
+                    <div className="key-status set key-status-row">
+                        <span>
+                            ✓ API key configured
+                            {requestyAvailableModels.length > 0 && ` · ${requestyAvailableModels.length} models available`}
+                        </span>
+                        <button
+                            type="button"
+                            className="test-button danger"
+                            onClick={onDisconnectRequesty}
+                        >
+                            Disconnect
+                        </button>
+                    </div>
+                )}
+                {requestyTestResult && (
+                    <div className={`test-result ${requestyTestResult.success ? 'success' : 'error'}`}>
+                        {requestyTestResult.message}
+                    </div>
+                )}
+                <p className="api-key-hint">
+                    Get key at <a href="https://app.requesty.ai" target="_blank" rel="noopener noreferrer">requesty.ai</a>
                 </p>
             </form>
 

@@ -25,6 +25,8 @@ backend/debug_*.py
 # Frontend
 node_modules/
 frontend/node_modules/
+# Fork: start.sh may run the frontend with Bun, but package-lock.json is the only lockfile.
+frontend/bun.lock
 frontend/dist/
 frontend/.vite/
 
@@ -45,7 +47,7 @@ docs/superpowers/
 .worktrees/
 .security-key
 logs/security/
+.coverage
 
 # Antigravity CLI config
 .antigravitycli/
-

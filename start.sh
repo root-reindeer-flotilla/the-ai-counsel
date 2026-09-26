@@ -44,7 +44,11 @@ sleep 2
 # Start frontend
 echo "Starting frontend on $FRONTEND_URL..."
 cd frontend
-npm run dev -- --host --port "$PORT_FRONTEND" &
+# Fork: run the frontend with Bun when it is installed, else npm. package-lock.json
+# stays the only lockfile; do not commit a bun.lock.
+BUN_BIN="$(command -v bun || { [ -x "$HOME/.bun/bin/bun" ] && echo "$HOME/.bun/bin/bun"; })"
+if [ -n "$BUN_BIN" ]; then FRONTEND_DEV=("$BUN_BIN" run dev); else FRONTEND_DEV=(npm run dev --); fi
+"${FRONTEND_DEV[@]}" --host --port "$PORT_FRONTEND" &
 FRONTEND_PID=$!
 
 # Wait for frontend to become ready, then open the default browser

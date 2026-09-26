@@ -84,6 +84,9 @@ def _build_stage2_result(conversation_id: str, stage2_data: list, metadata: dict
                 "model": model,
                 "ranking_text": item.get("ranking"),
                 "parsed_ranking": item.get("parsed_ranking", []),
+                # ranking_text uses this evaluator's own labels; parsed_ranking
+                # is already in label_to_model's (global) label space.
+                "stage2_label_map": item.get("stage2_label_map"),
                 "status": "success",
                 "usage": item.get("usage"),
                 "cost": item.get("cost"),
