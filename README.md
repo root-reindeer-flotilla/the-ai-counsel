@@ -1,8 +1,8 @@
 # The AI Counsel
 
-My version of AI Counsel that has some extra features I wanted.
+My (root-reindeer-flotilla) version of AI Counsel that has some extra features I wanted.
 
-> ☕ **If you find The AI Counsel useful, consider [buying me a coffee](https://buymeacoffee.com/jacobbd).**
+> ☕ **If you find The AI Counsel useful, consider [buying jacobbd a coffee](https://buymeacoffee.com/jacobbd).**
 > It's free and built in my spare time — but testing every provider runs up a real AI bill. A coffee helps me cover it and keep shipping. Thank you! 🙏
 >
 > <a href="https://buymeacoffee.com/jacobbd"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy Me A Coffee" height="42"></a>
