@@ -350,6 +350,8 @@ If settings fetch fails while backend is up: includes `"settings_error": "..."`.
 
 **`set_api_key` valid providers:** `openrouter`, `openai`, `anthropic`, `google`, `mistral`, `deepseek`, `groq`, `nvidia`, `opencode` (alias for `opencode-zen` / `opencode-go` — both products share the single `opencode_api_key` field), `tinyfish`, `tavily`, `brave`, `serper`.
 
+**Requesty (fork):** `requesty:` model IDs work in every council and debate tool, and `council_settings` → `update` accepts `enabled_providers.requesty`. `providers` does not cover Requesty: `set_api_key` and `test` do not accept it, and `list_models` does not list its models. Use REST instead: `PUT /api/settings` with `requesty_api_key`, `POST /api/settings/test-requesty`, `GET /api/models/requesty`.
+
 **OpenCode test:** `test` with provider `opencode-zen` or `opencode-go` validates the product. For testing both products against a single key, use REST `POST /api/settings/test-opencode` (no equivalent single-call MCP shortcut).
 
 ---

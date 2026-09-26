@@ -496,6 +496,64 @@ Full details: [`docs/CREDENTIALS.md`](docs/CREDENTIALS.md).
 
 ---
 
+## Fork additions
+
+This fork adds the following on top of The AI Counsel v0.13.1. Design and decisions: [`docs/superpowers/specs/2026-09-25-upstream-integration-design.md`](docs/superpowers/specs/2026-09-25-upstream-integration-design.md).
+
+| # | Feature | What it does |
+|---|---------|--------------|
+| F1 | Requesty provider | `requesty:` model IDs through [Requesty](https://requesty.ai). Key in Settings → LLM API Keys (stored as `api:requesty`, env override `REQUESTY_API_KEY`); enable toggle in Council Config. |
+| F2 | Resumable runs | Council turns run as server-side background runs (`backend/runs.py`) that keep going when the page is reloaded or closed. |
+| F3 | Balanced Stage 2 ordering | Each evaluator sees the Stage 1 answers in its own cyclic order, so position bias is spread evenly; the UI de-anonymizes each evaluator with its own label map. Debate keeps one shared order. |
+| F4 | Forced temperature 1.0 | Models that only work at temperature 1.0 always get it (`backend/providers/temperature.py`). |
+| F5 | Thinking-content normalization | `<think>` and `<thinking>` blocks and reasoning fields are stripped from the text that goes into Stage 2 and Stage 3 prompts and into chat history. |
+| F6 | OpenRouter context-overflow retry | A Stage 2 request that fails with a context-length error on OpenRouter is retried once with `transforms: ["middle-out"]`. |
+| F7 | OpenRouter generation stats | `GET /api/openrouter/generation?id=…` returns OpenRouter's usage and cost record for a generation. |
+| F8 | OpenRouter reasoning and slug handling | Resolves model IDs to OpenRouter's canonical slug and turns on reasoning (high effort for Gemini 3). |
+| F9 | Council cap of 12 | Up to 12 council members in the backend, the MCP tools and the setup grid (upstream: 8). |
+
+### Resumable runs in the UI
+
+- A send streams the run live.
+- Reloading the page or switching back to the conversation re-attaches by polling `GET /api/conversations/{id}/progress`.
+- **Stop** cancels the run on the server.
+- Leaving a conversation only detaches; the run keeps going.
+- Deleting a conversation cancels its run.
+- Runs are kept in memory, so they do not survive a backend restart. After a restart the conversation keeps the user message and the UI leaves the loading state.
+
+### Syncing with upstream
+
+Upstream is [jacob-bd/the-ai-counsel](https://github.com/jacob-bd/the-ai-counsel). Merge it; never rebase.
+
+```bash
+git remote add upstream https://github.com/jacob-bd/the-ai-counsel.git   # once
+git fetch upstream && git merge upstream/main
+```
+
+On conflicts, keep upstream's code and re-apply the fork's small hooks. The frontend hooks are marked `// fork` and the backend fork block `# Fork`; the other backend spots are unmarked, so check them with `git diff upstream/main -- <file>`. The usual spots:
+
+- `frontend/src/App.jsx`, `frontend/src/components/Settings.jsx`, `frontend/src/components/Stage2.jsx`, `frontend/src/api.js`: one-line fork hooks. The fork code itself lives in `frontend/src/forkApi.js`, `frontend/src/hooks/useForkRuns.js`, `frontend/src/hooks/useRequestySettings.js` and `frontend/src/utils/`.
+- `backend/main.py`: the fork block (`# --- Fork: resumable runs`).
+- `backend/council.py`: the Stage 2 ordering and aggregation.
+- `backend/providers/temperature.py` and `backend/openrouter.py`.
+- `backend/settings.py`: `MAX_COUNCIL_MEMBERS = 12`.
+- `the_ai_counsel_mcp/tools/council.py`: its own copy of `MAX_COUNCIL_MEMBERS`.
+- `frontend/package-lock.json` and `uv.lock`: take upstream's version, then run `npm install --prefix frontend` and `uv lock`.
+- `README.md`, `AGENTS.md`, `CHANGELOG.md`.
+
+After the merge, run the checks:
+
+```bash
+uv sync && uv run pytest backend/tests the_ai_counsel_mcp/tests -q
+uv run ruff check backend the_ai_counsel_mcp   # upstream itself has ruff errors; expect no new ones in fork code
+npm ci --prefix frontend && npm test --prefix frontend && node --test frontend/src/utils/fontSize.test.js
+npm run lint --prefix frontend && npm run build --prefix frontend
+```
+
+> **Warning:** do not use GitHub's **Sync fork** button on `main`. It cannot resolve conflicts: when upstream's changes conflict with the fork's, its only offer is to discard the fork's commits. Merge locally instead.
+
+---
+
 ## Credits & Acknowledgements
 
 This project builds upon the original **[llm-council](https://github.com/karpathy/llm-council)** by **[Andrej Karpathy](https://github.com/karpathy)**.
