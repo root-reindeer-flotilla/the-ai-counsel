@@ -1,0 +1,10 @@
+# Extends gitleaks' default rules. Used by the pre-commit hook and by manual scans.
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Known false positives"
+regexes = [
+  '''^tf-key-abc123$''',           # fake key in MCP test fixtures
+  '''^advisor_round\d+_prompt$''', # settings key names in PromptSettings.jsx
+]
